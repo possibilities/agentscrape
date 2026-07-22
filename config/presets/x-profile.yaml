@@ -1,0 +1,9 @@
+name: x-profile
+summary: "User profile page with bio, follower counts, and pinned tweet"
+domain: x.com
+aliases: [twitter.com]
+mode: content
+url_patterns:
+  - '^https?://(?:www\.)?(?:x\.com|twitter\.com)/\w+/?(?:\?.*)?$'
+handler: x.scrape_profile
+schema: XProfile

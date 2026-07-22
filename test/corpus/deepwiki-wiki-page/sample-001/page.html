@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<body>
+<nav id="codebase-wiki-nav">
+  <a href="/acme/widget/1-overview">Overview</a>
+  <a href="/acme/widget/2-configuration">Configuration</a>
+</nav>
+<div id="codebase-wiki-repo-page">
+  <div class="wiki-page-toolbar"><button>Edit</button><a href="#">Copy link</a></div>
+  <div data-testid="wiki-repo-breadcrumb">acme/widget</div>
+  <h1 data-testid="wiki-page-title">Configuration Loading</h1>
+  <article data-testid="wiki-page-content">
+    <p>The loader reads <code>config.yaml</code> before falling back to defaults.<sup><a href="#cite-1">1</a></sup></p>
+    <h2>Example</h2>
+    <pre><code class="language-python"><span class="tok-kw">def</span> <span class="tok-fn">load_config</span>(path):
+    <span class="tok-kw">return</span> yaml.safe_load(open(path))
+</code></pre>
+    <p>See the <a href="/acme/widget/2-configuration">configuration reference</a> for every key, and the schema module.<sup><a href="#cite-2">2</a></sup></p>
+  </article>
+  <aside data-testid="wiki-page-citations">
+    <ol>
+      <li id="cite-1"><a href="https://github.com/acme/widget/blob/main/src/config.py#L10-L18">src/config.py:10-18</a></li>
+      <li id="cite-2"><a href="/acme/widget/blob/main/src/schema.py#L1-L4">src/schema.py:1-4</a></li>
+    </ol>
+  </aside>
+</div>
+</body>
+</html>

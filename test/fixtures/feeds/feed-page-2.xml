@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Paged feed</title>
+  <entry>
+    <id>page-two-item</id>
+    <link rel="alternate" href="https://paged.example.com/posts/two" />
+    <published>2026-07-05T10:00:00Z</published>
+  </entry>
+</feed>

@@ -1,0 +1,8 @@
+name: deepwiki-wiki-page
+summary: "DeepWiki repository wiki page: scoped article title/content/citations"
+domain: deepwiki.com
+mode: content
+url_patterns:
+  - 'https?://(www\.)?deepwiki\.com/(?!search/)[\w.-]+/[\w.-]+'
+handler: deepwiki.scrape_wiki_page
+schema: DeepWikiWikiPage

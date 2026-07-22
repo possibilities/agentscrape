@@ -1,0 +1,43 @@
+version: 1
+preset: deepwiki-search-conversation
+mode: content
+url: https://deepwiki.com/search/how-do-i-load-config_abc123
+expect: success
+structured:
+  url: https://deepwiki.com/search/how-do-i-load-config_abc123
+  repository: acme/widget
+  rounds:
+  - question: How do I load custom config on startup?
+    answer: 'Call `load_config` before the server starts.
+
+
+      ```python
+
+      load_config("config.yaml")
+
+      ```'
+    citations:
+    - label: src/config.py:10-18
+      target_url: https://github.com/acme/widget/blob/main/src/config.py#L10-L18
+      repo_path: src/config.py
+      line_start: 10
+      line_end: 18
+  - question: Where is the schema validated?
+    answer: Validation happens in the schema module right after loading.
+    citations:
+    - label: src/config.py:10-18
+      target_url: https://github.com/acme/widget/blob/main/src/config.py#L10-L18
+      repo_path: src/config.py
+      line_start: 10
+      line_end: 18
+    - label: src/schema.py:1-4
+      target_url: https://deepwiki.com/acme/widget/blob/main/src/schema.py#L1-L4
+      repo_path: src/schema.py
+      line_start: 1
+      line_end: 4
+assertions:
+  contains:
+  - '```python'
+  - Call `load_config` before the server starts.
+  not_contains:
+  - 'def load_config(path):'

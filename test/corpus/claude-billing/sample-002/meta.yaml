@@ -1,0 +1,8 @@
+version: 1
+preset: claude-billing
+mode: content
+url: https://claude.ai/settings/billing
+expect: failure
+failure:
+  type: PresetDriftError
+  contains: plan/balance/invoice landmark

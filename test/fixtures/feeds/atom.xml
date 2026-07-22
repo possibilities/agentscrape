@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:at="http://purl.org/atompub/tombstones/1.0">
+  <title>Example Atom</title>
+  <link rel="self" href="https://notes.example.com/atom.xml" />
+  <entry>
+    <id>tag:notes.example.com,2026:alpha</id>
+    <title>Alpha note</title>
+    <link rel="alternate" href="/notes/alpha" />
+    <link rel="canonical" href="https://notes.example.com/notes/alpha?view=full" />
+    <published>2026-07-10T08:00:00-04:00</published>
+    <updated>2026-07-11T14:15:00Z</updated>
+  </entry>
+  <at:deleted-entry ref="tag:notes.example.com,2026:removed" when="2026-07-12T16:00:00Z" />
+</feed>

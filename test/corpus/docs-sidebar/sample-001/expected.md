@@ -1,0 +1,3 @@
+- [Install](https://docs.example.test/docs/install) (install / Getting Started)
+- [Quickstart](https://docs.example.test/docs/quickstart) (install / Getting Started)
+- [Authentication](https://docs.example.test/docs/guides/auth) (install / Guides)

@@ -1,0 +1,6 @@
+name: docs-sidebar
+summary: "Extract doc page links from a sidebar nav"
+domain: "*"
+mode: links
+selector: "#navigation-items"
+toggle_selector: button

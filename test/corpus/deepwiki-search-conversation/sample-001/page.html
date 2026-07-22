@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<body>
+<div data-testid="deepwiki-search-conversation">
+  <div data-testid="search-repo-breadcrumb">acme/widget</div>
+  <div data-testid="search-qa-round">
+    <div data-testid="search-question">How do I load custom config on startup?</div>
+    <div data-testid="search-answer">
+      <p>Call <code>load_config</code> before the server starts.</p>
+      <pre><code class="language-python">load_config("config.yaml")
+</code></pre>
+    </div>
+    <div data-testid="search-source-preview">
+      <pre><code class="language-python">def load_config(path):
+    return yaml.safe_load(open(path))
+</code></pre>
+    </div>
+    <div data-testid="search-citations">
+      <a href="https://github.com/acme/widget/blob/main/src/config.py#L10-L18">src/config.py:10-18</a>
+    </div>
+  </div>
+  <div data-testid="search-qa-round">
+    <div data-testid="search-question">Where is the schema validated?</div>
+    <div data-testid="search-answer">
+      <p>Validation happens in the schema module right after loading.</p>
+    </div>
+    <div data-testid="search-citations">
+      <a href="https://github.com/acme/widget/blob/main/src/config.py#L10-L18">src/config.py:10-18</a>
+      <a href="/acme/widget/blob/main/src/schema.py#L1-L4">src/schema.py:1-4</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

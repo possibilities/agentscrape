@@ -1,0 +1,8 @@
+version: 1
+preset: openai-billing
+mode: content
+url: https://platform.openai.com/settings/organization/billing
+expect: failure
+failure:
+  type: PresetDriftError
+  contains: credit-balance landmark

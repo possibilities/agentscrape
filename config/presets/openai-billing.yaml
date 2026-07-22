@@ -1,0 +1,8 @@
+name: openai-billing
+summary: "OpenAI platform billing overview and credit balance"
+domain: platform.openai.com
+mode: content
+url_patterns:
+  - '^https?://platform\.openai\.com/settings/organization/billing/?(?:\?.*)?$'
+handler: openai_billing.scrape_openai_billing
+schema: OpenAIBilling

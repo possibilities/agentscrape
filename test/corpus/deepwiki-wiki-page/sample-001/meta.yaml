@@ -1,0 +1,32 @@
+version: 1
+preset: deepwiki-wiki-page
+mode: content
+url: https://deepwiki.com/acme/widget/2-configuration
+expect: success
+structured:
+  url: https://deepwiki.com/acme/widget/2-configuration
+  repository: acme/widget
+  title: Configuration Loading
+  markdown: "The loader reads `config.yaml` before falling back to defaults.[1](https://deepwiki.com/acme/widget/2-configuration#cite-1)\n\
+    \n## Example\n\n```python\ndef load_config(path):\n    return yaml.safe_load(open(path))\n\
+    ```\n\nSee the [configuration reference](https://deepwiki.com/acme/widget/2-configuration)\
+    \ for every key, and the schema module.[2](https://deepwiki.com/acme/widget/2-configuration#cite-2)"
+  citations:
+  - label: src/config.py:10-18
+    target_url: https://github.com/acme/widget/blob/main/src/config.py#L10-L18
+    repo_path: src/config.py
+    line_start: 10
+    line_end: 18
+  - label: src/schema.py:1-4
+    target_url: https://deepwiki.com/acme/widget/blob/main/src/schema.py#L1-L4
+    repo_path: src/schema.py
+    line_start: 1
+    line_end: 4
+assertions:
+  contains:
+  - '```python'
+  - '## Citations'
+  not_contains:
+  - Overview
+  - Edit
+  - Copy link

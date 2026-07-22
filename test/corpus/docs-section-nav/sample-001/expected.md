@@ -1,0 +1,2 @@
+- [Install](https://docs.example.test/guide/getting-started/install) (Getting Started / Installation)
+- [Upgrade](https://docs.example.test/guide/getting-started/upgrade) (Getting Started / Installation)

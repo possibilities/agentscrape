@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Example RSS</title>
+    <link>https://blog.example.com/</link>
+    <atom:link rel="self" href="https://blog.example.com/feed.xml" />
+    <item>
+      <guid isPermaLink="false">post-002</guid>
+      <title>Edited second post</title>
+      <link>https://blog.example.com/posts/second#comments</link>
+      <pubDate>Wed, 08 Jul 2026 10:00:00 GMT</pubDate>
+      <atom:updated>2026-07-09T12:30:00Z</atom:updated>
+    </item>
+    <item>
+      <title>First post without a GUID</title>
+      <link>https://blog.example.com/posts/first</link>
+      <pubDate>Tue, 07 Jul 2026 09:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
