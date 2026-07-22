@@ -1,0 +1,12 @@
+# Public URLs and semantic invariants for `agentscrape check-presets --live`.
+deepwiki-wiki-page:
+  url: "https://deepwiki.com/facebook/react"
+  invariants:
+    require_title: true
+    min_markdown_chars: 200
+
+deepwiki-search-conversation:
+  url: "https://deepwiki.com/search/on-mac-i-want-to-set-a-custom_8206e3fd-0978-42d2-a09d-bf6e4ba311f8?mode=fast"
+  invariants:
+    min_rounds: 1
+    min_markdown_chars: 50

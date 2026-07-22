@@ -1,0 +1,9 @@
+version: 1
+preset: perplexity-billing
+mode: content
+url: https://www.perplexity.ai/account/api/billing
+expect: success
+structured:
+  credit_balance: 29.9
+  usage_tier: 1
+  auto_reload: false

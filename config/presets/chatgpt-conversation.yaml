@@ -1,0 +1,8 @@
+name: chatgpt-conversation
+summary: "ChatGPT conversation with structured turn extraction"
+domain: chatgpt.com
+mode: content
+url_patterns:
+  - '^https?://chatgpt\.com/(?:c|share)/[\w-]+/?(?:\?.*)?$'
+handler: chatgpt.scrape_conversation
+schema: ChatGPTConversation

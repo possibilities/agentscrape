@@ -1,0 +1,8 @@
+version: 1
+preset: x-article
+mode: content
+url: https://x.com/i/article/1
+expect: failure
+failure:
+  type: PresetDriftError
+  contains: reader container not found

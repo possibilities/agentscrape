@@ -1,0 +1,18 @@
+version: 1
+preset: docs-sidebar
+mode: links
+url: https://docs.example.test/docs/install
+expect: success
+links:
+- url: https://docs.example.test/docs/install
+  title: Install
+  section: install
+  category: Getting Started
+- url: https://docs.example.test/docs/quickstart
+  title: Quickstart
+  section: install
+  category: Getting Started
+- url: https://docs.example.test/docs/guides/auth
+  title: Authentication
+  section: install
+  category: Guides

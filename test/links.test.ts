@@ -1,0 +1,93 @@
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { PresetDriftError } from "../src/errors";
+import { offlineExtractLinks, scrapeLinks } from "../src/links";
+
+const actualBrowser = await import("../src/browser");
+const openPage = mock(async () => {});
+let snapshots: Array<Record<string, unknown>> = [];
+let labels: string[] = [];
+const runAgentBrowser = mock(async (args: string[]) => {
+  const expression = args[1] ?? "";
+  let stdout = "null";
+  if (args[0] === "wait") stdout = "";
+  else if (expression === "window.location.href") stdout = JSON.stringify("https://docs.test/docs");
+  else if (expression.includes("return {rootCount: selected.length, links: out}"))
+    stdout = JSON.stringify(snapshots.shift() ?? { rootCount: 1, links: [] });
+  else if (expression.includes("count: items.length"))
+    stdout = JSON.stringify({ rootCount: 1, count: labels.length, labels });
+  else if (expression.includes("item.click()")) stdout = "true";
+  return {
+    argv: ["agent-browser", ...args],
+    exitCode: 0,
+    stdout,
+    stderr: "",
+    timedOut: false,
+    truncated: false,
+  };
+});
+const mockModule = mock.module;
+mockModule("../src/browser", () => ({ ...actualBrowser, openPage, runAgentBrowser }));
+
+beforeEach(() => {
+  openPage.mockClear();
+  runAgentBrowser.mockClear();
+  labels = [];
+  snapshots = [];
+});
+afterAll(() => mock.restore());
+
+const link = (url: string, title: string, category = "") => ({ url, title, category });
+const snap = (...links: Array<{ url: string; title: string; category: string }>) => ({
+  rootCount: 1,
+  links,
+});
+
+describe("link extraction parity", () => {
+  test("extracts each accordion panel incrementally and labels it by toggle", async () => {
+    labels = ["Guides", "Reference"];
+    const home = link("https://docs.test/docs/home", "Home");
+    const guide = link("https://docs.test/docs/guide", "Guide");
+    const api = link("https://docs.test/docs/api", "API");
+    snapshots = [snap(home), snap(home), snap(home, guide), snap(home, guide), snap(home, api)];
+    const result = await scrapeLinks("https://docs.test/docs", "#navigation-items", "button");
+    expect(result.map(({ url, category }) => ({ url, category }))).toEqual([
+      { url: home.url, category: "" },
+      { url: guide.url, category: "Guides" },
+      { url: api.url, category: "Reference" },
+    ]);
+    expect(
+      runAgentBrowser.mock.calls.filter(([args]) => args[1]?.includes("item.click()")),
+    ).toHaveLength(2);
+    const evalSource = runAgentBrowser.mock.calls.map(([args]) => args[1] ?? "").join("\n");
+    expect(evalSource).toContain('[role="tablist"]');
+    expect(evalSource).toContain("document.getElementById(controls)");
+  });
+
+  test("classifies missing and empty required selectors as drift", async () => {
+    snapshots = [
+      { rootCount: 0, links: [] },
+      { rootCount: 0, links: [] },
+      { rootCount: 0, links: [] },
+    ];
+    expect(scrapeLinks("https://docs.test/docs", "#missing")).rejects.toBeInstanceOf(
+      PresetDriftError,
+    );
+    snapshots = [snap(), snap(), snap()];
+    expect(scrapeLinks("https://docs.test/docs", "#empty")).rejects.toBeInstanceOf(
+      PresetDriftError,
+    );
+  });
+
+  test("offline extraction preserves heading categories and drifts on empty roots", () => {
+    expect(
+      offlineExtractLinks(
+        '<nav><h2>Guide</h2><a href="/docs/start">Start</a></nav>',
+        "nav",
+        "https://docs.test/docs",
+      ),
+    ).toEqual([{ url: "https://docs.test/docs/start", title: "Start", category: "Guide" }]);
+    expect(() => offlineExtractLinks("<main></main>", "nav", "https://docs.test/docs")).toThrow(
+      PresetDriftError,
+    );
+  });
+});

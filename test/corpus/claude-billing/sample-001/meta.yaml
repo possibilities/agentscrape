@@ -1,0 +1,21 @@
+version: 1
+preset: claude-billing
+mode: content
+url: https://claude.ai/settings/billing
+expect: success
+structured:
+  plan_label: Max plan
+  current_plan: 20
+  plan_details: 20x more usage than Pro
+  renews_on: Apr 12, 2026
+  current_balance: 19.24
+  auto_reload: false
+  invoices:
+  - date: Mar 12, 2026
+    due: ''
+    total: 102.27
+    status: Paid
+  - date: Mar 1, 2026
+    due: Mar 15, 2026
+    total: 0.0
+    status: Paid

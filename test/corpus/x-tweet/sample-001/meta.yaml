@@ -1,0 +1,16 @@
+version: 1
+preset: x-tweet
+mode: content
+url: https://x.com/possibilities/status/2013334888515088526
+expect: success
+structured:
+  author_name: mike not impossible
+  author_handle: possibilities
+  author_url: https://x.com/possibilities
+  tweets:
+  - text: I was kind of a hater for Claude Code's background tasks but now I see how
+      adeptly and creatively CC wields this tool has changed my mind completely.
+    timestamp: 7:36 PM · Jan 19, 2026
+    permalink: https://x.com/possibilities/status/2013334888515088526
+    links: []
+  quoted_tweet: null

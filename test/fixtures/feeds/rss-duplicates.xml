@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <title>Duplicate example</title>
+  <item>
+    <guid isPermaLink="false">old-guid</guid>
+    <title>Original title</title>
+    <link>https://blog.example.com/posts/same</link>
+    <pubDate>Mon, 06 Jul 2026 10:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <guid isPermaLink="false">new-guid</guid>
+    <title>Updated title</title>
+    <link>https://blog.example.com/posts/same#updated</link>
+    <pubDate>Mon, 06 Jul 2026 10:00:00 GMT</pubDate>
+    <updated>2026-07-08T10:00:00Z</updated>
+  </item>
+</channel></rss>

@@ -1,0 +1,38 @@
+{
+  "schema_version": "1",
+  "status": "success",
+  "requested_url": "https://example.com/start",
+  "final_url": "https://example.com/final",
+  "extractor": {
+    "name": "agentscrape",
+    "version": "0.1.0",
+    "implementation": "generic-page",
+    "implementation_version": "1"
+  },
+  "artifacts": [
+    {
+      "artifact_type": "document",
+      "media_type": "text/markdown",
+      "encoding": "utf-8",
+      "content": "# Example\n\nSee [Guide](https://docs.example/guide).",
+      "size_bytes": 51,
+      "sha256": "3050fd3231ef0d66b3b68c92fb71dc23da9e2a10bb77688599c9a795ed3ae6c7"
+    }
+  ],
+  "metadata": {
+    "content_type": "web_page",
+    "title": "Example",
+    "author_name": "",
+    "author_handle": "",
+    "published_at": "",
+    "source_id": "",
+    "warnings": []
+  },
+  "relations": [
+    {
+      "relation_type": "references",
+      "target_url": "https://docs.example/guide"
+    }
+  ],
+  "failure": null
+}
