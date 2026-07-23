@@ -129,10 +129,31 @@ describe("version 1 extraction envelope", () => {
       "https://x.com/example/status/123",
       "https://x.com/example/status/123",
     );
-    expect(envelope.metadata?.content_type).toBe("social_post");
-    expect(envelope.metadata?.source_id).toBe("123");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "social_post",
+      content_kind: "post",
+      content_item_count: 1,
+      source_id: "123",
+    });
     expect(envelope.relations.map((item) => item.target_url)).toEqual(["https://docs.example/a"]);
     expect(envelope.artifacts[0]?.content).not.toContain("secret=bad");
+  });
+  test("X thread projection persists parser-observed item count", () => {
+    const thread = new TweetThread({
+      author_name: "Example",
+      author_handle: "example",
+      tweets: [new TweetContent({ text: "first" }), new TweetContent({ text: "second" })],
+    });
+    const envelope = build(
+      result(thread),
+      "https://x.com/example/status/123",
+      "https://x.com/example/status/123",
+    );
+    expect(envelope.metadata).toMatchObject({
+      content_type: "social_post",
+      content_kind: "thread",
+      content_item_count: 2,
+    });
   });
   test("X relation filtering removes profiles, analytics, media, nested secrets, and source URLs", () => {
     const thread = new TweetThread({
@@ -172,8 +193,12 @@ describe("version 1 extraction envelope", () => {
     const selected =
       '<div data-testid="twitterArticleReadView"><div data-testid="twitterArticleRichTextView">Body</div></div>';
     const envelope = build(result(article, selected), "https://x.com/i/article/7");
-    expect(envelope.metadata?.content_type).toBe("article");
-    expect(envelope.metadata?.source_id).toBe("7");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "article",
+      content_kind: "article",
+      content_item_count: 1,
+      source_id: "7",
+    });
   });
   test("every official structured schema has a central projector", () => {
     const citation = new DeepWikiCitation({ label: "src", target_url: "https://github.com/a/b" });

@@ -679,6 +679,8 @@ export interface ExtractionEnvelope {
   }>;
   metadata: {
     content_type: "web_page" | "social_post" | "article";
+    content_kind?: "post" | "thread" | "article";
+    content_item_count?: number;
     title: string;
     author_name: string;
     author_handle: string;

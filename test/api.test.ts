@@ -76,7 +76,11 @@ describe("public TypeScript API", () => {
 
     expect(envelope.status).toBe("success");
     expect(envelope.extractor.implementation).toBe("x-article");
-    expect(envelope.metadata?.content_type).toBe("article");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "article",
+      content_kind: "article",
+      content_item_count: 1,
+    });
     expect(envelope.metadata?.title).toBe("Introducing Articles on X");
     expect(envelope.metadata?.source_id).toBe("2047794182463394072");
     expect(envelope.artifacts[0]?.content).toContain("# Introducing Articles on X");
@@ -93,8 +97,28 @@ describe("public TypeScript API", () => {
 
     expect(envelope.status).toBe("success");
     expect(envelope.extractor.implementation).toBe("x-tweet");
-    expect(envelope.metadata?.content_type).toBe("social_post");
-    expect(envelope.metadata?.source_id).toBe("2013334888515088526");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "social_post",
+      content_kind: "post",
+      content_item_count: 1,
+      source_id: "2013334888515088526",
+    });
+  });
+  test("classifies same-author X status sequences as threads", async () => {
+    const html = readFileSync(join(import.meta.dir, "fixtures/x-thread-short.html"), "utf8");
+    const envelope = (await fetchMarkdown("https://x.com/i/status/1001", {
+      envelope: true,
+      html,
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("success");
+    expect(envelope.extractor.implementation).toBe("x-tweet");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "social_post",
+      content_kind: "thread",
+      content_item_count: 2,
+      source_id: "1001",
+    });
   });
   test("fails closed as an Article when status-form Article structure is malformed", async () => {
     const envelope = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
