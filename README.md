@@ -78,7 +78,7 @@ Run `agentscrape --help` or any command with `--help` for options.
 
 ## Routing and preset safety
 
-A parseable GitHub or Gist URL uses `gh`; a `.md` URL uses bounded direct HTTP; all other URLs use the strict preset registry. Automatic matching requires exactly one anchored page-kind pattern. A domain claimed by an official preset fails closed on unsupported or ambiguous routes. `--generic` is the only generic override on a claimed domain and conflicts with `--preset`.
+A parseable GitHub or Gist URL uses `gh`; a `.md` URL uses bounded direct HTTP; all other URLs use the strict preset registry. Automatic matching requires exactly one anchored page-kind pattern. Because X serves both posts and long-form Articles from `/status/` URLs, the official status route classifies the rendered page by its strong Article-reader landmark before validating the effective `x-tweet` or `x-article` contract. Explicit presets remain strict. A domain claimed by an official preset fails closed on unsupported or ambiguous routes. `--generic` is the only generic override on a claimed domain and conflicts with `--preset`.
 
 Content handlers must return all artifact fields, non-empty Markdown, the declared structured schema, and Markdown identical to that schema's renderer. Missing provider structure raises typed drift rather than returning generic body text. Labeled zero balances remain valid for billing presets.
 

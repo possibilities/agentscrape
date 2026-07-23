@@ -286,23 +286,60 @@ export async function checkXAuth(session?: string | null): Promise<void> {
   if (required)
     throw new AgentscrapeAuthError("X.com authentication required - browser is not signed in");
 }
-export async function scrapeTweet(
+export type XStatusPageKind = "tweet" | "article";
+export interface CapturedXStatusPage {
+  kind: XStatusPageKind;
+  html: string;
+  live: boolean;
+}
+
+export async function captureXStatusPage(
   url: string,
   options: HandlerOptions = {},
+): Promise<CapturedXStatusPage> {
+  const live = options.html === undefined || options.html === null;
+  const html =
+    options.html ??
+    (await browserHtml(
+      url,
+      options,
+      '[data-testid="twitterArticleReadView"], [data-testid="tweetText"]',
+    ));
+  const $ = cheerio.load(html);
+  return {
+    kind: $('[data-testid="twitterArticleReadView"]').length ? "article" : "tweet",
+    html,
+    live,
+  };
+}
+
+async function scrapeCapturedTweet(
+  url: string,
+  captured: string,
+  options: HandlerOptions,
+  live: boolean,
 ): Promise<ScrapeResult<TweetThread>> {
   const status = extractStatusId(url);
-  if (!options.html && !status) throw new Error(`Could not extract status ID from URL: ${url}`);
-  const captured = options.html ?? (await browserHtml(url, options, '[data-testid="tweet"]'));
-  const html = await prepareLinks(captured, options, !options.html);
+  if (live && !status) throw new Error(`Could not extract status ID from URL: ${url}`);
+  const html = await prepareLinks(captured, options, live);
   const structured = buildThread(html, extractAuthorHandle(url) ?? "", status);
   if (!structured.tweets.length) throw new Error(`Could not find tweet with status ID ${status}`);
   const selected = structured.tweets.length === 1 ? html : `<div>${html}</div>`;
   return {
-    full_html: options.html ? "" : html,
+    full_html: live ? html : "",
     selected_html: selected,
     markdown: structured.toMarkdown(),
     structured,
   };
+}
+
+export async function scrapeTweet(
+  url: string,
+  options: HandlerOptions = {},
+): Promise<ScrapeResult<TweetThread>> {
+  const live = options.html === undefined || options.html === null;
+  const captured = options.html ?? (await browserHtml(url, options, '[data-testid="tweet"]'));
+  return scrapeCapturedTweet(url, captured, options, live);
 }
 
 function cleanTweetMarkdown(html: string): string {
@@ -657,8 +694,7 @@ export async function scrapeTimeline(
 
 function parseArticle(html: string, url: string): XArticle {
   const $ = cheerio.load(html);
-  let reader = $('[data-testid="twitterArticleReadView"]').first();
-  if (!reader.length) reader = $("article").first();
+  const reader = $('[data-testid="twitterArticleReadView"]').first();
   const scope: cheerio.Cheerio<any> = reader.length ? reader : $.root();
   let body: cheerio.Cheerio<any> = scope.find('[data-testid="twitterArticleRichTextView"]').first();
   if (!body.length) body = scope.find('[data-testid="longformRichTextComponent"]').first();
@@ -736,25 +772,40 @@ function parseArticle(html: string, url: string): XArticle {
     warnings,
   });
 }
-export async function scrapeArticle(
+async function scrapeCapturedArticle(
   url: string,
-  options: HandlerOptions = {},
+  captured: string,
+  options: HandlerOptions,
+  live: boolean,
 ): Promise<ScrapeResult<XArticle>> {
-  const captured =
-    options.html ??
-    (await browserHtml(
-      url,
-      options,
-      '[data-testid="twitterArticleReadView"], [data-testid="primaryColumn"], article',
-    ));
-  const html = await prepareLinks(captured, options, !options.html);
+  const html = await prepareLinks(captured, options, live);
   const structured = parseArticle(html, url);
   return {
-    full_html: options.html ? "" : html,
+    full_html: live ? html : "",
     selected_html: html,
     markdown: structured.toMarkdown(),
     structured,
   };
+}
+
+export async function scrapeArticle(
+  url: string,
+  options: HandlerOptions = {},
+): Promise<ScrapeResult<XArticle>> {
+  const live = options.html === undefined || options.html === null;
+  const captured =
+    options.html ?? (await browserHtml(url, options, '[data-testid="twitterArticleReadView"]'));
+  return scrapeCapturedArticle(url, captured, options, live);
+}
+
+export async function scrapeCapturedXStatus(
+  url: string,
+  captured: CapturedXStatusPage,
+  options: HandlerOptions = {},
+): Promise<ScrapeResult<TweetThread | XArticle>> {
+  return captured.kind === "article"
+    ? scrapeCapturedArticle(url, captured.html, options, captured.live)
+    : scrapeCapturedTweet(url, captured.html, options, captured.live);
 }
 
 export function eligibleExtractionUrl(value: string, sources: string[] = []): string | null {

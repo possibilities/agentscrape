@@ -295,7 +295,7 @@ function project(
         title: bounded(value.title, 500),
         author_handle: bounded(value.author_handle.replace(/^@/, ""), 100),
         published_at: bounded(value.published_at, 100),
-        source_id: idFrom(/\/articles?\/(\d+)/, final, requested),
+        source_id: idFrom(/\/(?:articles?|status)\/(\d+)/, final, requested),
         warnings,
       }),
       relations: extractionOutboundUrls(value, requested, final, max),
