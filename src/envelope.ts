@@ -103,6 +103,8 @@ export function validateProviderFinalUrl(value: unknown): string | null {
 
 interface Metadata {
   content_type: "web_page" | "social_post" | "article";
+  content_kind?: "post" | "thread" | "article";
+  content_item_count?: number;
   title: string;
   author_name: string;
   author_handle: string;
@@ -116,6 +118,10 @@ function metadata(
 ): Metadata {
   return {
     content_type: contentType,
+    ...(values.content_kind !== undefined ? { content_kind: values.content_kind } : {}),
+    ...(values.content_item_count !== undefined
+      ? { content_item_count: values.content_item_count }
+      : {}),
     title: values.title ?? "",
     author_name: values.author_name ?? "",
     author_handle: values.author_handle ?? "",
@@ -256,6 +262,8 @@ function project(
       implementation: "x-tweet",
       content: sanitizedTweetMarkdown(value, requested, final),
       metadata: metadata("social_post", {
+        content_kind: value.tweets.length > 1 ? "thread" : "post",
+        content_item_count: value.tweets.length,
         author_name: bounded(value.author_name, 200),
         author_handle: bounded(value.author_handle.replace(/^@/, ""), 100),
         published_at: bounded(value.tweets[0]?.timestamp ?? "", 100),
@@ -292,6 +300,8 @@ function project(
       implementation: "x-article",
       content: clean.toMarkdown(),
       metadata: metadata("article", {
+        content_kind: "article",
+        content_item_count: 1,
         title: bounded(value.title, 500),
         author_handle: bounded(value.author_handle.replace(/^@/, ""), 100),
         published_at: bounded(value.published_at, 100),

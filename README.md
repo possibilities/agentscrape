@@ -115,6 +115,8 @@ For deployment readiness, `bun run x-readiness -- --once` probes the PATH-resolv
 
 `fetch-markdown` defaults to Markdown. `--json` and `--yaml` serialize structured output. `--envelope` emits the provider-neutral extraction envelope with schema version `1`, extractor identity `agentscrape`, one bounded UTF-8 Markdown artifact, normalized metadata/relations, or a classified failure. Existing envelope keys and enum shapes are stable.
 
+X content metadata includes the additive parser-derived pair `content_kind` and `content_item_count`: a single post is `post`/`1`, a same-author sequence is `thread` with its observed post count, and an X Article is `article`/`1`. Quoted posts do not increase a thread count. Other extractors omit the pair, so generic fixtures remain unchanged. Consumers must accept the optional pair before this producer version is deployed; upgraded consumers continue to accept historical envelopes that omit it.
+
 Envelope failure classes are `invalid_request`, `authentication_required`, `upstream_unavailable`, `timeout`, `browser_error`, `provider_error`, `malformed_provider_output`, `empty_content`, `output_limit_exceeded`, `cancelled`, and `internal_error`. Authentication exits 2, cancellation exits 130, other failures exit 1, and success exits 0. Diagnostics and URL evidence are bounded and redacted.
 
 ## Corpus and canaries
