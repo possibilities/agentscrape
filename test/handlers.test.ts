@@ -108,6 +108,24 @@ describe("conversation and social fail-closed handlers", () => {
     expect(result.markdown).toContain("https://example.com/full/path");
     expect(result.markdown).not.toContain("example.com/full…");
   });
+  test("X thread compares author handles case-insensitively", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/OpenRouter"><span>OpenRouter</span><span>@OpenRouter</span></a></div>
+      <div data-testid="tweetText">First post</div>
+      <a href="/OpenRouter/status/1"><time>now</time></a>
+    </article>
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/OpenRouter"><span>OpenRouter</span><span>@OpenRouter</span></a></div>
+      <div data-testid="tweetText">Second post</div>
+      <a href="/OpenRouter/status/2"><time>later</time></a>
+    </article>`;
+    const result = await scrapeTweet("https://x.com/i/status/1", { html });
+    expect(result.structured.author_handle).toBe("openrouter");
+    expect(result.structured.tweets.map((tweet) => tweet.text)).toEqual([
+      "First post",
+      "Second post",
+    ]);
+  });
   test("X profile requires its username root", async () => {
     expect(
       scrapeProfile("https://x.com/nobody", {

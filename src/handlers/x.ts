@@ -85,7 +85,7 @@ function authorInfo($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): [string
     const href = $(anchor).attr("href") ?? "";
     const match = href.match(/^\/(\w+)$/);
     if (!match) return;
-    handle = match[1]!;
+    handle = match[1]!.toLowerCase();
     url = absoluteX(href);
     const text = $(anchor).text().replace(/\s+/g, " ").trim();
     if (text && !text.startsWith("@")) name = text;
@@ -93,7 +93,7 @@ function authorInfo($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): [string
   user.find("span").each((_index, span) => {
     const text = $(span).text().replace(/\s+/g, " ").trim();
     if (!text || text === "·") return;
-    if (text.startsWith("@") && !handle) handle = text.slice(1);
+    if (text.startsWith("@") && !handle) handle = text.slice(1).toLowerCase();
     else if (!text.startsWith("@") && !name) name = text;
   });
   if (handle && !url) url = `https://x.com/${handle}`;
