@@ -126,6 +126,11 @@ describe("conversation and social fail-closed handlers", () => {
         html: fixture("preset-audit-x-article-empty-body.html"),
       }),
     ).rejects.toThrow("rendered no body content");
+    expect(
+      scrapeArticle("https://x.com/i/article/1", {
+        html: '<article data-testid="tweet"><div data-testid="tweetText">Ordinary post</div></article>',
+      }),
+    ).rejects.toThrow("reader container not found");
   });
   test("X article warning vocabulary contains only reachable partial warning", async () => {
     const html =

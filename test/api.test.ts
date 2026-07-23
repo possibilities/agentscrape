@@ -64,6 +64,65 @@ describe("public TypeScript API", () => {
       server.stop(true);
     }
   });
+  test("automatically routes status-form X Articles from rendered structure", async () => {
+    const html = readFileSync(
+      join(import.meta.dir, "corpus/x-article/sample-001/page.html"),
+      "utf8",
+    );
+    const envelope = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
+      envelope: true,
+      html,
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("success");
+    expect(envelope.extractor.implementation).toBe("x-article");
+    expect(envelope.metadata?.content_type).toBe("article");
+    expect(envelope.metadata?.title).toBe("Introducing Articles on X");
+    expect(envelope.metadata?.source_id).toBe("2047794182463394072");
+    expect(envelope.artifacts[0]?.content).toContain("# Introducing Articles on X");
+  });
+  test("keeps ordinary status pages on the X tweet contract", async () => {
+    const html = readFileSync(
+      join(import.meta.dir, "corpus/x-tweet/sample-001/selected.html"),
+      "utf8",
+    );
+    const envelope = (await fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+      envelope: true,
+      html,
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("success");
+    expect(envelope.extractor.implementation).toBe("x-tweet");
+    expect(envelope.metadata?.content_type).toBe("social_post");
+    expect(envelope.metadata?.source_id).toBe("2013334888515088526");
+  });
+  test("fails closed as an Article when status-form Article structure is malformed", async () => {
+    const envelope = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
+      envelope: true,
+      html: '<html><body><div data-testid="twitterArticleReadView"><div data-testid="twitterArticleRichTextView"></div></div></body></html>',
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("failure");
+    expect(envelope.extractor.implementation).toBe("x-article");
+    expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
+  });
+  test("keeps explicit X presets strict for mismatched rendered DOM", async () => {
+    const articleAsTweet = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
+      envelope: true,
+      preset: "x-tweet",
+      html: '<html><body><div data-testid="twitterArticleReadView"><h1>Article</h1><div data-testid="twitterArticleRichTextView"><p>Body</p></div></div></body></html>',
+    })) as ExtractionEnvelope;
+    const tweetAsArticle = (await fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+      envelope: true,
+      preset: "x-article",
+      html: '<article data-testid="tweet"><div data-testid="tweetText">Ordinary post</div></article>',
+    })) as ExtractionEnvelope;
+
+    expect(articleAsTweet.status).toBe("failure");
+    expect(articleAsTweet.extractor.implementation).toBe("x-tweet");
+    expect(tweetAsArticle.status).toBe("failure");
+    expect(tweetAsArticle.extractor.implementation).toBe("x-article");
+  });
   test("standalone job submission is atomic and rejects indexed state before publication", async () => {
     const home = temp();
     const script = `import { submitScrapeJob } from ${JSON.stringify(join(import.meta.dir, "../src/api.ts"))}; console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", {summarize:true, frontmatter:{url:"https://example.com/a"}}));`;

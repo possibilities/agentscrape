@@ -40,6 +40,7 @@ import {
 import { scrapePage } from "./generic";
 import { fetchGithubIfApplicable, isGithubUrl, parseGithubUrl } from "./github";
 import type { HandlerOptions, ScrapeResult } from "./handlers/types";
+import { captureXStatusPage, scrapeCapturedXStatus } from "./handlers/x";
 import { convertHtml as convertHtmlImpl } from "./html";
 import { scrapeLinks, scrapeNavLinks } from "./links";
 import {
@@ -285,7 +286,7 @@ export async function fetchMarkdown(
   const envelopeMode = options.envelope ?? false;
   const maxContentBytes = options.maxContentBytes ?? 1_000_000;
   const maxRelations = options.maxRelations ?? 256;
-  const hint = implementationHint(url, options.preset);
+  let hint = implementationHint(url, options.preset);
   let finalUrl: string | null = null;
   let browserUsed = false;
   try {
@@ -304,9 +305,37 @@ export async function fetchMarkdown(
             preset: options.preset,
             generic: options.generic,
           });
-          browserUsed = true;
+          browserUsed = !(preset && options.html !== undefined && options.html !== null);
           result = await withBrowserSignal(options.signal, () =>
             withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
+              const autoRouteXStatus =
+                !options.preset &&
+                preset?.source === "official" &&
+                preset.name === "x-tweet" &&
+                preset.mode === "content" &&
+                preset.handler === "x.scrape_tweet" &&
+                preset.schema === "TweetThread";
+              if (autoRouteXStatus) {
+                const captured = await captureXStatusPage(requested, options);
+                let effectivePreset = preset;
+                if (captured.kind === "article") {
+                  const articlePreset = registry.byName("x-article");
+                  if (
+                    articlePreset?.source !== "official" ||
+                    articlePreset.mode !== "content" ||
+                    articlePreset.handler !== "x.scrape_article" ||
+                    articlePreset.schema !== "XArticle"
+                  )
+                    throw new PresetConfigError(
+                      "automatic X status article routing requires the official x-article preset",
+                    );
+                  effectivePreset = articlePreset;
+                }
+                hint = effectivePreset.name;
+                const value = await scrapeCapturedXStatus(requested, captured, options);
+                validateContentResult(value, effectivePreset);
+                return value;
+              }
               if (preset) {
                 const value = await scrapeWithPreset(requested, preset, options);
                 if (preset.mode === "content") validateContentResult(value, preset);
