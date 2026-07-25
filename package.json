@@ -21,7 +21,7 @@
     "lint": "biome check .",
     "format": "biome check --write src test",
     "typecheck": "tsc --noEmit",
-    "test": "bun test --timeout 60000",
+    "test": "bun test --parallel=1 --max-concurrency=1 --timeout 60000",
     "x-readiness": "bun run scripts/check-x-readiness.ts",
     "check": "bun run typecheck && bun run lint && bun run test"
   },
