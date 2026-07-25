@@ -8,9 +8,9 @@ import {
   throwIfAborted,
 } from "./errors";
 import type { ScrapeResult } from "./handlers/types";
-import { convertHtml } from "./html";
+import { convertHtml, fencedCodeBlock } from "./html";
 import { GenericPage } from "./schemas";
-import { findExecutable, runProcess } from "./subprocess";
+import { findExecutable, type ProcessOptions, type ProcessResult, runProcess } from "./subprocess";
 
 export type GithubKind = "profile" | "repo" | "tree" | "blob" | "issue" | "pr" | "compare" | "gist";
 export interface GithubTarget {
@@ -27,6 +27,31 @@ export interface GithubTarget {
 const OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const REPO = /^[A-Za-z0-9_.-]{1,100}$/;
 const GIST = /^[a-f0-9]+$/;
+const GITHUB_DEADLINE_MS = 60_000;
+const GITHUB_OUTPUT_BYTES = 16_000_000;
+const GIST_FILE_LIMIT = 100;
+const PANDOC_OUTPUT_BYTES = 4_000_000;
+const DEADLINE_MESSAGE = "GitHub operation deadline exceeded";
+const OUTPUT_MESSAGE = "GitHub operation exceeded the aggregate gh output limit";
+const GIST_FILES_MESSAGE = "GitHub Gist exceeded the file-count limit";
+
+type ProcessRunner = (argv: string[], options?: ProcessOptions) => Promise<ProcessResult>;
+interface GithubInternalOptions {
+  now?: () => number;
+  runProcess?: ProcessRunner;
+  deadlineMs?: number;
+  maxGhOutputBytes?: number;
+  maxGistFiles?: number;
+}
+interface GithubOperationContext {
+  signal?: AbortSignal | undefined;
+  now: () => number;
+  runner: ProcessRunner;
+  injectedRunner: boolean;
+  deadline: number;
+  remainingGhBytes: number;
+  maxGistFiles: number;
+}
 
 export function isGithubUrl(value: string): boolean {
   return (
@@ -84,22 +109,83 @@ function validate(target: GithubTarget): void {
     throw new AgentscrapeError("invalid GitHub compare ref", "usage");
 }
 
-async function gh(args: string[], signal?: AbortSignal): Promise<string> {
-  throwIfAborted(signal);
-  if (!findExecutable("gh"))
+function positiveNumber(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive and finite`);
+  return value;
+}
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+function createContext(
+  signal: AbortSignal | undefined,
+  internal: GithubInternalOptions | undefined,
+): GithubOperationContext {
+  if (internal?.now !== undefined && typeof internal.now !== "function")
+    throw new Error("now must be a function");
+  if (internal?.runProcess !== undefined && typeof internal.runProcess !== "function")
+    throw new Error("runProcess must be a function");
+  const now = internal?.now ?? performance.now.bind(performance);
+  const started = now();
+  if (!Number.isFinite(started)) throw new Error("now must return a finite number");
+  const deadlineMs = positiveNumber(internal?.deadlineMs ?? GITHUB_DEADLINE_MS, "deadlineMs");
+  const deadline = started + deadlineMs;
+  if (!Number.isFinite(deadline)) throw new Error("GitHub operation deadline must be finite");
+  return {
+    signal,
+    now,
+    runner: internal?.runProcess ?? runProcess,
+    injectedRunner: internal?.runProcess !== undefined,
+    deadline,
+    remainingGhBytes: positiveInteger(
+      internal?.maxGhOutputBytes ?? GITHUB_OUTPUT_BYTES,
+      "maxGhOutputBytes",
+    ),
+    maxGistFiles: positiveInteger(internal?.maxGistFiles ?? GIST_FILE_LIMIT, "maxGistFiles"),
+  };
+}
+function remainingTime(context: GithubOperationContext): number {
+  throwIfAborted(context.signal);
+  const now = context.now();
+  if (!Number.isFinite(now)) throw new Error("now must return a finite number");
+  const remaining = context.deadline - now;
+  if (remaining <= 0) throw new AgentscrapeTimeoutError(DEADLINE_MESSAGE);
+  return remaining;
+}
+function checkpoint(context: GithubOperationContext): void {
+  remainingTime(context);
+}
+
+async function gh(args: string[], context: GithubOperationContext): Promise<string> {
+  checkpoint(context);
+  if (context.remainingGhBytes <= 0) throw new AgentscrapeProviderError(OUTPUT_MESSAGE, false);
+  if (!context.injectedRunner && !findExecutable("gh"))
     throw new AgentscrapeError(
       "GitHub CLI (gh) not found on PATH — install it from https://cli.github.com",
     );
-  const result = await runProcess(["gh", ...args], {
-    timeoutMs: 60_000,
-    maxOutputBytes: 16_000_000,
-    env: { GH_NO_PROMPT: "1" },
-    ...(signal ? { signal } : {}),
-  });
-  if (signal?.aborted) throw cancellationError(signal);
-  if (result.timedOut) throw new AgentscrapeTimeoutError("GitHub CLI request timed out");
-  if (result.truncated)
-    throw new AgentscrapeProviderError("GitHub CLI response exceeded the output limit", false);
+  const availableBytes = context.remainingGhBytes;
+  let result: ProcessResult;
+  try {
+    result = await context.runner(["gh", ...args], {
+      timeoutMs: remainingTime(context),
+      maxOutputBytes: availableBytes,
+      env: { GH_NO_PROMPT: "1" },
+      ...(context.signal ? { signal: context.signal } : {}),
+    });
+  } catch (error) {
+    if (context.signal?.aborted) throw cancellationError(context.signal);
+    throw error;
+  }
+  if (context.signal?.aborted) throw cancellationError(context.signal);
+
+  const stdoutBytes = new TextEncoder().encode(result.stdout).byteLength;
+  const overflowed = stdoutBytes > availableBytes;
+  context.remainingGhBytes = Math.max(0, availableBytes - stdoutBytes);
+  if (result.timedOut) throw new AgentscrapeTimeoutError(DEADLINE_MESSAGE);
+  if (result.truncated) throw new AgentscrapeProviderError(OUTPUT_MESSAGE, false);
+  if (overflowed) throw new AgentscrapeProviderError(OUTPUT_MESSAGE, false);
+  checkpoint(context);
+
   if (result.exitCode === 0) return result.stdout;
   const status = Number(result.stderr.match(/\(HTTP (\d+)\)/)?.[1]);
   if (result.exitCode === 4 || status === 401)
@@ -134,8 +220,8 @@ async function gh(args: string[], signal?: AbortSignal): Promise<string> {
     Number.isFinite(status) ? status : undefined,
   );
 }
-async function raw(path: string, signal?: AbortSignal): Promise<string> {
-  return gh(["api", "-H", "Accept: application/vnd.github.raw+json", "--", path], signal);
+async function raw(path: string, context: GithubOperationContext): Promise<string> {
+  return gh(["api", "-H", "Accept: application/vnd.github.raw+json", "--", path], context);
 }
 function language(name: string): string {
   return (
@@ -173,48 +259,67 @@ function language(name: string): string {
     )[extname(name)] ?? ""
   );
 }
-function notebook(content: string): string {
+function notebook(content: string, context: GithubOperationContext): string {
+  checkpoint(context);
   const value = JSON.parse(content) as {
-    cells?: Array<{ cell_type?: string; source?: string[] }>;
+    cells?: Array<{ cell_type?: string; source?: string | string[] }>;
     metadata?: { language_info?: { name?: string } };
   };
   return (value.cells ?? [])
     .flatMap((cell) => {
-      const source = (cell.source ?? []).join("");
+      const source = typeof cell.source === "string" ? cell.source : (cell.source ?? []).join("");
       if (cell.cell_type === "markdown") return [source];
       if (cell.cell_type === "code")
-        return [`\`\`\`${value.metadata?.language_info?.name ?? "python"}\n${source}\n\`\`\``];
+        return [fencedCodeBlock(source, value.metadata?.language_info?.name ?? "python")];
       return [];
     })
     .join("\n\n");
 }
-async function asMarkdown(content: string, name: string, signal?: AbortSignal): Promise<string> {
-  throwIfAborted(signal);
+async function asMarkdown(
+  content: string,
+  name: string,
+  context: GithubOperationContext,
+): Promise<string> {
+  checkpoint(context);
   const lower = name.toLowerCase();
   if (lower.endsWith(".md")) return content;
-  if (lower.endsWith(".ipynb")) return notebook(content);
-  if (lower.endsWith(".html") || lower.endsWith(".htm")) return convertHtml(content);
+  if (lower.endsWith(".ipynb")) return notebook(content, context);
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+    checkpoint(context);
+    return convertHtml(content);
+  }
   if (lower.endsWith(".rst")) {
-    if (!findExecutable("pandoc"))
+    checkpoint(context);
+    if (!context.injectedRunner && !findExecutable("pandoc"))
       throw new AgentscrapeError("pandoc not found on PATH — install it to convert .rst files");
-    const result = await runProcess(["pandoc", "-f", "rst", "-t", "markdown"], {
-      stdin: content,
-      ...(signal ? { signal } : {}),
-    });
-    if (signal?.aborted) throw cancellationError(signal);
-    if (result.timedOut) throw new AgentscrapeTimeoutError("pandoc conversion timed out");
+    let result: ProcessResult;
+    try {
+      result = await context.runner(["pandoc", "-f", "rst", "-t", "markdown"], {
+        stdin: content,
+        timeoutMs: remainingTime(context),
+        maxOutputBytes: PANDOC_OUTPUT_BYTES,
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+    } catch (error) {
+      if (context.signal?.aborted) throw cancellationError(context.signal);
+      throw error;
+    }
+    if (context.signal?.aborted) throw cancellationError(context.signal);
+    if (result.timedOut) throw new AgentscrapeTimeoutError(DEADLINE_MESSAGE);
     if (result.truncated)
       throw new AgentscrapeProviderError("pandoc response exceeded the output limit", false);
+    checkpoint(context);
     return result.exitCode === 0 && result.stdout.trim() ? result.stdout : content;
   }
-  return `**${name.split("/").pop()}**\n\n\`\`\`${language(lower)}\n${content}\n\`\`\``;
+  checkpoint(context);
+  return `**${name.split("/").pop()}**\n\n${fencedCodeBlock(content, language(lower))}`;
 }
 function apiPath(target: GithubTarget, branch = target.branch!, path = target.path!): string {
   return `repos/${target.owner}/${target.repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(branch)}`;
 }
-async function fetchBlob(target: GithubTarget, signal?: AbortSignal): Promise<string> {
+async function fetchBlob(target: GithubTarget, context: GithubOperationContext): Promise<string> {
   try {
-    return asMarkdown(await raw(apiPath(target), signal), target.path!, signal);
+    return asMarkdown(await raw(apiPath(target), context), target.path!, context);
   } catch (error) {
     if (
       !(error instanceof AgentscrapeProviderError) ||
@@ -232,7 +337,7 @@ async function fetchBlob(target: GithubTarget, signal?: AbortSignal): Promise<st
           "--",
           `repos/${target.owner}/${target.repo}/branches`,
         ],
-        signal,
+        context,
       )
     )
       .split(/\r?\n/)
@@ -243,56 +348,72 @@ async function fetchBlob(target: GithubTarget, signal?: AbortSignal): Promise<st
       .sort((a, b) => b.length - a.length)[0];
     if (!branch) throw error;
     const path = full.slice(branch.length + 1);
-    return asMarkdown(await raw(apiPath(target, branch, path), signal), path, signal);
+    return asMarkdown(await raw(apiPath(target, branch, path), context), path, context);
   }
 }
 
-async function fetchTarget(target: GithubTarget, signal?: AbortSignal): Promise<string> {
-  throwIfAborted(signal);
+function scanGistFiles(output: string, context: GithubOperationContext): string[] {
+  checkpoint(context);
+  const files: string[] = [];
+  let start = 0;
+  for (let index = 0; index <= output.length; index += 1) {
+    if (index !== output.length && output[index] !== "\n") continue;
+    let file = output.slice(start, index);
+    if (file.endsWith("\r")) file = file.slice(0, -1);
+    start = index + 1;
+    if (!file) continue;
+    files.push(file);
+    if (files.length > context.maxGistFiles)
+      throw new AgentscrapeProviderError(GIST_FILES_MESSAGE, false);
+  }
+  return files;
+}
+
+async function fetchTarget(target: GithubTarget, context: GithubOperationContext): Promise<string> {
+  checkpoint(context);
   validate(target);
   if (target.type === "repo") {
     const path = `repos/${target.owner}/${target.repo}/readme${target.branch ? `?ref=${encodeURIComponent(target.branch)}` : ""}`;
-    const name = (await gh(["api", "-q", ".name", "--", path], signal)).trim();
-    return asMarkdown(await raw(path, signal), name, signal);
+    const name = (await gh(["api", "-q", ".name", "--", path], context)).trim();
+    return asMarkdown(await raw(path, context), name, context);
   }
-  if (target.type === "blob") return fetchBlob(target, signal);
+  if (target.type === "blob") return fetchBlob(target, context);
   if (target.type === "issue")
     return gh(
       ["issue", "view", "--repo", `${target.owner}/${target.repo}`, "--", target.number!],
-      signal,
+      context,
     );
   if (target.type === "pr")
     return gh(
       ["pr", "view", "--repo", `${target.owner}/${target.repo}`, "--", target.number!],
-      signal,
+      context,
     );
   if (target.type === "gist") {
-    const files = (await gh(["gist", "view", target.id!, "--files"], signal))
-      .trim()
-      .split(/\r?\n/)
-      .filter(Boolean);
+    const files = scanGistFiles(
+      await gh(["gist", "view", target.id!, "--files"], context),
+      context,
+    );
     if (!files.length) throw new AgentscrapeError(`gist ${target.id} has no files`);
     const sections: string[] = [];
     for (const file of files) {
       const content = await gh(
         ["gist", "view", target.id!, ...(files.length > 1 ? ["-f", file] : []), "--raw"],
-        signal,
+        context,
       );
       sections.push(
         file.endsWith(".md") && files.length === 1
           ? content
           : file.endsWith(".md")
             ? `## ${file}\n\n${content}`
-            : `${files.length > 1 ? `## ${file}\n\n` : `**${file}**\n\n`}\`\`\`${language(file)}\n${content}\n\`\`\``,
+            : `${files.length > 1 ? `## ${file}\n\n` : `**${file}**\n\n`}${fencedCodeBlock(content, language(file))}`,
       );
     }
     return sections.join("\n\n---\n\n");
   }
   if (target.type === "profile") {
-    const data = JSON.parse(await gh(["api", "--", `users/${target.owner}`], signal)) as Record<
-      string,
-      unknown
-    >;
+    const response = await gh(["api", "--", `users/${target.owner}`], context);
+    checkpoint(context);
+    const data = JSON.parse(response) as Record<string, unknown>;
     const lines = [
       `# ${data.name || data.login}`,
       "",
@@ -311,16 +432,16 @@ async function fetchTarget(target: GithubTarget, signal?: AbortSignal): Promise<
     return `${lines.join("\n").trim()}\n`;
   }
   if (target.type === "compare") {
-    const data = JSON.parse(
-      await gh(
-        [
-          "api",
-          "--",
-          `repos/${target.owner}/${target.repo}/compare/${encodeURIComponent(target.compare!).replaceAll("%2E", ".")}`,
-        ],
-        signal,
-      ),
-    ) as Record<string, any>;
+    const response = await gh(
+      [
+        "api",
+        "--",
+        `repos/${target.owner}/${target.repo}/compare/${encodeURIComponent(target.compare!).replaceAll("%2E", ".")}`,
+      ],
+      context,
+    );
+    checkpoint(context);
+    const data = JSON.parse(response) as Record<string, any>;
     const lines = [
       `# Compare ${target.owner}/${target.repo}: ${target.compare}`,
       "",
@@ -348,9 +469,12 @@ async function fetchTarget(target: GithubTarget, signal?: AbortSignal): Promise<
     }
     return `${lines.join("\n")}\n`;
   }
-  const data = JSON.parse(await gh(["api", "--", apiPath(target)], signal)) as any;
+  const response = await gh(["api", "--", apiPath(target)], context);
+  checkpoint(context);
+  const data = JSON.parse(response) as any;
+  checkpoint(context);
   if (!Array.isArray(data))
-    return asMarkdown(await raw(apiPath(target), signal), target.path!, signal);
+    return asMarkdown(await raw(apiPath(target), context), target.path!, context);
   const lines = [
     `# ${target.owner}/${target.repo}/${target.path}`,
     "",
@@ -368,11 +492,14 @@ async function fetchTarget(target: GithubTarget, signal?: AbortSignal): Promise<
 export async function fetchGithubIfApplicable(
   url: string,
   signal?: AbortSignal,
+  INTERNAL?: GithubInternalOptions,
 ): Promise<ScrapeResult<GenericPage> | null> {
   throwIfAborted(signal);
   const target = parseGithubUrl(url);
   if (!target) return null;
-  const markdown = await fetchTarget(target, signal);
+  const context = createContext(signal, INTERNAL);
+  const markdown = await fetchTarget(target, context);
+  checkpoint(context);
   const structured = new GenericPage(url, markdown);
   return { full_html: "", selected_html: "", markdown, structured };
 }

@@ -6,7 +6,7 @@ import { currentBrowserProfile, withBrowserProfile } from "../src/browser";
 import { checkInvariants } from "../src/canary";
 import { loadMeta, runSample, testCorpus } from "../src/corpus";
 import { isGithubUrl, parseGithubUrl } from "../src/github";
-import { convertHtml, renderRichMarkdown, safeLink } from "../src/html";
+import { convertHtml, fencedCodeBlock, renderRichMarkdown, safeLink } from "../src/html";
 import { loadRegistry } from "../src/presets";
 import { retryDelay } from "../src/queue";
 import { isSensitiveName, redactDiagnostic } from "../src/redaction";
@@ -32,7 +32,29 @@ describe("HTML and rich text", () => {
     expect(markdown).toContain("World");
     expect(markdown).not.toContain("bad()");
   });
-  test("adaptive fences survive literal backtick runs", () => {
+  test("fenced code helper adapts fences, filters info tokens, and preserves endings", () => {
+    const cases = [
+      ["a```b", "ts", "````ts\na```b\n````"],
+      ["a````b", "typescript", "`````typescript\na````b\n`````"],
+      ["a`````b", "c++", "``````c++\na`````b\n``````"],
+      ["value", "unsafe token", "```\nvalue\n```"],
+      ["value", `x${"y".repeat(64)}`, "```\nvalue\n```"],
+      ["", "", "```\n```"],
+      ["value", "", "```\nvalue\n```"],
+      ["value\n", "", "```\nvalue\n```"],
+      ["value\n\n", "", "```\nvalue\n\n```"],
+    ] as const;
+    for (const [code, language, expected] of cases)
+      expect(fencedCodeBlock(code, language)).toBe(expected);
+  });
+  test("fences multi-megabyte alternating-backtick content without argument overflow", () => {
+    const code = "`x".repeat(1_100_000);
+    const block = fencedCodeBlock(code);
+    expect(block.startsWith("```\n")).toBeTrue();
+    expect(block.endsWith("\n```")).toBeTrue();
+    expect(block.slice(4, -4)).toBe(code);
+  });
+  test("adaptive HTML fences preserve the verified code round trip", () => {
     const markdown = renderRichMarkdown(
       '<pre><code class="language-ts">const fence = "```";\n</code></pre>',
     );

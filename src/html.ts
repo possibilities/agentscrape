@@ -21,9 +21,23 @@ export function safeLink(href: string | undefined, baseUrl = ""): string | null 
     return null;
   }
 }
-function fenceFor(code: string): string {
-  const longest = Math.max(0, ...[...code.matchAll(/`+/g)].map((match) => match[0].length));
-  return "`".repeat(Math.max(3, longest + 1));
+const SAFE_FENCE_INFO = /^[A-Za-z0-9_+.-]{1,64}$/;
+
+/** Build a Markdown code block whose fence cannot collide with its content. */
+export function fencedCodeBlock(code: string, language = ""): string {
+  let longest = 0;
+  let current = 0;
+  for (let index = 0; index < code.length; index += 1) {
+    if (code[index] === "`") {
+      current += 1;
+      if (current > longest) longest = current;
+    } else {
+      current = 0;
+    }
+  }
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  const info = SAFE_FENCE_INFO.test(language) ? language : "";
+  return `${fence}${info}\n${code}${code && !code.endsWith("\n") ? "\n" : ""}${fence}`;
 }
 
 /** Semantic HTML serializer with adaptive code fences and round-trip verification. */
@@ -55,12 +69,8 @@ export function renderRichMarkdown(
         if (match) language = match[1]!;
       }
       expected.push(code);
-      const fence = fenceFor(code);
       const token = `AGENTSCRAPECODEBLOCK${index}MARKER`;
-      blocks.set(
-        token,
-        `${fence}${options.fenceLanguage === false ? "" : language}\n${code}\n${fence}`,
-      );
+      blocks.set(token, fencedCodeBlock(code, options.fenceLanguage === false ? "" : language));
       $(element).replaceWith(`<p>${token}</p>`);
     });
   const service = new TurndownService({
