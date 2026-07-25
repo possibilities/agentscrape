@@ -21,7 +21,9 @@ import {
   discoverFeed,
   discoverFeedLive,
   type FeedOptions,
+  type RecordedFeedInputFailureKind,
   type RecordedFeedPage,
+  recordedFeedInputFailure,
 } from "./feed";
 import { convertHtml } from "./html";
 import { convertHtmlDirectory, readRegularFileNoFollow } from "./html-files";
@@ -410,10 +412,24 @@ async function fetchLinksCommand(args: string[], signal?: AbortSignal): Promise<
   output(resultOutput(result, selectedOutput));
   return 0;
 }
-function readBounded(path: string, max: number): string {
-  const content = readFileSync(path);
-  if (content.byteLength > max) throw new Error("recorded response exceeds byte limit");
-  return new TextDecoder("utf-8", { fatal: true }).decode(content);
+type RecordedReadResult =
+  | { ok: true; content: string }
+  | { ok: false; kind: RecordedFeedInputFailureKind };
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+function readBounded(path: string, max: number): RecordedReadResult {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    return { ok: false, kind: "read" };
+  }
+  if (bytes.byteLength > max) return { ok: false, kind: "response_limit" };
+  try {
+    return { ok: true, content: fatalUtf8Decoder.decode(bytes) };
+  } catch {
+    return { ok: false, kind: "invalid_utf8" };
+  }
 }
 async function discoverFeedCommand(
   args: string[],
@@ -517,21 +533,35 @@ async function discoverFeedCommand(
   if (recordedMode) {
     if (file === undefined) throw new AgentscrapeUsageError("discover-feed FILE is required");
     const pages: RecordedFeedPage[] = [];
-    for (let index = 0; index < pairs.length; index += 2)
-      pages.push({ url: pairs[index]!, content: readBounded(pairs[index + 1]!, maxBytes) });
-    result = discoverFeed(
-      {
-        url: sourceUrl,
-        content: readBounded(file, maxBytes),
-        kind: sourceKind as RecordedFeedPage["kind"],
-        validators: {
-          etag: one(parsed, "--etag") ?? null,
-          last_modified: one(parsed, "--last-modified") ?? null,
-        },
-      },
-      feedOptions,
-      pages,
-    );
+    let readFailure: RecordedFeedInputFailureKind | null = null;
+    for (let index = 0; index < pairs.length; index += 2) {
+      const read = readBounded(pairs[index + 1]!, maxBytes);
+      if (!read.ok) {
+        readFailure = read.kind;
+        break;
+      }
+      pages.push({ url: pairs[index]!, content: read.content });
+    }
+    if (readFailure) {
+      result = recordedFeedInputFailure(sourceUrl, readFailure);
+    } else {
+      const initial = readBounded(file, maxBytes);
+      result = initial.ok
+        ? discoverFeed(
+            {
+              url: sourceUrl,
+              content: initial.content,
+              kind: sourceKind as RecordedFeedPage["kind"],
+              validators: {
+                etag: one(parsed, "--etag") ?? null,
+                last_modified: one(parsed, "--last-modified") ?? null,
+              },
+            },
+            feedOptions,
+            pages,
+          )
+        : recordedFeedInputFailure(sourceUrl, initial.kind);
+    }
   } else {
     result = await discoverFeedLive({
       ...feedOptions,
@@ -541,8 +571,10 @@ async function discoverFeedCommand(
     });
   }
   if (signal?.aborted) throw cancellationError(signal);
-  output(outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result, null, 2));
-  return result.status === "failure" ? 1 : 0;
+  const serialized =
+    outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result, null, 2);
+  output(serialized);
+  return result.failure === null ? 0 : 1;
 }
 function presetPath(name: string): string | null {
   if (existsSync(name) && [".yaml", ".yml"].includes(extname(name))) return name;

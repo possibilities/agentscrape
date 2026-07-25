@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 const root = join(import.meta.dir, "..");
 const temporary: string[] = [];
@@ -89,7 +90,9 @@ describe("CLI offline smoke suite", () => {
       "https://blog.example.com/feed.xml",
     ]);
     expect(valid.code).toBe(0);
-    expect(JSON.parse(valid.stdout).status).toBe("success");
+    expect(valid.stderr).toBe("");
+    expect(JSON.parse(valid.stdout)).toMatchObject({ status: "success", failure: null });
+
     const invalid = await command([
       "discover-feed",
       "test/fixtures/feeds/invalid.xml",
@@ -97,7 +100,161 @@ describe("CLI offline smoke suite", () => {
       "https://blog.example.com/feed.xml",
     ]);
     expect(invalid.code).toBe(1);
-    expect(JSON.parse(invalid.stdout).failure.code).toBe("malformed_xml");
+    expect(invalid.stderr).toBe("");
+    expect(JSON.parse(invalid.stdout)).toMatchObject({
+      status: "failure",
+      failure: { code: "malformed_xml" },
+    });
+  });
+
+  test("recorded feed filesystem faults emit complete safe failures", async () => {
+    const directory = temp();
+    const source =
+      "https://blog.example.com/feed.xml?QUERY-SECRET-MARKER=value#FRAGMENT-SECRET-MARKER";
+    const normalizedSource = "https://blog.example.com/feed.xml";
+    const missing = join(directory, "LOCAL-MISSING-PATH-MARKER.xml");
+    const markedDirectory = join(directory, "LOCAL-DIRECTORY-PATH-MARKER");
+    mkdirSync(markedDirectory);
+    writeFileSync(join(markedDirectory, "content.xml"), "PRIVATE-FIXTURE-CONTENT-MARKER");
+
+    for (const path of [missing, markedDirectory]) {
+      const result = await command(["discover-feed", path, "--source-url", source]);
+      expect(result.code, path).toBe(1);
+      expect(result.stderr, path).toBe("");
+      expect(JSON.parse(result.stdout), path).toMatchObject({
+        schema_version: "1",
+        status: "failure",
+        source_url: normalizedSource,
+        source_format: "unknown",
+        validators: { etag: null, last_modified: null },
+        cursor: {
+          validators: { etag: null, last_modified: null },
+          newest_seen_at: null,
+          next_url: null,
+        },
+        items: [],
+        pagination: { pages: [], complete: false, stop_reason: "failed", next_url: null },
+        warnings: [],
+        failure: {
+          code: "invalid_options",
+          retryable: false,
+          message: "A recorded response could not be read.",
+        },
+      });
+      expect(`${result.stdout}${result.stderr}`).not.toContain(path);
+      expect(`${result.stdout}${result.stderr}`).not.toContain("PRIVATE-FIXTURE-CONTENT-MARKER");
+      expect(`${result.stdout}${result.stderr}`).not.toContain("QUERY-SECRET-MARKER");
+      expect(`${result.stdout}${result.stderr}`).not.toContain("FRAGMENT-SECRET-MARKER");
+    }
+  });
+
+  test("recorded feed byte and UTF-8 boundaries use stable failures", async () => {
+    const directory = temp();
+    const source = "https://blog.example.com/feed.xml";
+    const oversized = join(directory, "LOCAL-OVERSIZED-PATH-MARKER.xml");
+    const invalidUtf8 = join(directory, "LOCAL-UTF8-PATH-MARKER.xml");
+    writeFileSync(oversized, "PRIVATE-OVERSIZED-FIXTURE-CONTENT");
+    writeFileSync(invalidUtf8, Buffer.from([0x50, 0x52, 0x49, 0x56, 0x41, 0x54, 0x45, 0xc3, 0x28]));
+
+    const cases: Array<[string, string[], string, string, string]> = [
+      [
+        oversized,
+        ["--max-response-bytes", "8"],
+        "response_limit_exceeded",
+        "response_limit",
+        "A recorded response exceeds the configured byte limit.",
+      ],
+      [
+        invalidUtf8,
+        [],
+        "invalid_utf8",
+        "malformed_response",
+        "The feed response is not valid UTF-8.",
+      ],
+    ];
+    for (const [path, options, code, stop, message] of cases) {
+      const result = await command(["discover-feed", path, "--source-url", source, ...options]);
+      expect(result.code, code).toBe(1);
+      expect(result.stderr, code).toBe("");
+      expect(JSON.parse(result.stdout), code).toMatchObject({
+        status: "failure",
+        source_format: "unknown",
+        items: [],
+        pagination: { pages: [], stop_reason: stop },
+        failure: { code, retryable: false, message },
+      });
+      expect(`${result.stdout}${result.stderr}`).not.toContain(path);
+      expect(`${result.stdout}${result.stderr}`).not.toContain("PRIVATE");
+    }
+  });
+
+  test("a missing supplemental recorded page fails before initial-page parsing", async () => {
+    const directory = temp();
+    const missing = join(directory, "LOCAL-MISSING-PAGE-PATH-MARKER.xml");
+    const result = await command([
+      "discover-feed",
+      "test/fixtures/feeds/feed-page-1.xml",
+      "--source-url",
+      "https://paged.example.com/feed?page=1",
+      "--page",
+      "https://paged.example.com/feed?page=2",
+      missing,
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "failure",
+      items: [],
+      pagination: { pages: [], stop_reason: "failed" },
+      failure: { code: "invalid_options", message: "A recorded response could not be read." },
+    });
+    expect(`${result.stdout}${result.stderr}`).not.toContain(missing);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("page-one-item");
+  });
+
+  test("feed partial exit follows failure nullability and supports YAML", async () => {
+    const source = "https://paged.example.com/feed?page=1";
+    const missingPage = await command([
+      "discover-feed",
+      "test/fixtures/feeds/feed-page-1.xml",
+      "--source-url",
+      source,
+    ]);
+    expect(missingPage.code).toBe(0);
+    expect(missingPage.stderr).toBe("");
+    expect(JSON.parse(missingPage.stdout)).toMatchObject({
+      status: "partial",
+      pagination: { stop_reason: "missing_page" },
+      failure: null,
+    });
+
+    const malformedPage = await command([
+      "discover-feed",
+      "test/fixtures/feeds/feed-page-1.xml",
+      "--source-url",
+      source,
+      "--page",
+      "https://paged.example.com/feed?page=2",
+      "test/fixtures/feeds/invalid.xml",
+      "--format",
+      "yaml",
+    ]);
+    expect(malformedPage.code).toBe(1);
+    expect(malformedPage.stderr).toBe("");
+    expect(parseYaml(malformedPage.stdout)).toMatchObject({
+      status: "partial",
+      items: [{ stable_id: "page-one-item" }],
+      pagination: {
+        pages: [{ url: source }],
+        stop_reason: "malformed_page",
+      },
+      failure: { code: "malformed_xml", retryable: false },
+    });
+    expect(`${malformedPage.stdout}${malformedPage.stderr}`).not.toContain(
+      "test/fixtures/feeds/invalid.xml",
+    );
+    expect(`${malformedPage.stdout}${malformedPage.stderr}`).not.toContain("broken");
   });
   test("envelope mode handles invalid and claimed-domain requests without a browser", async () => {
     const invalid = await command(["fetch-markdown", "not-a-url", "--envelope"]);
