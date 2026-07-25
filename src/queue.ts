@@ -22,28 +22,17 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { fetchMarkdown, resetBrowserUnavailableCache } from "./api";
 import { AgentscrapeUpstreamDownError, cancellationError, throwIfAborted } from "./errors";
+import { resolveQueuePaths } from "./queue-paths";
 import { isSensitiveName, JWT_RE } from "./redaction";
 import { runProcess } from "./subprocess";
 
-function validatedDataRoot(name: string, value: string): string {
-  if (!value || value.includes("\0") || !isAbsolute(value))
-    throw new Error(`${name} must be a non-empty absolute path without NUL bytes`);
-  return resolve(value);
-}
-export function resolveDataHome(
-  env: NodeJS.ProcessEnv = process.env,
-  home: string = homedir(),
-): string {
-  if (env.AGENTSCRAPE_DATA_HOME !== undefined)
-    return validatedDataRoot("AGENTSCRAPE_DATA_HOME", env.AGENTSCRAPE_DATA_HOME);
-  if (env.XDG_DATA_HOME !== undefined)
-    return join(validatedDataRoot("XDG_DATA_HOME", env.XDG_DATA_HOME), "agentscrape");
-  return join(home, ".local", "share", "agentscrape");
-}
-export const DATA_HOME = resolveDataHome();
-export const QUEUE_DIR = join(DATA_HOME, "queue");
-export const FAILED_DIR = join(DATA_HOME, "failed");
-export const RECONCILIATION_DIR = join(DATA_HOME, "reconciliation");
+export { resolveDataHome } from "./queue-paths";
+
+const queuePaths = resolveQueuePaths();
+export const DATA_HOME = queuePaths.dataHome;
+export const QUEUE_DIR = queuePaths.queue;
+export const FAILED_DIR = queuePaths.failed;
+export const RECONCILIATION_DIR = queuePaths.reconciliation;
 const JOB_FIELDS = new Set(["url", "destination", "summarize", "frontmatter"]);
 const RECORD_FIELDS = new Set([...JOB_FIELDS, "indexer", "source"]);
 const FROZEN_LABELS = new Set(["agentbrain", "research-cache"]);

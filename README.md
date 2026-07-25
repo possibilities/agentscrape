@@ -164,7 +164,7 @@ Corpus metadata uses version `1`, declares `content`, `links`, or `nav-links` mo
 
 ## Queue
 
-Queue files live under `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set. Otherwise Agentscrape uses `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Browser-host outages retry in place with bounded exponential backoff; malformed and permanent failures move to `failed/`. Reconciliation is inventory-only unless `--apply` is given, persists private atomic outcomes before archiving source records, and admits imports through explicit `agentbrain` argv with a bounded timeout.
+Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Browser-host outages retry in place with bounded exponential backoff; malformed and permanent failures move to `failed/`. Reconciliation is inventory-only unless `--apply` is given, persists private atomic outcomes before archiving source records, and admits imports through explicit `agentbrain` argv with a bounded timeout.
 
 ## Development
 
