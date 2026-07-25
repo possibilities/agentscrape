@@ -836,6 +836,42 @@ describe("deterministic live feed discovery", () => {
     });
   });
 
+  test("rejects HTTPS downgrade from archive start with upgraded effective URL", async () => {
+    const source = "http://blog.example.com/archive";
+    const archiveStart = "http://blog.example.com/older";
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: source,
+        sourceKind: "archive",
+        archive: {
+          startUrl: archiveStart,
+          entrySelector: "article.entry",
+          linkSelector: "a.link",
+        },
+      },
+      {
+        transport: fakeTransport(
+          {
+            [source]: liveResponse(
+              "https://blog.example.com/archive",
+              "<html><article class='entry'><a class='link' href='/post'>Post</a></article></html>",
+              "text/html",
+            ),
+          },
+          requests,
+        ),
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "partial",
+      failure: { code: "unsafe_destination", retryable: false },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(source);
+  });
+
   test("preserves configured archive parsing in auto mode", async () => {
     const first = "https://blog.example.com/archive?page=1";
     const second = "https://blog.example.com/archive?page=2";
@@ -945,6 +981,54 @@ describe("deterministic live feed discovery", () => {
     expect(result.pagination.complete).toBeTrue();
     expect(result.pagination.pages.map((page) => page.url)).toEqual([first, second]);
     expect(requests.map((request) => request.url)).toEqual([first, second]);
+  });
+
+  test("parses five large live pages once without a cumulative parser-work failure", async () => {
+    const urls = Array.from(
+      { length: 5 },
+      (_, index) => `https://large.example.com/feed/page-${index + 1}.xml`,
+    );
+    const targetBytes = 2_000_000;
+    const page = (index: number) => {
+      const next = urls[index + 1];
+      const prefix = `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>large-page-${index + 1}</id></entry>${next ? `<link rel="next" href="${next}"/>` : ""}`;
+      const suffix = "</feed>";
+      return `${prefix}${" ".repeat(targetBytes - Buffer.byteLength(prefix + suffix, "utf8"))}${suffix}`;
+    };
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: urls[0]!,
+        sourceKind: "feed",
+        maxResponseBytes: targetBytes,
+        maxPages: 5,
+        maxItems: 5,
+        timeoutSeconds: 30,
+      },
+      {
+        transport: fakeTransport(
+          Object.fromEntries(
+            urls.map((url, index) => [url, liveResponse(url, page(index), "application/atom+xml")]),
+          ),
+          requests,
+        ),
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.failure).toBeNull();
+    expect(result.pagination.pages).toHaveLength(5);
+    expect(result.items.map((item) => item.stable_id)).toEqual([
+      "large-page-1",
+      "large-page-2",
+      "large-page-3",
+      "large-page-4",
+      "large-page-5",
+    ]);
+    expect(requests).toHaveLength(5);
+    expect(
+      result.warnings.some((warning) => warning.code === "response_limit_exceeded"),
+    ).toBeFalse();
   });
 
   test("returns partial evidence when a live pagination request fails", async () => {
@@ -1067,6 +1151,14 @@ describe("deterministic live feed discovery", () => {
       { transport: fakeTransport({ [source]: encodedResponse }) },
     );
     expect(encoded.failure?.code).toBe("unsupported_encoding");
+
+    const encodedOversizedResponse = liveResponse(source, "x".repeat(20));
+    encodedOversizedResponse.contentEncoding = "gzip";
+    const encodedOversized = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed", maxResponseBytes: 10 },
+      { transport: fakeTransport({ [source]: encodedOversizedResponse }) },
+    );
+    expect(encodedOversized.failure?.code).toBe("unsupported_encoding");
   });
 
   test("enforces the response byte cap at an injected transport boundary", async () => {
