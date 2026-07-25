@@ -569,6 +569,42 @@ function failure(
     failure: { code, retryable, message: clean(message, 200) },
   };
 }
+export type RecordedFeedInputFailureKind = "read" | "response_limit" | "invalid_utf8";
+
+/** Creates a complete failure for the CLI's recorded-response file boundary. */
+export function recordedFeedInputFailure(
+  source: string,
+  kind: RecordedFeedInputFailureKind,
+): FeedDiscoveryResult {
+  const safeSource = sourceUrl(source) ?? "";
+  switch (kind) {
+    case "read":
+      return failure(
+        safeSource,
+        "invalid_options",
+        "A recorded response could not be read.",
+        false,
+        "failed",
+      );
+    case "response_limit":
+      return failure(
+        safeSource,
+        "response_limit_exceeded",
+        "A recorded response exceeds the configured byte limit.",
+        false,
+        "response_limit",
+      );
+    case "invalid_utf8":
+      return failure(
+        safeSource,
+        "invalid_utf8",
+        "The feed response is not valid UTF-8.",
+        false,
+        "malformed_response",
+      );
+  }
+}
+
 function itemTime(value: FeedDiscoveryItem): number {
   return (
     normalizeDate(value.updated_at ?? value.published_at ?? "")?.timestamp ?? -8640000000000000

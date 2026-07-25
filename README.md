@@ -92,6 +92,8 @@ agentscrape discover-feed response.xml --source-url https://example.com/feed.xml
   --page https://example.com/feed.xml?page=2 response-page-2.xml
 ```
 
+Every completed feed result is serialized as JSON or YAML on stdout. Exit `0` means `failure` is null, including deliberate partial results such as a missing recorded pagination page; exit `1` means `failure` is non-null, including a partial result that preserves earlier evidence. Recorded-response read, byte-limit, and UTF-8 failures omit local paths and file content. Usage errors remain diagnostics on stderr with exit `2`.
+
 Live `auto` mode accepts a feed response directly. For an HTML source it follows only an explicit `<link rel="alternate">` whose type is RSS, Atom, XML, or text/XML; it never treats generic page-body HTML as feed entries. Use `--source-kind archive` plus `--archive-entry-selector` for configured HTML archives. `--etag` and `--last-modified` become conditional request validators in live mode. Direct `--source-kind feed` binds them to `--source-url`; auto/homepage mode requires an exact `--validator-url`, and sends them only if that exact response URL is reached.
 
 A redirect-capable transport call may carry a conditional bound to a different URL, but the direct transport applies its headers only when the current request URL exactly matches that binding, and a `304` is accepted only from that effective URL. A matching initial `304` produces a successful, complete empty window. A matching `304` during later pagination or archive traversal ends discovery while preserving items and page evidence from earlier responses.
