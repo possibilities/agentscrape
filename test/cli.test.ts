@@ -170,6 +170,21 @@ describe("CLI offline smoke suite", () => {
         [
           "discover-feed",
           "test/fixtures/feeds/rss.xml",
+          "test/fixtures/feeds/atom.xml",
+          "--source-url",
+          "https://blog.example.com/feed.xml",
+        ],
+        "at most one FILE",
+      ],
+      [["discover-feed", "test/fixtures/feeds/rss.xml"], "requires --source-url"],
+      [
+        ["discover-feed", "", "--source-url", "https://blog.example.com/feed.xml"],
+        "FILE must be non-empty",
+      ],
+      [
+        [
+          "discover-feed",
+          "test/fixtures/feeds/rss.xml",
           "--source-url",
           "https://blog.example.com/feed.xml",
           "--source-kind",
@@ -207,6 +222,7 @@ describe("CLI offline smoke suite", () => {
       ["--agent-teaser"],
       ["--help-json"],
       ["fetch-links", "--help-json"],
+      ["discover-feed", "--help-json"],
     ]) {
       const result = await command(argv);
       expect(result.code, argv.join(" ")).toBe(0);
@@ -214,8 +230,19 @@ describe("CLI offline smoke suite", () => {
     }
     const rootJson = (await command(["--help-json"])).stdout;
     const linksJson = (await command(["fetch-links", "--help-json"])).stdout;
+    const feedJson = JSON.parse((await command(["discover-feed", "--help-json"])).stdout);
     expect(() => JSON.parse(rootJson)).not.toThrow();
     expect(() => JSON.parse(linksJson)).not.toThrow();
+    expect(feedJson.arguments.find((argument: any) => argument.name === "file")).toMatchObject({
+      positional: true,
+      required: false,
+    });
+    expect(
+      feedJson.arguments.find((argument: any) => argument.name === "--source-url"),
+    ).toMatchObject({ required: true });
+    expect((await command(["discover-feed", "--help"])).stdout).toContain(
+      "discover-feed [FILE] --source-url URL",
+    );
     const markdownHelp = (await command(["fetch-markdown", "--help"])).stdout;
     for (const option of [
       "--selector",

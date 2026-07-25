@@ -16,7 +16,13 @@ import { runAgentBrowser, setMediaMode } from "./browser";
 import { checkPresets } from "./canary";
 import { captureCorpus, testCorpus } from "./corpus";
 import { AgentscrapeError, AgentscrapeUsageError, cancellationError } from "./errors";
-import { type ArchiveOptions, discoverFeed, type RecordedFeedPage } from "./feed";
+import {
+  type ArchiveOptions,
+  discoverFeed,
+  discoverFeedLive,
+  type FeedOptions,
+  type RecordedFeedPage,
+} from "./feed";
 import { convertHtml } from "./html";
 import { convertHtmlDirectory, readRegularFileNoFollow } from "./html-files";
 import { loadRegistry, validatePresetFile } from "./presets";
@@ -27,7 +33,7 @@ const DESCRIPTION = "Fetch and extract web content through an agent-friendly Bun
 const COMMANDS: Array<[string, string]> = [
   ["fetch-markdown URL [DEST]", "Fetch a document and emit Markdown or structured output"],
   ["fetch-links URL", "Extract navigation links or an account timeline"],
-  ["discover-feed FILE", "Discover entries in recorded RSS, Atom, or archive pages"],
+  ["discover-feed [FILE]", "Discover live or recorded RSS, Atom, or archive entries"],
   ["list-presets", "List extraction presets"],
   ["show-preset NAME", "Show a preset contract"],
   ["validate-preset NAME_OR_PATH", "Validate a preset contract"],
@@ -43,7 +49,7 @@ const COMMANDS: Array<[string, string]> = [
 const COMMAND_HELP: Record<string, string> = {
   "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
   "fetch-links": `Usage: agentscrape fetch-links URL [OPTIONS]\n\nOptions:\n  --preset NAME                  Select a links preset\n  --section-selector CSS         Section/navigation selector\n  --category-selector CSS        Category selector for two-level navigation\n  --toggle-selector CSS          Toggle/tab selector\n  --limit INTEGER                Positive X timeline item limit\n  --max-scrolls INTEGER          Positive X timeline scroll limit\n  --since-id ID                  Numeric X status cursor\n  --include-replies              Include X replies\n  --include-reposts              Include X reposts\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --json | --yaml | --markdown   Select output (default: yaml)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
-  "discover-feed": `Usage: agentscrape discover-feed FILE --source-url URL [OPTIONS]\n\nOptions:\n  --source-kind auto|feed|archive\n  --page URL FILE                Recorded pagination page (repeatable)\n  --etag VALUE                   Recorded ETag\n  --last-modified VALUE          Recorded Last-Modified value\n  --since DATE                   Retain entries at or after DATE\n  --max-response-bytes INTEGER   1..20000000 (default: 2000000)\n  --max-pages INTEGER            1..100 (default: 10)\n  --max-items INTEGER            1..10000 (default: 1000)\n  --timeout-seconds FLOAT        0.001..300 (default: 10)\n  --archive-start-url URL\n  --archive-entry-selector CSS   Required for archive discovery\n  --archive-link-selector CSS\n  --archive-date-selector CSS\n  --archive-date-attribute NAME\n  --archive-updated-selector CSS\n  --archive-next-selector CSS\n  --archive-id-attribute NAME\n  --archive-title-selector CSS\n  --archive-tombstone-selector CSS\n  --format json|yaml             Output format (default: json)\n  -h, --help                     Show help`,
+  "discover-feed": `Usage: agentscrape discover-feed [FILE] --source-url URL [OPTIONS]\n\nWith no FILE, Agentscrape fetches the source and pagination pages directly. One FILE preserves network-free recorded-response parsing.\n\nOptions:\n  --source-url URL               Requested feed, homepage, or archive URL (required)\n  --source-kind KIND             Source interpretation: auto, feed, or archive (default: auto)\n  --page URL FILE                Recorded pagination page; requires FILE (repeatable)\n  --etag VALUE                   Conditional ETag, or recorded initial-page validator\n  --last-modified VALUE          Conditional Last-Modified, or recorded validator\n  --validator-url URL            Exact live response URL bound to validators\n  --since DATE                   Retain entries at or after DATE\n  --max-response-bytes INTEGER   1..20000000 per response (default: 2000000)\n  --max-pages INTEGER            Recorded 1..100; live 1..10 (default: 10)\n  --max-items INTEGER            1..10000 entries (default: 1000)\n  --timeout-seconds FLOAT        0.001..300 overall seconds (default: 10)\n  --archive-start-url URL        Optional configured archive start URL\n  --archive-entry-selector CSS   Required for archive discovery\n  --archive-link-selector CSS    Archive entry link selector\n  --archive-date-selector CSS    Archive publication date selector\n  --archive-date-attribute NAME  Archive date attribute\n  --archive-updated-selector CSS Archive update date selector\n  --archive-next-selector CSS    Archive pagination selector\n  --archive-id-attribute NAME    Archive stable ID attribute\n  --archive-title-selector CSS   Archive title selector\n  --archive-tombstone-selector CSS Archive tombstone selector\n  --format FORMAT                Output format: json or yaml (default: json)\n  -h, --help                     Show help`,
   "list-presets": "Usage: agentscrape list-presets [--format json|yaml|human]",
   "show-preset": "Usage: agentscrape show-preset NAME [--format json|yaml|human]",
   "validate-preset": "Usage: agentscrape validate-preset NAME_OR_PATH [--format json|yaml|human]",
@@ -60,7 +66,7 @@ const COMMAND_HELP: Record<string, string> = {
   "reconcile-queue":
     "Usage: agentscrape reconcile-queue [--apply] [--limit INTEGER] [--format json|yaml]\n\n--limit must be an integer from 1 through 5000 (default: 500).",
 };
-const AGENT_HELP = `Agentscrape fetches Markdown, navigation links, recorded feeds, and strict preset output.\n\nUse fetch-markdown URL [DEST] for documents, fetch-links URL with a preset or selectors for navigation, and discover-feed FILE --source-url URL for network-free feed parsing. Browser-backed commands accept --media and --session. X timeline collection accepts --limit, --max-scrolls, --since-id, --include-replies, and --include-reposts. Envelope output is schema version 1 and emits a classified failure instead of diagnostics on stdout.`;
+const AGENT_HELP = `Agentscrape fetches Markdown, navigation links, live or recorded feeds, and strict preset output.\n\nUse fetch-markdown URL [DEST] for documents, fetch-links URL with a preset or selectors for navigation, and discover-feed [FILE] --source-url URL for bounded live discovery or network-free recorded parsing. Browser-backed commands accept --media and --session. X timeline collection accepts --limit, --max-scrolls, --since-id, --include-replies, and --include-reposts. Envelope output is schema version 1 and emits a classified failure instead of diagnostics on stdout.`;
 const SCHEMA_FIELDS: Record<string, string[]> = {
   AnthropicBilling: [
     "organization: str (default='')",
@@ -148,16 +154,16 @@ function help(command?: string): string {
 }
 function helpJson(command?: string): string {
   const commandText = command ? (COMMAND_HELP[command] ?? "") : "";
+  const usage = commandText.match(/^Usage: agentscrape \S+ (.+?)(?: \[OPTIONS\])?$/m)?.[1] ?? "";
+  const usageTokens = usage.split(/\s+/).filter(Boolean);
   const documentedOptions = [
     ...commandText.matchAll(/^ {2}(--[a-z][a-z-]*)(?:\s+([^\s|]+))?\s+(.*)$/gm),
   ].map((match) => ({
     name: match[1],
     type: match[2] ? "text" : "flag",
-    required: false,
+    required: usageTokens.includes(match[1] ?? ""),
     description: match[3]?.trim() ?? "",
   }));
-  const usage = commandText.match(/^Usage: agentscrape \S+ (.+?)(?: \[OPTIONS\])?$/m)?.[1] ?? "";
-  const usageTokens = usage.split(/\s+/).filter(Boolean);
   const firstOption = usageTokens.findIndex((token) => token.includes("--"));
   const positionals = usageTokens
     .slice(0, firstOption < 0 ? undefined : firstOption)
@@ -419,6 +425,7 @@ async function discoverFeedCommand(
     "--source-kind",
     "--etag",
     "--last-modified",
+    "--validator-url",
     "--since",
     "--max-response-bytes",
     "--max-pages",
@@ -440,9 +447,13 @@ async function discoverFeedCommand(
   const helpCode = commandHelp(parsed, "discover-feed");
   if (helpCode !== null) return helpCode;
   const [file] = parsed.positionals;
+  const recordedMode = parsed.positionals.length === 1;
   const sourceUrl = one(parsed, "--source-url");
-  if (!file || parsed.positionals.length !== 1 || !sourceUrl)
-    throw new AgentscrapeUsageError("discover-feed requires FILE and --source-url URL");
+  if (parsed.positionals.length > 1)
+    throw new AgentscrapeUsageError("discover-feed accepts at most one FILE");
+  if (recordedMode && file?.length === 0)
+    throw new AgentscrapeUsageError("discover-feed FILE must be non-empty");
+  if (!sourceUrl) throw new AgentscrapeUsageError("discover-feed requires --source-url URL");
   const sourceKind = (one(parsed, "--source-kind") ?? "auto").toLowerCase();
   if (!["auto", "feed", "archive"].includes(sourceKind))
     throw new AgentscrapeUsageError("--source-kind must be auto, feed, or archive");
@@ -457,9 +468,10 @@ async function discoverFeedCommand(
     max: 20_000_000,
   })!;
   const pairs = all(parsed, "--page");
-  const pages: RecordedFeedPage[] = [];
-  for (let index = 0; index < pairs.length; index += 2)
-    pages.push({ url: pairs[index]!, content: readBounded(pairs[index + 1]!, maxBytes) });
+  if (!recordedMode && pairs.length)
+    throw new AgentscrapeUsageError("--page is available only in recorded mode with FILE");
+  if (recordedMode && one(parsed, "--validator-url") !== undefined)
+    throw new AgentscrapeUsageError("--validator-url is available only in live mode");
   const entrySelector = one(parsed, "--archive-entry-selector");
   let archive: ArchiveOptions | undefined;
   const archiveNames = valueNames.filter((name) => name.startsWith("--archive-"));
@@ -479,40 +491,55 @@ async function discoverFeedCommand(
       tombstoneSelector: one(parsed, "--archive-tombstone-selector"),
     };
   }
-  const result = discoverFeed(
-    {
-      url: sourceUrl,
-      content: readBounded(file, maxBytes),
-      kind: sourceKind as RecordedFeedPage["kind"],
-      validators: {
-        etag: one(parsed, "--etag") ?? null,
-        last_modified: one(parsed, "--last-modified") ?? null,
+  const feedOptions: FeedOptions = {
+    sourceUrl,
+    sourceKind: sourceKind as "auto" | "feed" | "archive",
+    since: one(parsed, "--since"),
+    maxResponseBytes: maxBytes,
+    maxPages: numberOption(parsed, "--max-pages", 10, {
+      integer: true,
+      min: 1,
+      max: 100,
+    }),
+    maxItems: numberOption(parsed, "--max-items", 1000, {
+      integer: true,
+      min: 1,
+      max: 10_000,
+    }),
+    timeoutSeconds: numberOption(parsed, "--timeout-seconds", 10, {
+      min: 0.001,
+      max: 300,
+    }),
+    archive,
+    signal,
+  };
+  let result: ReturnType<typeof discoverFeed>;
+  if (recordedMode) {
+    if (file === undefined) throw new AgentscrapeUsageError("discover-feed FILE is required");
+    const pages: RecordedFeedPage[] = [];
+    for (let index = 0; index < pairs.length; index += 2)
+      pages.push({ url: pairs[index]!, content: readBounded(pairs[index + 1]!, maxBytes) });
+    result = discoverFeed(
+      {
+        url: sourceUrl,
+        content: readBounded(file, maxBytes),
+        kind: sourceKind as RecordedFeedPage["kind"],
+        validators: {
+          etag: one(parsed, "--etag") ?? null,
+          last_modified: one(parsed, "--last-modified") ?? null,
+        },
       },
-    },
-    {
-      sourceUrl,
-      sourceKind: sourceKind as "auto" | "feed" | "archive",
-      since: one(parsed, "--since"),
-      maxResponseBytes: maxBytes,
-      maxPages: numberOption(parsed, "--max-pages", 10, {
-        integer: true,
-        min: 1,
-        max: 100,
-      }),
-      maxItems: numberOption(parsed, "--max-items", 1000, {
-        integer: true,
-        min: 1,
-        max: 10_000,
-      }),
-      timeoutSeconds: numberOption(parsed, "--timeout-seconds", 10, {
-        min: 0.001,
-        max: 300,
-      }),
-      archive,
-      signal,
-    },
-    pages,
-  );
+      feedOptions,
+      pages,
+    );
+  } else {
+    result = await discoverFeedLive({
+      ...feedOptions,
+      etag: one(parsed, "--etag"),
+      lastModified: one(parsed, "--last-modified"),
+      validatorUrl: one(parsed, "--validator-url"),
+    });
+  }
   if (signal?.aborted) throw cancellationError(signal);
   output(outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result, null, 2));
   return result.status === "failure" ? 1 : 0;

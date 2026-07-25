@@ -1,10 +1,106 @@
 import { describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
+import type { RequestOptions } from "node:https";
 import { join } from "node:path";
-import { discoverFeed } from "../src/feed";
+import { PassThrough } from "node:stream";
+import {
+  createDirectFeedTransport,
+  discoverFeed,
+  discoverFeedLive,
+  type FeedRequestFactory,
+  type FeedTransport,
+  type FeedTransportRequest,
+  type FeedTransportResponse,
+} from "../src/feed";
 
 const root = join(import.meta.dir, "fixtures/feeds");
 const content = (name: string) => readFileSync(join(root, name), "utf8");
+
+function liveResponse(
+  url: string,
+  body: string,
+  contentType: string | null = "application/rss+xml",
+  status = 200,
+  validators: FeedTransportResponse["validators"] = { etag: null, last_modified: null },
+): FeedTransportResponse {
+  return {
+    url,
+    status,
+    content: body,
+    contentType,
+    contentEncoding: null,
+    validators,
+    conditionalApplied: false,
+  };
+}
+
+interface ScriptedSocketResponse {
+  status: number;
+  headers?: IncomingHttpHeaders;
+  chunks?: Array<string | Uint8Array>;
+  hold?: boolean;
+}
+
+function scriptedRequestFactory(
+  scripts: ScriptedSocketResponse[],
+  captures: Array<{ protocol: string; options: RequestOptions }> = [],
+): FeedRequestFactory {
+  return (protocol, options, callback) => {
+    captures.push({ protocol, options });
+    const request = new EventEmitter() as ClientRequest;
+    let destroyed = false;
+    request.destroy = ((error?: Error) => {
+      if (destroyed) return request;
+      destroyed = true;
+      if (error) queueMicrotask(() => request.emit("error", error));
+      return request;
+    }) as ClientRequest["destroy"];
+    request.end = (() => {
+      const script = scripts.shift();
+      if (!script) throw new Error("unexpected direct request");
+      if (script.hold) return request;
+      queueMicrotask(() => {
+        if (destroyed) return;
+        const stream = new PassThrough();
+        const response = stream as unknown as IncomingMessage;
+        response.statusCode = script.status;
+        response.headers = script.headers ?? {};
+        callback(response);
+        for (const chunk of script.chunks ?? []) stream.write(chunk);
+        stream.end();
+      });
+      return request;
+    }) as ClientRequest["end"];
+    return request;
+  };
+}
+
+function fakeTransport(
+  routes: Record<string, FeedTransportResponse | FeedTransportResponse[]>,
+  requests: FeedTransportRequest[] = [],
+): FeedTransport {
+  const queues = new Map(
+    Object.entries(routes).map(([url, response]) => [
+      url,
+      Array.isArray(response) ? [...response] : [response],
+    ]),
+  );
+  return async (request) => {
+    requests.push(request);
+    const response = queues.get(request.url)?.shift();
+    if (!response) throw new Error("unexpected fake feed request");
+    return {
+      ...response,
+      conditionalApplied: Boolean(
+        request.conditional &&
+          request.conditional.url === response.url &&
+          (request.conditional.etag || request.conditional.lastModified),
+      ),
+    };
+  };
+}
 
 describe("network-free feed discovery", () => {
   test("parses RSS identities, dates, canonical URLs, and validators", () => {
@@ -199,5 +295,615 @@ describe("network-free feed discovery", () => {
         { sourceUrl: source, signal: controller.signal },
       ).failure?.code,
     ).toBe("cancelled");
+  });
+});
+
+describe("direct feed socket boundary", () => {
+  const resolver = async () => [{ address: "8.8.8.8", family: 4 as const }];
+
+  test("pins the public address while retaining Host, SNI, TLS verification, and limits", async () => {
+    const captures: Array<{ protocol: string; options: RequestOptions }> = [];
+    const transport = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory(
+        [
+          {
+            status: 200,
+            headers: { "content-type": "application/atom+xml" },
+            chunks: [content("atom.xml")],
+          },
+        ],
+        captures,
+      ),
+    });
+    const source = "https://feeds.example.com:8443/atom.xml?q=1";
+    const response = await transport({
+      url: source,
+      maxResponseBytes: 2_000_000,
+      timeoutMilliseconds: 1_000,
+      conditional: { url: source, etag: '"v1"', lastModified: null },
+    });
+
+    expect(response.status).toBe(200);
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({
+      protocol: "https:",
+      options: {
+        hostname: "8.8.8.8",
+        family: 4,
+        servername: "feeds.example.com",
+        path: "/atom.xml?q=1",
+        agent: false,
+        maxHeaderSize: 16_384,
+      },
+    });
+    const headers = captures[0]?.options.headers as Record<string, string>;
+    expect(headers.host).toBe("feeds.example.com:8443");
+    expect(headers["if-none-match"]).toBe('"v1"');
+    expect(captures[0]?.options.rejectUnauthorized).not.toBe(false);
+  });
+
+  test("follows safe redirects without forwarding resource-bound validators", async () => {
+    const captures: Array<{ protocol: string; options: RequestOptions }> = [];
+    const source = "https://feeds.example.com/feed.xml";
+    const transport = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory(
+        [
+          {
+            status: 302,
+            headers: { location: "https://cdn.example.com/feed.xml" },
+          },
+          { status: 200, chunks: [content("atom.xml")] },
+        ],
+        captures,
+      ),
+    });
+    const response = await transport({
+      url: source,
+      maxResponseBytes: 2_000_000,
+      timeoutMilliseconds: 1_000,
+      conditional: {
+        url: "https://cdn.example.com/feed.xml",
+        etag: '"v1"',
+        lastModified: null,
+      },
+    });
+
+    expect(response.url).toBe("https://cdn.example.com/feed.xml");
+    expect(captures).toHaveLength(2);
+    const first = captures[0];
+    const second = captures[1];
+    if (!first || !second) throw new Error("expected two direct requests");
+    expect((first.options.headers as Record<string, string>)["if-none-match"]).toBeUndefined();
+    expect((second.options.headers as Record<string, string>)["if-none-match"]).toBe('"v1"');
+  });
+
+  test("applies an effective-resource validator only after a safe redirect", async () => {
+    const source = "https://feeds.example.com/feed.xml";
+    const effective = "https://cdn.example.com/feed.xml";
+    const captures: Array<{ protocol: string; options: RequestOptions }> = [];
+    const transport = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory(
+        [
+          { status: 302, headers: { location: effective } },
+          { status: 304, headers: { etag: '"v1"' } },
+        ],
+        captures,
+      ),
+    });
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: source,
+        sourceKind: "feed",
+        validatorUrl: effective,
+        etag: '"v1"',
+      },
+      { transport },
+    );
+
+    expect(result).toMatchObject({
+      status: "success",
+      pagination: { stop_reason: "not_modified" },
+      validators: { etag: '"v1"' },
+    });
+    expect(captures).toHaveLength(2);
+    const first = captures[0];
+    const second = captures[1];
+    if (!first || !second) throw new Error("expected redirect request pair");
+    expect((first.options.headers as Record<string, string>)["if-none-match"]).toBeUndefined();
+    expect((second.options.headers as Record<string, string>)["if-none-match"]).toBe('"v1"');
+  });
+
+  test("rejects HTTPS redirect downgrade before opening the target socket", async () => {
+    const scripts = [
+      {
+        status: 302,
+        headers: { location: "http://feeds.example.com/plain.xml" },
+      },
+    ];
+    const transport = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory(scripts),
+    });
+    await expect(
+      transport({
+        url: "https://feeds.example.com/feed.xml",
+        maxResponseBytes: 1_000,
+        timeoutMilliseconds: 1_000,
+      }),
+    ).rejects.toMatchObject({ code: "unsafe_destination", retryable: false });
+    expect(scripts).toHaveLength(0);
+  });
+
+  test("enforces streamed bytes, fatal UTF-8, and abort cleanup", async () => {
+    const overflow = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory([{ status: 200, chunks: ["1234", "5678"] }]),
+    });
+    await expect(
+      overflow({
+        url: "https://feeds.example.com/feed.xml",
+        maxResponseBytes: 7,
+        timeoutMilliseconds: 1_000,
+      }),
+    ).rejects.toMatchObject({ code: "response_limit_exceeded" });
+
+    const invalidUtf8 = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory([
+        { status: 200, chunks: [new Uint8Array([0xc3, 0x28])] },
+      ]),
+    });
+    await expect(
+      invalidUtf8({
+        url: "https://feeds.example.com/feed.xml",
+        maxResponseBytes: 10,
+        timeoutMilliseconds: 1_000,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_utf8" });
+
+    const controller = new AbortController();
+    const held = createDirectFeedTransport({
+      resolver,
+      requestFactory: scriptedRequestFactory([{ status: 200, hold: true }]),
+    });
+    const pending = held({
+      url: "https://feeds.example.com/feed.xml",
+      maxResponseBytes: 10,
+      timeoutMilliseconds: 1_000,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "cancelled" });
+  });
+});
+
+describe("deterministic live feed discovery", () => {
+  test("fetches a direct RSS source and records the redirect-effective page URL", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const effective = "https://cdn.example.com/feed.xml";
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed" },
+      {
+        transport: fakeTransport(
+          { [source]: liveResponse(effective, content("rss.xml")) },
+          requests,
+        ),
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.source_url).toBe(source);
+    expect(result.source_format).toBe("rss");
+    expect(result.pagination.pages[0]?.url).toBe(effective);
+    expect(result.items).toHaveLength(2);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("autodiscovers only an explicit typed alternate link and keeps validators off the homepage", async () => {
+    const homepage = "https://blog.example.com/";
+    const feed = "https://blog.example.com/atom.xml";
+    const requests: FeedTransportRequest[] = [];
+    const html = `<!doctype html><html><head><link rel="stylesheet alternate" type="application/atom+xml" href="/atom.xml"></head><body><a href="/other.xml">RSS</a></body></html>`;
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: homepage,
+        validatorUrl: feed,
+        etag: '"feed-v2"',
+        lastModified: "Wed, 08 Jul 2026 00:00:00 GMT",
+      },
+      {
+        transport: fakeTransport(
+          {
+            [homepage]: liveResponse(homepage, html, "text/html; charset=utf-8"),
+            [feed]: liveResponse(feed, content("atom.xml"), "application/atom+xml"),
+          },
+          requests,
+        ),
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.source_url).toBe(homepage);
+    expect(result.pagination.pages[0]?.url).toBe(feed);
+    const boundConditional = {
+      url: feed,
+      etag: '"feed-v2"',
+      lastModified: "Wed, 08 Jul 2026 00:00:00 GMT",
+    };
+    expect(requests.map((request) => request.conditional)).toEqual([
+      boundConditional,
+      boundConditional,
+    ]);
+  });
+
+  test("does not send validators when a homepage changes its feed target", async () => {
+    const homepage = "https://blog.example.com/";
+    const oldFeed = "https://blog.example.com/old.xml";
+    const newFeed = "https://blog.example.com/new.xml";
+    const requests: FeedTransportRequest[] = [];
+    const html = `<html><head><link rel="alternate" type="application/rss+xml" href="${newFeed}"></head></html>`;
+    const result = await discoverFeedLive(
+      { sourceUrl: homepage, validatorUrl: oldFeed, etag: '"old"' },
+      {
+        transport: fakeTransport(
+          {
+            [homepage]: liveResponse(homepage, html, "text/html"),
+            [newFeed]: liveResponse(newFeed, content("rss.xml")),
+          },
+          requests,
+        ),
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(requests.map((request) => request.conditional)).toEqual([
+      { url: oldFeed, etag: '"old"', lastModified: null },
+      undefined,
+    ]);
+  });
+
+  test("rejects HTTPS downgrade in alternate and pagination traversal", async () => {
+    const homepage = "https://blog.example.com/";
+    const html =
+      '<html><head><link rel="alternate" type="application/rss+xml" href="http://blog.example.com/feed.xml"></head></html>';
+    const alternate = await discoverFeedLive(
+      { sourceUrl: homepage },
+      {
+        transport: fakeTransport({
+          [homepage]: liveResponse(homepage, html, "text/html"),
+        }),
+      },
+    );
+    expect(alternate.failure?.code).toBe("unsafe_destination");
+
+    const first = "https://paged.example.com/feed.xml";
+    const downgradeXml = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><link rel="next" href="http://paged.example.com/page-2.xml"/></feed>`;
+    const pagination = await discoverFeedLive(
+      { sourceUrl: first, sourceKind: "feed" },
+      {
+        transport: fakeTransport({
+          [first]: liveResponse(first, downgradeXml, "application/atom+xml"),
+        }),
+      },
+    );
+    expect(pagination).toMatchObject({
+      status: "partial",
+      failure: { code: "unsafe_destination", retryable: false },
+    });
+  });
+
+  test("preserves configured archive parsing in auto mode", async () => {
+    const first = "https://blog.example.com/archive?page=1";
+    const second = "https://blog.example.com/archive?page=2";
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: first,
+        sourceKind: "auto",
+        archive: {
+          entrySelector: "article.archive-entry",
+          linkSelector: "a.post-link",
+          dateSelector: "time",
+          nextSelector: "a.next",
+          idAttribute: "data-post-id",
+        },
+      },
+      {
+        transport: fakeTransport({
+          [first]: liveResponse(first, content("archive-page-1.html"), "text/html"),
+          [second]: liveResponse(second, content("archive-page-2.html"), "text/html"),
+        }),
+      },
+    );
+
+    expect(result.source_format).toBe("archive");
+    expect(result.items).toHaveLength(4);
+    expect(result.pagination.stop_reason).toBe("loop");
+  });
+
+  test("does not fall back to generic HTML links", async () => {
+    const homepage = "https://blog.example.com/";
+    const html = '<html><body><a href="/feed.xml">Subscribe via RSS</a></body></html>';
+    const result = await discoverFeedLive(
+      { sourceUrl: homepage },
+      { transport: fakeTransport({ [homepage]: liveResponse(homepage, html, "text/html") }) },
+    );
+
+    expect(result.status).toBe("failure");
+    expect(result.failure?.code).toBe("feed_not_discovered");
+  });
+
+  test("sends conditional validators and treats 304 as a complete empty window", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: source,
+        sourceKind: "feed",
+        etag: '"feed-v3"',
+        lastModified: "Thu, 09 Jul 2026 12:30:00 GMT",
+      },
+      {
+        transport: fakeTransport({ [source]: liveResponse(source, "", null, 304) }, requests),
+      },
+    );
+
+    expect(requests[0]?.conditional).toEqual({
+      url: source,
+      etag: '"feed-v3"',
+      lastModified: "Thu, 09 Jul 2026 12:30:00 GMT",
+    });
+    expect(result.status).toBe("success");
+    expect(result.items).toEqual([]);
+    expect(result.pagination).toMatchObject({ complete: true, stop_reason: "not_modified" });
+    expect(result.validators).toEqual({
+      etag: '"feed-v3"',
+      last_modified: "Thu, 09 Jul 2026 12:30:00 GMT",
+    });
+  });
+
+  test("auto mode applies validators only to an explicitly bound resource", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      { sourceUrl: source, validatorUrl: source, etag: '"auto-v1"' },
+      {
+        transport: fakeTransport({ [source]: liveResponse(source, "", null, 304) }, requests),
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.conditional).toEqual({
+      url: source,
+      etag: '"auto-v1"',
+      lastModified: null,
+    });
+    expect(result.pagination.stop_reason).toBe("not_modified");
+  });
+
+  test("follows parser-discovered pagination through the injected transport", async () => {
+    const first = "https://paged.example.com/feed?page=1";
+    const second = "https://paged.example.com/feed?page=2";
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      { sourceUrl: first, sourceKind: "feed" },
+      {
+        transport: fakeTransport(
+          {
+            [first]: liveResponse(first, content("feed-page-1.xml")),
+            [second]: liveResponse(second, content("feed-page-2.xml")),
+          },
+          requests,
+        ),
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.pagination.complete).toBeTrue();
+    expect(result.pagination.pages.map((page) => page.url)).toEqual([first, second]);
+    expect(requests.map((request) => request.url)).toEqual([first, second]);
+  });
+
+  test("returns partial evidence when a live pagination request fails", async () => {
+    const first = "https://paged.example.com/feed?page=1";
+    const second = "https://paged.example.com/feed?page=2";
+    const result = await discoverFeedLive(
+      { sourceUrl: first, sourceKind: "feed" },
+      {
+        transport: fakeTransport({
+          [first]: liveResponse(first, content("feed-page-1.xml")),
+          [second]: liveResponse(second, "", null, 503),
+        }),
+      },
+    );
+
+    expect(result.status).toBe("partial");
+    expect(result.pagination).toMatchObject({
+      complete: false,
+      stop_reason: "http_error",
+      next_url: second,
+    });
+    expect(result.pagination.pages).toHaveLength(1);
+    expect(result.failure).toMatchObject({ code: "http_error", retryable: true });
+    expect(result.warnings.some((warning) => warning.code === "page_not_recorded")).toBeFalse();
+  });
+
+  test("rejects credential- and secret-bearing source URLs before transport", async () => {
+    let calls = 0;
+    const transport: FeedTransport = async () => {
+      calls += 1;
+      throw new Error("transport must not run");
+    };
+    for (const source of [
+      "https://user:password@blog.example.com/feed.xml",
+      "https://blog.example.com/feed.xml?api_key=secret",
+      "https://blog.example.com/token/sk-proj-abcdefghijklmnop",
+    ]) {
+      const result = await discoverFeedLive({ sourceUrl: source }, { transport });
+      expect(result.failure?.code).toBe("unsafe_source_url");
+      expect(result.source_url).toBe("");
+    }
+    const privateLiteral = "http://127.0.0.1/feed.xml";
+    const privateResult = await discoverFeedLive({ sourceUrl: privateLiteral }, { transport });
+    expect(privateResult).toMatchObject({
+      source_url: privateLiteral,
+      failure: { code: "unsafe_source_url", retryable: false },
+    });
+    expect(calls).toBe(0);
+  });
+
+  test("rejects private IPv4 and IPv6 DNS answers before opening a connection", async () => {
+    const source = "https://feeds.example.com/rss.xml";
+    for (const resolved of [
+      { address: "127.0.0.1", family: 4 as const },
+      { address: "fd00::1", family: 6 as const },
+    ]) {
+      const transport = createDirectFeedTransport({ resolver: async () => [resolved] });
+      const result = await discoverFeedLive(
+        { sourceUrl: source, sourceKind: "feed" },
+        { transport },
+      );
+
+      expect(result.status).toBe("failure");
+      expect(result.failure).toMatchObject({ code: "unsafe_destination", retryable: false });
+      expect(result.pagination.stop_reason).toBe("policy");
+    }
+  });
+
+  test("allows tolerated feed MIME only through parser validation and rejects encoding", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const tolerated = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed" },
+      {
+        transport: fakeTransport({
+          [source]: liveResponse(source, content("rss.xml"), "text/plain"),
+        }),
+      },
+    );
+    expect(tolerated.status).toBe("success");
+
+    const missingType = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed" },
+      {
+        transport: fakeTransport({
+          [source]: liveResponse(source, content("rss.xml"), null),
+        }),
+      },
+    );
+    expect(missingType.status).toBe("success");
+
+    const mislabeledFeed = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed" },
+      {
+        transport: fakeTransport({
+          [source]: liveResponse(source, content("rss.xml"), "text/html"),
+        }),
+      },
+    );
+    expect(mislabeledFeed.status).toBe("success");
+
+    const disguisedHtml = await discoverFeedLive(
+      { sourceUrl: source },
+      {
+        transport: fakeTransport({
+          [source]: liveResponse(
+            source,
+            '<html><link rel="alternate" type="application/rss+xml" href="/other.xml"></html>',
+            "application/octet-stream",
+          ),
+        }),
+      },
+    );
+    expect(disguisedHtml.status).toBe("failure");
+    expect(disguisedHtml.failure?.code).not.toBe("feed_not_discovered");
+
+    const encodedResponse = liveResponse(source, content("rss.xml"));
+    encodedResponse.contentEncoding = "gzip";
+    const encoded = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed" },
+      { transport: fakeTransport({ [source]: encodedResponse }) },
+    );
+    expect(encoded.failure?.code).toBe("unsupported_encoding");
+  });
+
+  test("enforces the response byte cap at an injected transport boundary", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const result = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed", maxResponseBytes: 10 },
+      {
+        transport: fakeTransport({
+          [source]: liveResponse(source, "x".repeat(11), "application/rss+xml"),
+        }),
+      },
+    );
+
+    expect(result.failure?.code).toBe("response_limit_exceeded");
+    expect(result.pagination.stop_reason).toBe("response_limit");
+  });
+
+  test("classifies authentication, retryable, and permanent HTTP failures", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const cases: Array<[number, string, boolean]> = [
+      [401, "authentication_required", false],
+      [403, "authentication_required", false],
+      [408, "http_error", true],
+      [429, "http_error", true],
+      [500, "http_error", true],
+      [404, "http_error", false],
+    ];
+    for (const [status, code, retryable] of cases) {
+      const result = await discoverFeedLive(
+        { sourceUrl: source, sourceKind: "feed" },
+        { transport: fakeTransport({ [source]: liveResponse(source, "", null, status) }) },
+      );
+      expect(result.failure, String(status)).toMatchObject({ code, retryable });
+    }
+  });
+
+  test("caps live traversal independently from recorded parser limits", async () => {
+    let calls = 0;
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: "https://blog.example.com/feed.xml",
+        sourceKind: "feed",
+        maxPages: 11,
+      },
+      {
+        transport: async () => {
+          calls += 1;
+          throw new Error("transport must not run");
+        },
+      },
+    );
+    expect(result.failure?.code).toBe("invalid_options");
+    expect(calls).toBe(0);
+  });
+
+  test("returns structured timeout and cancellation failures", async () => {
+    const source = "https://blog.example.com/feed.xml";
+    const never: FeedTransport = () => new Promise(() => undefined);
+    const timedOut = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed", timeoutSeconds: 0.005 },
+      { transport: never },
+    );
+    expect(timedOut.failure).toMatchObject({ code: "timeout", retryable: true });
+
+    const controller = new AbortController();
+    const cancelledTransport: FeedTransport = (request) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener("abort", () => reject(request.signal?.reason), {
+          once: true,
+        });
+      });
+    setTimeout(() => controller.abort(), 1);
+    const cancelled = await discoverFeedLive(
+      { sourceUrl: source, sourceKind: "feed", signal: controller.signal },
+      { transport: cancelledTransport },
+    );
+    expect(cancelled.failure).toMatchObject({ code: "cancelled", retryable: false });
   });
 });
