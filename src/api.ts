@@ -279,6 +279,24 @@ function writeArtifacts(
     writeFileSync(join(directory, `${stem}.selected.html`), result.selected_html);
 }
 
+type MarkdownRoute =
+  | { kind: "preset"; preset: NonNullable<ReturnType<typeof selectPreset>> }
+  | { kind: "generic" }
+  | { kind: "github" }
+  | { kind: "markdown" };
+
+function markdownRoute(
+  url: string,
+  preset: ReturnType<typeof selectPreset>,
+  generic: boolean,
+): MarkdownRoute {
+  if (preset) return { kind: "preset", preset };
+  if (generic) return { kind: "generic" };
+  if (parseGithubUrl(url)) return { kind: "github" };
+  if (new URL(url).pathname.endsWith(".md")) return { kind: "markdown" };
+  return { kind: "generic" };
+}
+
 export async function fetchMarkdown(
   url: string,
   options: FetchMarkdownOptions = {},
@@ -289,88 +307,113 @@ export async function fetchMarkdown(
   let hint = implementationHint(url, options.preset);
   let finalUrl: string | null = null;
   let browserUsed = false;
+
   try {
-    const requested = envelopeMode
-      ? validateEnvelopeRequest(url, maxContentBytes, maxRelations)
-      : url;
-    throwIfAborted(options.signal);
-    let result: ScrapeResult | null = await fetchGithubIfApplicable(requested, options.signal);
-    if (!result) {
+    try {
+      let requested: string;
       try {
-        if (new URL(requested).pathname.endsWith(".md"))
-          result = await directMarkdown(requested, options);
-        else {
-          const registry = loadRegistry();
-          const preset = selectPreset(requested, registry, {
-            preset: options.preset,
-            generic: options.generic,
-          });
-          browserUsed = !(preset && options.html !== undefined && options.html !== null);
-          result = await withBrowserSignal(options.signal, () =>
-            withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
-              const autoRouteXStatus =
-                !options.preset &&
-                preset?.source === "official" &&
-                preset.name === "x-tweet" &&
-                preset.mode === "content" &&
-                preset.handler === "x.scrape_tweet" &&
-                preset.schema === "TweetThread";
-              if (autoRouteXStatus) {
-                const captured = await captureXStatusPage(requested, options);
-                let effectivePreset = preset;
-                if (captured.kind === "article") {
-                  const articlePreset = registry.byName("x-article");
-                  if (
-                    articlePreset?.source !== "official" ||
-                    articlePreset.mode !== "content" ||
-                    articlePreset.handler !== "x.scrape_article" ||
-                    articlePreset.schema !== "XArticle"
-                  )
-                    throw new PresetConfigError(
-                      "automatic X status article routing requires the official x-article preset",
-                    );
-                  effectivePreset = articlePreset;
-                }
-                hint = effectivePreset.name;
-                const value = await scrapeCapturedXStatus(requested, captured, options);
-                validateContentResult(value, effectivePreset);
-                return value;
-              }
-              if (preset) {
-                const value = await scrapeWithPreset(requested, preset, options);
-                if (preset.mode === "content") validateContentResult(value, preset);
-                return value;
-              }
-              return scrapePage(requested, options.selector ?? "body", options);
-            }),
-          );
-        }
-        finalUrl =
-          validateProviderFinalUrl(result.final_url) ??
-          (browserUsed && envelopeMode
-            ? await browserFinalUrl(options.session, options.signal)
-            : requested);
-      } finally {
-        if (!options.session && browserUsed) await closeSession();
+        requested = validateEnvelopeRequest(url, maxContentBytes, maxRelations);
+      } catch (error) {
+        if (
+          !envelopeMode &&
+          error instanceof EnvelopeBuildError &&
+          error.failureClass === "invalid_request"
+        )
+          throw new AgentscrapeUsageError(error.message);
+        throw error;
       }
-    }
-    if (!result) throw new Error("extractor returned no result");
-    throwIfAborted(options.signal);
-    finalUrl ??= validateProviderFinalUrl(result.final_url) ?? requested;
-    if (envelopeMode) {
-      const envelope = buildSuccessEnvelope(result, {
-        requestedUrl: requested,
-        finalUrl,
-        implementationHint: hint,
-        maxContentBytes,
-        maxRelations,
+      const registry = loadRegistry();
+      const selected = selectPreset(requested, registry, {
+        preset: options.preset,
+        generic: options.generic,
       });
-      if (options.destination)
-        writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
-      return envelope;
+      const route = markdownRoute(requested, selected, options.generic ?? false);
+
+      throwIfAborted(options.signal);
+
+      let result: ScrapeResult | null;
+      if (route.kind === "preset") {
+        const preset = route.preset;
+        hint = preset.name;
+        browserUsed = options.html === undefined || options.html === null;
+        result = await withBrowserSignal(options.signal, () =>
+          withBrowserProfile(options.browserProfile ?? preset.browser_profile, async () => {
+            const autoRouteXStatus =
+              !options.preset &&
+              preset.source === "official" &&
+              preset.name === "x-tweet" &&
+              preset.mode === "content" &&
+              preset.handler === "x.scrape_tweet" &&
+              preset.schema === "TweetThread";
+
+            if (autoRouteXStatus) {
+              const captured = await captureXStatusPage(requested, options);
+              let effectivePreset = preset;
+              if (captured.kind === "article") {
+                const articlePreset = registry.byName("x-article");
+                if (
+                  articlePreset?.source !== "official" ||
+                  articlePreset.mode !== "content" ||
+                  articlePreset.handler !== "x.scrape_article" ||
+                  articlePreset.schema !== "XArticle"
+                )
+                  throw new PresetConfigError(
+                    "automatic X status article routing requires the official x-article preset",
+                  );
+                effectivePreset = articlePreset;
+              }
+              hint = effectivePreset.name;
+              const value = await scrapeCapturedXStatus(requested, captured, options);
+              validateContentResult(value, effectivePreset);
+              return value;
+            }
+
+            const value = await scrapeWithPreset(requested, preset, options);
+            if (preset.mode === "content") validateContentResult(value, preset);
+            return value;
+          }),
+        );
+      } else if (route.kind === "generic") {
+        hint = "generic-page";
+        browserUsed = true;
+        result = await withBrowserSignal(options.signal, () =>
+          withBrowserProfile(options.browserProfile, async () =>
+            scrapePage(requested, options.selector ?? "body", options),
+          ),
+        );
+      } else if (route.kind === "github") {
+        hint = "github";
+        result = await fetchGithubIfApplicable(requested, options.signal);
+      } else {
+        hint = "direct-markdown";
+        result = await directMarkdown(requested, options);
+      }
+
+      if (!result) throw new AgentscrapeRuntimeError("selected route returned no result");
+      throwIfAborted(options.signal);
+      finalUrl =
+        validateProviderFinalUrl(result.final_url) ??
+        (browserUsed && envelopeMode
+          ? await browserFinalUrl(options.session, options.signal)
+          : requested);
+
+      if (envelopeMode) {
+        const envelope = buildSuccessEnvelope(result, {
+          requestedUrl: requested,
+          finalUrl,
+          implementationHint: hint,
+          maxContentBytes,
+          maxRelations,
+        });
+        if (options.destination)
+          writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
+        return envelope;
+      }
+      if (options.destination) writeArtifacts(options.destination, result);
+      return result;
+    } finally {
+      if (!options.session && browserUsed) await closeSession();
     }
-    if (options.destination) writeArtifacts(options.destination, result);
-    return result;
   } catch (error) {
     if (envelopeMode) {
       const envelope = buildFailureEnvelope(error, {
