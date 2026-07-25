@@ -789,34 +789,421 @@ export function discoverFeed(
   return discoverCheckedFeed(initial, options, checked.value, recorded);
 }
 
-function discoverCheckedFeed(
+type TraversalKind = "auto" | "feed" | "archive";
+interface TraversalQueueEntry {
+  requestedUrl: string;
+  page: RecordedFeedPage | undefined;
+  kind: TraversalKind;
+  baseUrl: string;
+}
+interface TraversalBlock {
+  requestedUrl: string;
+  baseUrl: string;
+  kind: TraversalKind;
+}
+type TraversalTerminal = { terminal: true; result: FeedDiscoveryResult };
+type TraversalAdvance = TraversalTerminal | { terminal: false; block: TraversalBlock };
+type TraversalCreation =
+  | { ok: true; state: FeedTraversal }
+  | { ok: false; result: FeedDiscoveryResult };
+
+class FeedTraversal {
+  private readonly map: Map<string, RecordedFeedPage>;
+  private readonly queue: TraversalQueueEntry[];
+  private readonly seen = new Set<string>();
+  private readonly seenEffective = new Set<string>();
+  private readonly pages: FeedDiscoveryResult["pagination"]["pages"] = [];
+  private readonly found: FeedDiscoveryItem[] = [];
+  private readonly formats = new Set<string>();
+  private readonly warnings: Warning[];
+  private partial = false;
+  private boundary: string | null = null;
+  private stop = "exhausted";
+  private discoveredFailure: FeedDiscoveryResult["failure"] = null;
+  private inspected = 0;
+  private terminalResult: FeedDiscoveryResult | null = null;
+
+  constructor(
+    private readonly options: FeedOptions,
+    private readonly checked: CheckedFeedOptions,
+    map: Map<string, RecordedFeedPage>,
+    queue: TraversalQueueEntry[],
+    warnings: Warning[],
+    private readonly initialValidators: FeedPageValidators,
+    private readonly deadline: number,
+  ) {
+    this.map = map;
+    this.queue = queue;
+    this.warnings = warnings;
+  }
+
+  advance(stopAtMissing: false): TraversalTerminal;
+  advance(stopAtMissing: true): TraversalAdvance;
+  advance(stopAtMissing: boolean): TraversalAdvance {
+    if (this.terminalResult) return { terminal: true, result: this.terminalResult };
+    const { source, maxBytes, maxPages, maxItems } = this.checked;
+    while (this.queue.length) {
+      const current = this.queue[0]!;
+      const { requestedUrl: url, kind } = current;
+      if (this.seen.has(url)) {
+        this.queue.shift();
+        this.warnings.push({
+          code: "pagination_loop",
+          message: "Pagination repeated an already visited page.",
+          page_url: url,
+        });
+        this.partial = true;
+        this.stop = "loop";
+        this.boundary = url;
+        continue;
+      }
+      if (this.pages.length >= maxPages) {
+        this.queue.shift();
+        this.warnings.push({
+          code: "page_limit_reached",
+          message: "Discovery stopped at the configured page limit.",
+          page_url: url,
+        });
+        this.partial = true;
+        this.stop = "page_limit";
+        this.boundary = url;
+        return this.terminate();
+      }
+      if (this.options.signal?.aborted) {
+        this.queue.shift();
+        this.discoveredFailure = {
+          code: "cancelled",
+          retryable: false,
+          message: "Discovery was cancelled before parsing completed.",
+        };
+        this.partial = this.pages.length > 0;
+        this.stop = "cancelled";
+        this.boundary = url;
+        return this.terminate();
+      }
+      if (performance.now() >= this.deadline) {
+        this.queue.shift();
+        this.discoveredFailure = {
+          code: "timeout",
+          retryable: true,
+          message: "Discovery exceeded the configured parsing timeout.",
+        };
+        this.partial = this.pages.length > 0;
+        this.stop = "timeout";
+        this.boundary = url;
+        return this.terminate();
+      }
+      const page = current.page ?? this.map.get(url);
+      if (!page) {
+        if (stopAtMissing)
+          return {
+            terminal: false,
+            block: {
+              requestedUrl: url,
+              baseUrl: current.baseUrl,
+              kind,
+            },
+          };
+        this.queue.shift();
+        this.warnings.push({
+          code: "page_not_recorded",
+          message: "A discovered pagination page was not supplied to this run.",
+          page_url: url,
+        });
+        this.partial = true;
+        this.stop = "missing_page";
+        this.boundary = url;
+        continue;
+      }
+      this.queue.shift();
+      if (Buffer.byteLength(page.content, "utf8") > maxBytes) {
+        if (!this.pages.length)
+          return this.terminate(
+            failure(
+              source,
+              "response_limit_exceeded",
+              "A recorded response exceeds the configured byte limit.",
+              false,
+              "response_limit",
+              this.warnings,
+            ),
+          );
+        this.discoveredFailure = {
+          code: "response_limit_exceeded",
+          retryable: false,
+          message: "A recorded response exceeds the configured byte limit.",
+        };
+        this.partial = true;
+        this.stop = "response_limit";
+        this.boundary = url;
+        continue;
+      }
+      const pageUrl = sourceUrl(page.effectiveUrl ?? page.url);
+      if (!pageUrl) {
+        const message = "A recorded response effective URL is not safe to traverse.";
+        if (!this.pages.length)
+          return this.terminate(
+            failure(source, "unsafe_source_url", message, false, "policy", this.warnings),
+          );
+        this.discoveredFailure = { code: "unsafe_destination", retryable: false, message };
+        this.partial = true;
+        this.stop = "policy";
+        this.boundary = url;
+        continue;
+      }
+      if (this.seenEffective.has(pageUrl)) {
+        this.warnings.push({
+          code: "pagination_loop",
+          message: "Pagination reached an already visited effective page.",
+          page_url: pageUrl,
+        });
+        this.partial = true;
+        this.stop = "loop";
+        this.boundary = pageUrl;
+        continue;
+      }
+      this.seen.add(url);
+      this.seenEffective.add(pageUrl);
+      let parsed: ParsedPage;
+      try {
+        const resolved = kind === "auto" ? (page.kind ?? "auto") : kind;
+        const archive =
+          resolved === "archive" ||
+          (resolved === "auto" &&
+            this.options.archive &&
+            /^\s*(?:<!doctype html|<html)/i.test(page.content));
+        parsed = archive
+          ? parseArchive(
+              page.content,
+              pageUrl,
+              Math.max(0, maxItems - this.inspected),
+              this.options.archive!,
+              this.warnings,
+            )
+          : parseFeed(page.content, pageUrl, Math.max(0, maxItems - this.inspected), this.warnings);
+      } catch (error) {
+        const fault =
+          error instanceof FeedFault
+            ? error
+            : new FeedFault(
+                "internal_error",
+                "Feed discovery failed inside the parser boundary.",
+                "failed",
+              );
+        if (!this.pages.length)
+          return this.terminate(
+            failure(source, fault.code, fault.message, fault.retryable, fault.stop, this.warnings),
+          );
+        this.discoveredFailure = {
+          code: fault.code,
+          retryable: fault.retryable,
+          message: fault.message,
+        };
+        this.partial = true;
+        this.stop = fault.stop;
+        this.boundary = pageUrl;
+        continue;
+      }
+      this.formats.add(parsed.format);
+      this.inspected += parsed.inspected;
+      this.found.push(...parsed.items);
+      this.partial ||= parsed.partial;
+      this.pages.push({
+        url: pageUrl,
+        page_format: parsed.format,
+        validators: validators(page.validators, this.warnings, pageUrl),
+        item_count: parsed.items.length,
+        next_url: parsed.next,
+      });
+      if (parsed.truncated || (this.inspected >= maxItems && parsed.next)) {
+        this.warnings.push({
+          code: "item_limit_reached",
+          message: "Discovery stopped at the configured item limit.",
+          page_url: pageUrl,
+        });
+        this.partial = true;
+        this.stop = "item_limit";
+        this.boundary = parsed.next;
+        return this.terminate();
+      }
+      if (parsed.next)
+        this.queue.push({
+          requestedUrl: parsed.next,
+          page: this.map.get(parsed.next),
+          kind: parsed.format === "archive" ? "archive" : "feed",
+          baseUrl: pageUrl,
+        });
+      if (this.options.signal?.aborted) {
+        this.discoveredFailure = {
+          code: "cancelled",
+          retryable: false,
+          message: "Discovery was cancelled before parsing completed.",
+        };
+        this.partial = true;
+        this.stop = "cancelled";
+        this.boundary = this.queue[0]?.requestedUrl ?? parsed.next;
+        return this.terminate();
+      }
+      if (performance.now() >= this.deadline) {
+        this.discoveredFailure = {
+          code: "timeout",
+          retryable: true,
+          message: "Discovery exceeded the configured parsing timeout.",
+        };
+        this.partial = true;
+        this.stop = "timeout";
+        this.boundary = this.queue[0]?.requestedUrl ?? parsed.next;
+        return this.terminate();
+      }
+    }
+    return this.terminate();
+  }
+
+  supply(block: TraversalBlock, page: RecordedFeedPage): void {
+    const current = this.queue[0];
+    if (
+      !current ||
+      current.requestedUrl !== block.requestedUrl ||
+      current.baseUrl !== block.baseUrl ||
+      current.kind !== block.kind ||
+      !validPage(page)
+    ) {
+      this.terminalResult = failure(
+        this.checked.source,
+        "invalid_options",
+        "Discovery options are invalid.",
+      );
+      return;
+    }
+    current.page = page;
+    const url = sourceUrl(page.url);
+    if (url) this.map.set(url, page);
+  }
+
+  snapshotBlocked(block: TraversalBlock): FeedDiscoveryResult {
+    return this.buildResult({
+      warnings: [
+        ...this.warnings,
+        {
+          code: "page_not_recorded",
+          message: "A discovered pagination page was not supplied to this run.",
+          page_url: block.requestedUrl,
+        },
+      ],
+      partial: true,
+      stop: "missing_page",
+      boundary: block.requestedUrl,
+    });
+  }
+
+  private terminate(result = this.buildResult()): TraversalTerminal {
+    this.terminalResult = result;
+    return { terminal: true, result };
+  }
+
+  private buildResult(
+    overrides: {
+      warnings?: Warning[];
+      partial?: boolean;
+      stop?: string;
+      boundary?: string | null;
+    } = {},
+  ): FeedDiscoveryResult {
+    let items = dedupe(this.found);
+    const dated = items.filter((value) => itemTime(value) > -8640000000000000);
+    const newest = dated.sort((a, b) => itemTime(b) - itemTime(a))[0];
+    const newestSeen = newest?.updated_at ?? newest?.published_at ?? null;
+    const warnings = [...(overrides.warnings ?? this.warnings)];
+    let partial = overrides.partial ?? this.partial;
+    if (this.checked.sinceTimestamp !== null) {
+      items = items.filter((value) => {
+        const time = itemTime(value);
+        if (time === -8640000000000000) {
+          warnings.push({
+            code: "undated_item",
+            message: "An undated item was retained because the date cutoff was inconclusive.",
+          });
+          partial = true;
+          return true;
+        }
+        return time >= this.checked.sinceTimestamp!.timestamp;
+      });
+    }
+    items.sort((a, b) => itemTime(b) - itemTime(a) || a.stable_id.localeCompare(b.stable_id));
+    const discoveredFailure = this.discoveredFailure
+      ? { ...this.discoveredFailure }
+      : this.discoveredFailure;
+    const status =
+      !this.pages.length && discoveredFailure
+        ? "failure"
+        : partial || discoveredFailure
+          ? "partial"
+          : "success";
+    const format =
+      this.formats.size === 0 ? "unknown" : this.formats.size > 1 ? "mixed" : [...this.formats][0]!;
+    const boundary = overrides.boundary === undefined ? this.boundary : overrides.boundary;
+    const initialValidators = { ...this.initialValidators };
+    return {
+      schema_version: "1",
+      status,
+      source_url: this.checked.source,
+      source_format: format as FeedDiscoveryResult["source_format"],
+      validators: initialValidators,
+      cursor: { validators: initialValidators, newest_seen_at: newestSeen, next_url: boundary },
+      items,
+      pagination: {
+        pages: this.pages.map((page) => ({
+          ...page,
+          validators: { ...page.validators },
+        })),
+        complete: status === "success" && this.queue.length === 0,
+        stop_reason: overrides.stop ?? this.stop,
+        next_url: boundary,
+      },
+      warnings: boundedWarnings(warnings),
+      absence_implies_deletion: false,
+      failure: discoveredFailure,
+    };
+  }
+}
+
+function createFeedTraversal(
   initial: RecordedFeedPage,
   options: FeedOptions,
   checked: CheckedFeedOptions,
   recorded: RecordedFeedPage[],
-): FeedDiscoveryResult {
-  const { source, maxBytes, maxPages, maxItems, timeoutSeconds, sourceKind, sinceTimestamp } =
-    checked;
+  deadline?: number,
+): TraversalCreation {
+  const { source, maxPages, sourceKind } = checked;
   if (
     !validPage(initial) ||
     !Array.isArray(recorded) ||
     recorded.slice(0, maxPages).some((page) => !validPage(page))
   )
-    return failure(source, "invalid_options", "Discovery options are invalid.");
+    return {
+      ok: false,
+      result: failure(source, "invalid_options", "Discovery options are invalid."),
+    };
   const firstUrl = sourceUrl(initial.url);
   if (!firstUrl)
-    return failure(
-      source,
-      "unsafe_source_url",
-      "The first recorded page URL is not safe to traverse.",
-    );
+    return {
+      ok: false,
+      result: failure(
+        source,
+        "unsafe_source_url",
+        "The first recorded page URL is not safe to traverse.",
+      ),
+    };
   const firstEffectiveUrl = sourceUrl(initial.effectiveUrl ?? initial.url);
   if (!firstEffectiveUrl)
-    return failure(
-      source,
-      "unsafe_source_url",
-      "The first recorded page effective URL is not safe to traverse.",
-    );
+    return {
+      ok: false,
+      result: failure(
+        source,
+        "unsafe_source_url",
+        "The first recorded page effective URL is not safe to traverse.",
+      ),
+    };
   const warnings: Warning[] = [];
   const initialValidators = validators(initial.validators, warnings, firstEffectiveUrl);
   const map = new Map(
@@ -825,258 +1212,52 @@ function discoverCheckedFeed(
       return url ? [[url, page] as const] : [];
     }),
   );
-  const queue: Array<[string, RecordedFeedPage | undefined, "auto" | "feed" | "archive"]> = [
-    [firstUrl, initial, sourceKind],
+  const queue: TraversalQueueEntry[] = [
+    {
+      requestedUrl: firstUrl,
+      page: initial,
+      kind: sourceKind,
+      baseUrl: firstEffectiveUrl,
+    },
   ];
   if (options.archive?.startUrl) {
     const url = safeUrl(options.archive.startUrl, source);
     if (!url)
-      return failure(source, "invalid_options", "The configured archive start URL is unsafe.");
+      return {
+        ok: false,
+        result: failure(source, "invalid_options", "The configured archive start URL is unsafe."),
+      };
     if (url !== firstUrl || options.sourceKind !== "archive")
-      queue.push([url, map.get(url), "archive"]);
+      queue.push({
+        requestedUrl: url,
+        page: map.get(url),
+        kind: "archive",
+        baseUrl: firstEffectiveUrl,
+      });
   }
-  const seen = new Set<string>();
-  const seenEffective = new Set<string>();
-  const pages: FeedDiscoveryResult["pagination"]["pages"] = [];
-  const found: FeedDiscoveryItem[] = [];
-  const formats = new Set<string>();
-  let partial = false;
-  let boundary: string | null = null;
-  let stop = "exhausted";
-  let discoveredFailure: FeedDiscoveryResult["failure"] = null;
-  let inspected = 0;
-  const deadline = performance.now() + timeoutSeconds * 1000;
-  while (queue.length) {
-    const [url, supplied, kind] = queue.shift()!;
-    if (seen.has(url)) {
-      warnings.push({
-        code: "pagination_loop",
-        message: "Pagination repeated an already visited page.",
-        page_url: url,
-      });
-      partial = true;
-      stop = "loop";
-      boundary = url;
-      continue;
-    }
-    if (pages.length >= maxPages) {
-      warnings.push({
-        code: "page_limit_reached",
-        message: "Discovery stopped at the configured page limit.",
-        page_url: url,
-      });
-      partial = true;
-      stop = "page_limit";
-      boundary = url;
-      break;
-    }
-    if (options.signal?.aborted) {
-      discoveredFailure = {
-        code: "cancelled",
-        retryable: false,
-        message: "Discovery was cancelled before parsing completed.",
-      };
-      partial = pages.length > 0;
-      stop = "cancelled";
-      boundary = url;
-      break;
-    }
-    if (performance.now() >= deadline) {
-      discoveredFailure = {
-        code: "timeout",
-        retryable: true,
-        message: "Discovery exceeded the configured parsing timeout.",
-      };
-      partial = pages.length > 0;
-      stop = "timeout";
-      boundary = url;
-      break;
-    }
-    const page = supplied ?? map.get(url);
-    if (!page) {
-      warnings.push({
-        code: "page_not_recorded",
-        message: "A discovered pagination page was not supplied to this run.",
-        page_url: url,
-      });
-      partial = true;
-      stop = "missing_page";
-      boundary = url;
-      continue;
-    }
-    if (new TextEncoder().encode(page.content).byteLength > maxBytes) {
-      if (!pages.length)
-        return failure(
-          source,
-          "response_limit_exceeded",
-          "A recorded response exceeds the configured byte limit.",
-          false,
-          "response_limit",
-          warnings,
-        );
-      discoveredFailure = {
-        code: "response_limit_exceeded",
-        retryable: false,
-        message: "A recorded response exceeds the configured byte limit.",
-      };
-      partial = true;
-      stop = "response_limit";
-      boundary = url;
-      continue;
-    }
-    const pageUrl = sourceUrl(page.effectiveUrl ?? page.url);
-    if (!pageUrl) {
-      const message = "A recorded response effective URL is not safe to traverse.";
-      if (!pages.length)
-        return failure(source, "unsafe_source_url", message, false, "policy", warnings);
-      discoveredFailure = { code: "unsafe_destination", retryable: false, message };
-      partial = true;
-      stop = "policy";
-      boundary = url;
-      continue;
-    }
-    if (seenEffective.has(pageUrl)) {
-      warnings.push({
-        code: "pagination_loop",
-        message: "Pagination reached an already visited effective page.",
-        page_url: pageUrl,
-      });
-      partial = true;
-      stop = "loop";
-      boundary = pageUrl;
-      continue;
-    }
-    seen.add(url);
-    seenEffective.add(pageUrl);
-    let parsed: ParsedPage;
-    try {
-      const resolved = kind === "auto" ? (page.kind ?? "auto") : kind;
-      const archive =
-        resolved === "archive" ||
-        (resolved === "auto" &&
-          options.archive &&
-          /^\s*(?:<!doctype html|<html)/i.test(page.content));
-      parsed = archive
-        ? parseArchive(
-            page.content,
-            pageUrl,
-            Math.max(0, maxItems - inspected),
-            options.archive!,
-            warnings,
-          )
-        : parseFeed(page.content, pageUrl, Math.max(0, maxItems - inspected), warnings);
-    } catch (error) {
-      const fault =
-        error instanceof FeedFault
-          ? error
-          : new FeedFault(
-              "internal_error",
-              "Feed discovery failed inside the parser boundary.",
-              "failed",
-            );
-      if (!pages.length)
-        return failure(source, fault.code, fault.message, fault.retryable, fault.stop, warnings);
-      discoveredFailure = { code: fault.code, retryable: fault.retryable, message: fault.message };
-      partial = true;
-      stop = fault.stop;
-      boundary = pageUrl;
-      continue;
-    }
-    formats.add(parsed.format);
-    inspected += parsed.inspected;
-    found.push(...parsed.items);
-    partial ||= parsed.partial;
-    pages.push({
-      url: pageUrl,
-      page_format: parsed.format,
-      validators: validators(page.validators, warnings, pageUrl),
-      item_count: parsed.items.length,
-      next_url: parsed.next,
-    });
-    if (parsed.truncated || (inspected >= maxItems && parsed.next)) {
-      warnings.push({
-        code: "item_limit_reached",
-        message: "Discovery stopped at the configured item limit.",
-        page_url: pageUrl,
-      });
-      partial = true;
-      stop = "item_limit";
-      boundary = parsed.next;
-      break;
-    }
-    if (parsed.next)
-      queue.push([
-        parsed.next,
-        map.get(parsed.next),
-        parsed.format === "archive" ? "archive" : "feed",
-      ]);
-    if (options.signal?.aborted) {
-      discoveredFailure = {
-        code: "cancelled",
-        retryable: false,
-        message: "Discovery was cancelled before parsing completed.",
-      };
-      partial = true;
-      stop = "cancelled";
-      boundary = queue[0]?.[0] ?? parsed.next;
-      break;
-    }
-    if (performance.now() >= deadline) {
-      discoveredFailure = {
-        code: "timeout",
-        retryable: true,
-        message: "Discovery exceeded the configured parsing timeout.",
-      };
-      partial = true;
-      stop = "timeout";
-      boundary = queue[0]?.[0] ?? parsed.next;
-      break;
-    }
-  }
-  let items = dedupe(found);
-  const dated = items.filter((value) => itemTime(value) > -8640000000000000);
-  const newest = dated.sort((a, b) => itemTime(b) - itemTime(a))[0];
-  const newestSeen = newest?.updated_at ?? newest?.published_at ?? null;
-  if (sinceTimestamp !== null) {
-    items = items.filter((value) => {
-      const time = itemTime(value);
-      if (time === -8640000000000000) {
-        warnings.push({
-          code: "undated_item",
-          message: "An undated item was retained because the date cutoff was inconclusive.",
-        });
-        partial = true;
-        return true;
-      }
-      return time >= sinceTimestamp.timestamp;
-    });
-  }
-  items.sort((a, b) => itemTime(b) - itemTime(a) || a.stable_id.localeCompare(b.stable_id));
-  const status =
-    !pages.length && discoveredFailure
-      ? "failure"
-      : partial || discoveredFailure
-        ? "partial"
-        : "success";
-  const format = formats.size === 0 ? "unknown" : formats.size > 1 ? "mixed" : [...formats][0]!;
   return {
-    schema_version: "1",
-    status,
-    source_url: source,
-    source_format: format as FeedDiscoveryResult["source_format"],
-    validators: initialValidators,
-    cursor: { validators: initialValidators, newest_seen_at: newestSeen, next_url: boundary },
-    items,
-    pagination: {
-      pages,
-      complete: status === "success" && queue.length === 0,
-      stop_reason: stop,
-      next_url: boundary,
-    },
-    warnings: boundedWarnings(warnings),
-    absence_implies_deletion: false,
-    failure: discoveredFailure,
+    ok: true,
+    state: new FeedTraversal(
+      options,
+      checked,
+      map,
+      queue,
+      warnings,
+      initialValidators,
+      deadline ?? performance.now() + checked.timeoutSeconds * 1000,
+    ),
   };
+}
+
+function discoverCheckedFeed(
+  initial: RecordedFeedPage,
+  options: FeedOptions,
+  checked: CheckedFeedOptions,
+  recorded: RecordedFeedPage[],
+): FeedDiscoveryResult {
+  const created = createFeedTraversal(initial, options, checked, recorded);
+  if (!created.ok) return created.result;
+  return created.state.advance(false).result;
 }
 
 export interface LiveFeedOptions extends FeedOptions {
@@ -1251,22 +1432,25 @@ function validTransportResponse(raw: unknown, maxBytes: number): FeedTransportRe
       false,
       "malformed_response",
     );
-  if ((status as number) >= 200 && (status as number) < 300) {
-    if (contentEncoding && contentEncoding.trim().toLowerCase() !== "identity")
-      throw new FeedTransportFault(
-        "unsupported_encoding",
-        "Encoded feed responses are not accepted.",
-        false,
-        "unsupported_encoding",
-      );
-    if (new TextEncoder().encode(content).byteLength > maxBytes)
-      throw new FeedTransportFault(
-        "response_limit_exceeded",
-        "A feed response exceeds the configured byte limit.",
-        false,
-        "response_limit",
-      );
-  }
+  if (
+    (status as number) >= 200 &&
+    (status as number) < 300 &&
+    contentEncoding &&
+    contentEncoding.trim().toLowerCase() !== "identity"
+  )
+    throw new FeedTransportFault(
+      "unsupported_encoding",
+      "Encoded feed responses are not accepted.",
+      false,
+      "unsupported_encoding",
+    );
+  if (Buffer.byteLength(content, "utf8") > maxBytes)
+    throw new FeedTransportFault(
+      "response_limit_exceeded",
+      "A feed response exceeds the configured byte limit.",
+      false,
+      "response_limit",
+    );
   return {
     url: effective,
     status: status as number,
@@ -1654,7 +1838,7 @@ export async function discoverFeedLive(
       deadline,
       options.signal,
     );
-    fetchedBytes += new TextEncoder().encode(response.content).byteLength;
+    fetchedBytes += Buffer.byteLength(response.content, "utf8");
     return response;
   };
 
@@ -1716,64 +1900,26 @@ export async function discoverFeedLive(
   }
 
   const initial = recordedPage(initialRequestUrl, response, parseKind);
-  const recorded: RecordedFeedPage[] = [];
-  let previous: FeedDiscoveryResult | null = null;
-  let parsedWorkBytes = 0;
+  const parseOptions = parserOptions(options, parseKind);
+  const created = createFeedTraversal(
+    initial,
+    parseOptions,
+    { ...checked.value, sourceKind: parseKind },
+    [],
+    deadline,
+  );
+  if (!created.ok) return sanitizedLiveResult(created.result);
+  const state = created.state;
   while (true) {
-    const remaining = deadline - performance.now();
-    if (remaining <= 1)
+    const advanced = state.advance(true);
+    if (advanced.terminal) return sanitizedLiveResult(advanced.result);
+    const { block } = advanced;
+    const safeNext = safeTraversalUrl(block.requestedUrl, block.baseUrl);
+    if (!safeNext) {
+      const snapshot = state.snapshotBlocked(block);
       return withLiveFailure(
         checked.value.source,
-        previous,
-        new FeedTransportFault(
-          "timeout",
-          "Feed discovery exceeded its overall timeout.",
-          true,
-          "timeout",
-        ),
-        previous?.pagination.next_url ?? initialRequestUrl,
-      );
-    const parseInputBytes = [initial, ...recorded].reduce(
-      (total, page) => total + Buffer.byteLength(page.content, "utf8"),
-      0,
-    );
-    if (parseInputBytes > LIVE_TOTAL_RESPONSE_BYTES - parsedWorkBytes) {
-      return withLiveFailure(
-        checked.value.source,
-        previous,
-        new FeedTransportFault(
-          "response_limit_exceeded",
-          "Live feed discovery exceeded its total parser work limit.",
-          false,
-          "response_limit",
-        ),
-        previous?.pagination.next_url ?? initialRequestUrl,
-      );
-    }
-    parsedWorkBytes += parseInputBytes;
-    const parseTimeoutSeconds = Math.max(0.001, remaining / 1000);
-    const parseOptions = parserOptions(options, parseKind, parseTimeoutSeconds);
-    const result = discoverCheckedFeed(
-      initial,
-      parseOptions,
-      {
-        ...checked.value,
-        sourceKind: parseKind,
-        timeoutSeconds: parseTimeoutSeconds,
-      },
-      recorded,
-    );
-    previous = result;
-    const next = result.pagination.next_url;
-    if (result.pagination.stop_reason !== "missing_page" || !next)
-      return sanitizedLiveResult(result);
-    const previousPageUrl =
-      result.pagination.pages.at(-1)?.url ?? initial.effectiveUrl ?? initial.url;
-    const safeNext = safeTraversalUrl(next, previousPageUrl);
-    if (!safeNext)
-      return withLiveFailure(
-        checked.value.source,
-        result,
+        snapshot,
         new FeedTransportFault(
           "unsafe_destination",
           "A discovered pagination URL is unsafe.",
@@ -1782,11 +1928,8 @@ export async function discoverFeedLive(
         ),
         null,
       );
-    const previousFormat = result.pagination.pages.at(-1)?.page_format;
-    const nextKind: "feed" | "archive" =
-      (archiveStart && safeNext === archiveStart) || previousFormat === "archive"
-        ? "archive"
-        : "feed";
+    }
+    const nextKind: "feed" | "archive" = block.kind === "archive" ? "archive" : "feed";
     try {
       const nextConditional = conditionalFor(safeNext);
       const nextResponse = await fetchPage(safeNext, nextConditional, nextKind === "archive");
@@ -1797,15 +1940,21 @@ export async function discoverFeedLive(
           nextResponse.url !== nextConditional.url
         )
           throw httpFault(nextResponse.status);
-        return terminateOnCachedBoundary(result, nextResponse, nextConditional, safeNext);
+        return terminateOnCachedBoundary(
+          state.snapshotBlocked(block),
+          nextResponse,
+          nextConditional,
+          block.requestedUrl,
+        );
       }
       requireSuccessfulResponse(nextResponse);
       requireResponseMedia(nextResponse, nextKind);
-      recorded.push(recordedPage(safeNext, nextResponse, nextKind));
+      state.supply(block, recordedPage(safeNext, nextResponse, nextKind));
     } catch (error) {
+      const snapshot = state.snapshotBlocked(block);
       return withLiveFailure(
         checked.value.source,
-        result,
+        snapshot,
         transportFailure(error, options.signal),
         safeNext,
       );
