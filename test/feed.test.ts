@@ -1145,4 +1145,229 @@ describe("deterministic live feed discovery", () => {
     );
     expect(cancelled.failure).toMatchObject({ code: "cancelled", retryable: false });
   });
+
+  test("accepts cached boundary termination with applied conditionals for pagination", async () => {
+    const first = "https://paged.example.com/feed?page=1";
+    const second = "https://paged.example.com/feed?page=2";
+    const binding = { url: second, etag: '"page2-v1"', lastModified: null };
+    const requests: FeedTransportRequest[] = [];
+    const applications: boolean[] = [];
+    const transport: FeedTransport = async (request) => {
+      requests.push(request);
+      const applied = Boolean(
+        request.conditional?.url === request.url &&
+          (request.conditional.etag || request.conditional.lastModified),
+      );
+      applications.push(applied);
+      if (request.url === first)
+        return { ...liveResponse(first, content("feed-page-1.xml")), conditionalApplied: applied };
+      if (request.url === second)
+        return {
+          ...liveResponse(second, "", null, 304, {
+            etag: '"page2-v1"',
+            last_modified: null,
+          }),
+          conditionalApplied: applied,
+        };
+      throw new Error("unexpected feed request");
+    };
+
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: first,
+        sourceKind: "feed",
+        validatorUrl: second,
+        etag: '"page2-v1"',
+      },
+      { transport },
+    );
+
+    expect(requests.map((request) => request.conditional)).toEqual([binding, binding]);
+    expect(applications).toEqual([false, true]);
+    expect(result).toMatchObject({
+      status: "success",
+      validators: { etag: '"page2-v1"', last_modified: null },
+      cursor: {
+        validators: { etag: '"page2-v1"', last_modified: null },
+        next_url: null,
+      },
+      pagination: { complete: true, stop_reason: "not_modified", next_url: null },
+      failure: null,
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.pagination.pages.map((page) => page.url)).toEqual([first]);
+    expect(result.pagination.pages.some((page) => page.url === second)).toBeFalse();
+    expect(
+      result.warnings.some(
+        (warning) => warning.code === "page_not_recorded" && warning.page_url === second,
+      ),
+    ).toBeFalse();
+  });
+
+  test("accepts cached boundary termination for a distinct archive start", async () => {
+    const homepage = "https://blog.example.com/recent";
+    const archiveStart = "https://blog.example.com/archive?page=1";
+    const binding = { url: archiveStart, etag: '"archive-v1"', lastModified: null };
+    const requests: FeedTransportRequest[] = [];
+    const transport: FeedTransport = async (request) => {
+      requests.push(request);
+      if (request.url === homepage)
+        return liveResponse(
+          homepage,
+          "<html><article class='entry'><a class='link' href='/post1'>Post 1</a></article></html>",
+          "text/html",
+        );
+      if (request.url === archiveStart)
+        return {
+          ...liveResponse(archiveStart, "", null, 304, {
+            etag: '"archive-v1"',
+            last_modified: null,
+          }),
+          conditionalApplied: request.conditional?.url === archiveStart,
+        };
+      throw new Error("unexpected feed request");
+    };
+
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: homepage,
+        sourceKind: "archive",
+        validatorUrl: archiveStart,
+        etag: '"archive-v1"',
+        archive: {
+          entrySelector: "article.entry",
+          linkSelector: "a.link",
+          startUrl: archiveStart,
+        },
+      },
+      { transport },
+    );
+
+    expect(requests.map((request) => request.conditional)).toEqual([undefined, binding]);
+    expect(result).toMatchObject({
+      status: "success",
+      items: [{ url: "https://blog.example.com/post1" }],
+      validators: { etag: '"archive-v1"', last_modified: null },
+      pagination: { complete: true, stop_reason: "not_modified", next_url: null },
+      failure: null,
+    });
+  });
+
+  test("rejects invalid traversal 304 responses", async () => {
+    const first = "https://paged.example.com/feed?page=1";
+    const second = "https://paged.example.com/feed?page=2";
+    const binding = { url: second, etag: '"test"', lastModified: null };
+    const cases = [
+      { name: "bare", validators: false, responseUrl: second, conditionalApplied: false },
+      { name: "unapplied", validators: true, responseUrl: second, conditionalApplied: false },
+      {
+        name: "wrong response URL",
+        validators: true,
+        responseUrl: "https://paged.example.com/feed?page=3",
+        conditionalApplied: true,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const requests: FeedTransportRequest[] = [];
+      const result = await discoverFeedLive(
+        {
+          sourceUrl: first,
+          sourceKind: "feed",
+          ...(testCase.validators ? { validatorUrl: second, etag: '"test"' } : {}),
+        },
+        {
+          transport: async (request) => {
+            requests.push(request);
+            if (request.url === first) return liveResponse(first, content("feed-page-1.xml"));
+            return {
+              ...liveResponse(testCase.responseUrl, "", null, 304, {
+                etag: '"test"',
+                last_modified: null,
+              }),
+              conditionalApplied: testCase.conditionalApplied,
+            };
+          },
+        },
+      );
+
+      expect(requests[1]?.conditional, testCase.name).toEqual(
+        testCase.validators ? binding : undefined,
+      );
+      expect(result, testCase.name).toMatchObject({
+        status: "partial",
+        items: [{ stable_id: "page-one-item" }],
+        cursor: { next_url: second },
+        pagination: {
+          pages: [{ url: first }],
+          complete: false,
+          stop_reason: "http_error",
+          next_url: second,
+        },
+        failure: { code: "http_error", retryable: false },
+      });
+    }
+  });
+
+  test("does not apply a nonmatching conditional to a later target", async () => {
+    const first = "https://paged.example.com/feed?page=1";
+    const second = "https://paged.example.com/feed?page=2";
+    const other = "https://other.example.com/feed.xml";
+    const requests: FeedTransportRequest[] = [];
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: first,
+        sourceKind: "feed",
+        validatorUrl: other,
+        etag: '"other-feed"',
+      },
+      {
+        transport: fakeTransport(
+          {
+            [first]: liveResponse(first, content("feed-page-1.xml")),
+            [second]: liveResponse(second, content("feed-page-2.xml")),
+          },
+          requests,
+        ),
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.pagination.pages.map((page) => page.url)).toEqual([first, second]);
+    expect(requests[0]?.conditional).toEqual({
+      url: other,
+      etag: '"other-feed"',
+      lastModified: null,
+    });
+    expect(requests[1]?.conditional).toBeUndefined();
+  });
+
+  test("keeps earlier warning evidence at a cached boundary", async () => {
+    const first = "https://warning.example.com/feed?page=1";
+    const second = "https://warning.example.com/feed?page=2";
+    const xml = `<feed xmlns="http://www.w3.org/2005/Atom"><link rel="next" href="${second}"/><entry><id>warned</id><updated>not-a-date</updated></entry></feed>`;
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: first,
+        sourceKind: "feed",
+        validatorUrl: second,
+        etag: '"warning-v1"',
+      },
+      {
+        transport: fakeTransport({
+          [first]: liveResponse(first, xml, "application/atom+xml"),
+          [second]: liveResponse(second, "", null, 304),
+        }),
+      },
+    );
+
+    expect(result.status).toBe("partial");
+    expect(result.pagination).toMatchObject({
+      complete: false,
+      stop_reason: "not_modified",
+      next_url: null,
+    });
+    expect(result.failure).toBeNull();
+    expect(result.warnings.map((warning) => warning.code)).toEqual(["invalid_date"]);
+  });
 });

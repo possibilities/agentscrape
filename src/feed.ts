@@ -1461,6 +1461,40 @@ function sanitizedLiveResult(result: FeedDiscoveryResult): FeedDiscoveryResult {
   };
 }
 
+function terminateOnCachedBoundary(
+  result: FeedDiscoveryResult,
+  response: FeedTransportResponse,
+  conditional: NonNullable<FeedTransportRequest["conditional"]>,
+  boundary: string,
+): FeedDiscoveryResult {
+  const warnings = [...result.warnings];
+  const boundaryWarning = warnings.findIndex(
+    (warning) => warning.code === "page_not_recorded" && warning.page_url === boundary,
+  );
+  if (boundaryWarning !== -1) warnings.splice(boundaryWarning, 1);
+  const retained = preservedValidators(response, conditional, warnings);
+  const status = warnings.length === 0 && result.failure === null ? "success" : "partial";
+
+  return sanitizedLiveResult({
+    ...result,
+    status,
+    validators: retained,
+    cursor: {
+      validators: retained,
+      newest_seen_at: result.cursor.newest_seen_at,
+      next_url: null,
+    },
+    pagination: {
+      ...result.pagination,
+      complete: status === "success",
+      stop_reason: "not_modified",
+      next_url: null,
+    },
+    warnings: boundedWarnings(warnings),
+    failure: result.failure,
+  });
+}
+
 function withLiveFailure(
   source: string,
   result: FeedDiscoveryResult | null,
@@ -1754,8 +1788,17 @@ export async function discoverFeedLive(
         ? "archive"
         : "feed";
     try {
-      const nextResponse = await fetchPage(safeNext, undefined, nextKind === "archive");
-      if (nextResponse.status === 304) throw httpFault(nextResponse.status);
+      const nextConditional = conditionalFor(safeNext);
+      const nextResponse = await fetchPage(safeNext, nextConditional, nextKind === "archive");
+      if (nextResponse.status === 304) {
+        if (
+          !nextConditional ||
+          !nextResponse.conditionalApplied ||
+          nextResponse.url !== nextConditional.url
+        )
+          throw httpFault(nextResponse.status);
+        return terminateOnCachedBoundary(result, nextResponse, nextConditional, safeNext);
+      }
       requireSuccessfulResponse(nextResponse);
       requireResponseMedia(nextResponse, nextKind);
       recorded.push(recordedPage(safeNext, nextResponse, nextKind));
