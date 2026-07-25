@@ -399,16 +399,17 @@ export async function scrapeProfile(
   url: string,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<XProfile>> {
-  if (!options.html && !extractProfileHandle(url))
+  const live = options.html === undefined || options.html === null;
+  if (live && !extractProfileHandle(url))
     throw new Error(`Could not extract handle from URL: ${url}`);
   const captured = options.html ?? (await browserHtml(url, options, '[data-testid="UserName"]'));
-  const full = await prepareLinks(captured, options, !options.html);
+  const full = await prepareLinks(captured, options, live);
   const $ = cheerio.load(full);
-  const root: cheerio.Cheerio<any> = options.html
-    ? $.root()
-    : $('[data-testid="primaryColumn"]').first().length
+  const root: cheerio.Cheerio<any> = live
+    ? $('[data-testid="primaryColumn"]').first().length
       ? $('[data-testid="primaryColumn"]').first()
-      : $("body");
+      : $("body")
+    : $.root();
   const user = root.find('[data-testid="UserName"]').first();
   if (!user.length) {
     throw new PresetDriftError("X profile core structure missing (no [data-testid=UserName])");
@@ -474,7 +475,7 @@ export async function scrapeProfile(
     latest_post_id: latestPostId,
   });
   return {
-    full_html: options.html ? "" : full,
+    full_html: live ? full : "",
     selected_html: $.html(root),
     markdown: structured.toMarkdown(),
     structured,
