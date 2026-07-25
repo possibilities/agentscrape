@@ -132,6 +132,81 @@ describe("network-free feed discovery", () => {
       2,
     );
   });
+  test("parses fully namespace-prefixed Atom entries and fields", () => {
+    const url = "https://notes.example.com/feed.xml";
+    const xml = `<?xml version="1.0"?>
+      <atom:feed xmlns:atom="http://www.w3.org/2005/Atom">
+        <atom:entry>
+          <atom:id>prefixed-1</atom:id>
+          <atom:title>Prefixed note</atom:title>
+          <atom:link rel="canonical" href="/notes/1"/>
+          <atom:published>2026-07-01T10:00:00Z</atom:published>
+          <atom:updated>2026-07-02T10:00:00Z</atom:updated>
+        </atom:entry>
+      </atom:feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+    expect(result.status).toBe("success");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      stable_id: "prefixed-1",
+      title: "Prefixed note",
+      url: "https://notes.example.com/notes/1",
+      published_at: "2026-07-01T10:00:00Z",
+      updated_at: "2026-07-02T10:00:00Z",
+    });
+  });
+  test("parses Atom entries using an arbitrary declared namespace prefix", () => {
+    const url = "https://notes.example.com/feed.xml";
+    const xml = `<x:feed xmlns:x="http://www.w3.org/2005/Atom"><x:entry><x:id>arbitrary-1</x:id><x:title>Arbitrary prefix</x:title><x:link href="/arbitrary"/></x:entry></x:feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.stable_id).toBe("arbitrary-1");
+    expect(result.items[0]?.url).toBe("https://notes.example.com/arbitrary");
+  });
+  test("parses prefixed Atom tombstones from ref and when attributes", () => {
+    const url = "https://notes.example.com/feed.xml";
+    const xml = `<atom:feed xmlns:atom="http://www.w3.org/2005/Atom" xmlns:at="http://purl.org/atompub/tombstones/1.0"><at:deleted-entry ref="gone-1" when="2026-07-03T10:00:00Z"/></atom:feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      stable_id: "gone-1",
+      tombstone: true,
+      updated_at: "2026-07-03T10:00:00Z",
+    });
+  });
+  test("traverses a prefixed feed-level Atom next link", () => {
+    const first = "https://paged.example.com/feeds/first.xml";
+    const second = "https://paged.example.com/feeds/second.xml";
+    const firstXml = `<a:feed xmlns:a="http://www.w3.org/2005/Atom"><a:entry><a:id>first</a:id></a:entry><a:link rel="NEXT" href="second.xml"/></a:feed>`;
+    const secondXml = `<b:feed xmlns:b="http://www.w3.org/2005/Atom"><b:entry><b:id>second</b:id></b:entry></b:feed>`;
+    const result = discoverFeed({ url: first, content: firstXml }, { sourceUrl: first }, [
+      { url: second, content: secondXml },
+    ]);
+    expect(result.status).toBe("success");
+    expect(result.items).toHaveLength(2);
+    expect(result.pagination.pages).toHaveLength(2);
+    expect(result.pagination.pages[0]?.next_url).toBe(second);
+  });
+  test("ignores nested prefixed entry-looking Atom extension nodes", () => {
+    const url = "https://notes.example.com/feed.xml";
+    const xml = `<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:x="urn:extension"><x:wrapper><a:entry><a:id>nested</a:id></a:entry></x:wrapper><a:entry><a:id>direct</a:id></a:entry></a:feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+    expect(result.status).toBe("success");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.stable_id).toBe("direct");
+    expect(result.pagination.pages[0]?.item_count).toBe(1);
+    expect(result.warnings.some((warning) => warning.code === "item_limit_reached")).toBeFalse();
+  });
+  test("counts only direct prefixed Atom entries toward maxItems", () => {
+    const url = "https://notes.example.com/feed.xml";
+    const xml = `<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:x="urn:extension"><x:wrapper><a:entry><a:id>nested</a:id></a:entry></x:wrapper><a:entry><a:id>one</a:id></a:entry><a:entry><a:id>two</a:id></a:entry><a:entry><a:id>three</a:id></a:entry></a:feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url, maxItems: 2 });
+    expect(result.status).toBe("partial");
+    expect(result.items.map((item) => item.stable_id).sort()).toEqual(["one", "two"]);
+    expect(result.pagination.pages[0]?.item_count).toBe(2);
+    expect(result.pagination.stop_reason).toBe("item_limit");
+    expect(result.warnings.some((warning) => warning.code === "item_limit_reached")).toBeTrue();
+  });
   test("traverses only supplied recorded pages", () => {
     const source = "https://paged.example.com/feed?page=1";
     const second = "https://paged.example.com/feed?page=2";

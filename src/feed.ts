@@ -180,14 +180,14 @@ function validateXml(content: string): void {
   const validated = XMLValidator.validate(content, { allowBooleanAttributes: true });
   if (validated !== true) throw new FeedFault("malformed_xml", "The feed XML is malformed.");
 }
+function localName(node: { name?: string }): string {
+  return (node.name ?? "").split(":").pop()?.toLowerCase() ?? "";
+}
 function text(_$: cheerio.CheerioAPI, root: cheerio.Cheerio<any>, names: string[]): string {
   for (const name of names) {
     const found = root
       .children()
-      .filter(
-        (_i, node) =>
-          node.type === "tag" && (node.name ?? "").split(":").pop()?.toLowerCase() === name,
-      )
+      .filter((_i, node) => node.type === "tag" && localName(node) === name)
       .first();
     if (found.length) return found.text();
   }
@@ -198,24 +198,31 @@ function parseFeed(content: string, page: string, budget: number, warnings: Warn
   validateXml(content);
   const $ = cheerio.load(content, { xmlMode: true });
   const root = $.root().children().first();
-  const rootName = (root.get(0)?.name ?? "").split(":").pop()?.toLowerCase();
+  const rootName = localName(root.get(0) ?? {});
   if (!rootName || !["rss", "rdf", "feed"].includes(rootName))
     throw new FeedFault(
       "unsupported_source",
       "The recorded response is not a supported RSS or Atom feed.",
     );
   const format = rootName === "feed" ? ("atom" as const) : ("rss" as const);
-  const nodes = $(
-    format === "atom" ? "entry, deleted-entry, at\\:deleted-entry" : "item, deleted-entry",
-  ).toArray();
+  const nodes =
+    format === "atom"
+      ? root
+          .children()
+          .filter(
+            (_i, node) =>
+              node.type === "tag" && ["entry", "deleted-entry"].includes(localName(node)),
+          )
+          .toArray()
+      : $("item, deleted-entry").toArray();
   const items: FeedDiscoveryItem[] = [];
   for (const node of nodes.slice(0, budget)) {
     const element = $(node);
-    const tombstone = (node.name ?? "").includes("deleted-entry");
+    const tombstone = localName(node) === "deleted-entry";
     const urls: string[] = [];
     element
       .children()
-      .filter((_i, child) => (child.name ?? "").split(":").pop() === "link")
+      .filter((_i, child) => localName(child) === "link")
       .each((_i, link) => {
         const rel = ($(link).attr("rel") ?? "alternate").toLowerCase();
         if (["", "alternate", "canonical"].includes(rel))
@@ -249,8 +256,7 @@ function parseFeed(content: string, page: string, budget: number, warnings: Warn
     .children()
     .filter(
       (_i, node) =>
-        (node.name ?? "").split(":").pop() === "link" &&
-        ($(node).attr("rel") ?? "").toLowerCase() === "next",
+        localName(node) === "link" && ($(node).attr("rel") ?? "").toLowerCase() === "next",
     )
     .first();
   let next: string | null = null;
