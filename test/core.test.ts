@@ -135,7 +135,7 @@ describe("corpus, canary, and queue contracts", () => {
   test("the complete versioned corpus replays offline", async () => {
     const result = await testCorpus();
     expect(result.failed).toBe(0);
-    expect(result.passed).toBe(26);
+    expect(result.passed).toBe(27);
   });
   test("historical negative names reject the wrong dedicated failure category", async () => {
     const registry = loadRegistry();
