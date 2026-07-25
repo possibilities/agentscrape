@@ -164,7 +164,11 @@ Corpus metadata uses version `1`, declares `content`, `links`, or `nav-links` mo
 
 ## Queue
 
-Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Browser-host outages retry in place with bounded exponential backoff; malformed and permanent failures move to `failed/`. Reconciliation is inventory-only unless `--apply` is given, persists private atomic outcomes before archiving source records, and admits imports through explicit `agentbrain` argv with a bounded timeout.
+Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Browser-host outages retry in place with bounded exponential backoff; malformed and permanent failures are published without clobbering existing `failed/` evidence.
+
+`process-queue` and `reconcile-queue --apply` share private, durable, per-name generation claims. A live owner makes peers skip while leaving the public source visible; a dead owner is recovered, and malformed, symlinked, foreign, or incomplete claim evidence fails closed. Outcomes, failed records, and archives use fsynced no-clobber publication. Retirement removes only the snapshotted inode and preserves a concurrently replaced pathname. There is a narrow conditional gap between the final identity check and the private UUID rename; a generation captured in that gap is retained in the private retirement quarantine rather than unlinked.
+
+Reconciliation is inventory-only unless `--apply` is given and admits imports through explicit `agentbrain` argv with a bounded timeout. A valid existing outcome resumes archive publication without another submit. If an owner dies after `agentbrain` accepted a request but before its receipt was durably published, recovery can physically submit again; correctness at that boundary relies on the `agentbrain` duplicate/idempotency contract rather than an intent journal.
 
 ## Development
 
