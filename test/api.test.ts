@@ -130,6 +130,17 @@ describe("public TypeScript API", () => {
     expect(envelope.extractor.implementation).toBe("x-article");
     expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
   });
+  test("classifies a bare X timeline shell as malformed provider output", async () => {
+    const envelope = (await fetchMarkdown("https://x.com/sampleuser", {
+      envelope: true,
+      preset: "x-timeline",
+      html: '<div id="primaryColumn"></div>',
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("failure");
+    expect(envelope.extractor.implementation).toBe("x-timeline");
+    expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
+  });
   test("keeps explicit X presets strict for mismatched rendered DOM", async () => {
     const articleAsTweet = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
       envelope: true,

@@ -522,7 +522,8 @@ function timelineTweet(html: string, profile: string): XTimelineTweet | null {
 }
 function timelineCells(html: string): Array<{ id: string; html: string }> {
   const $ = cheerio.load(html);
-  return $('[data-testid="cellInnerDiv"]')
+  return $('[data-testid="primaryColumn"],#primaryColumn')
+    .find('[data-testid="cellInnerDiv"]')
     .toArray()
     .flatMap((element) => {
       const content = $.html(element);
@@ -534,6 +535,17 @@ type TimelineWarning = "scroll_stalled" | "max_scrolls_reached" | "no_tweets_fou
 interface TimelineEvidence {
   hitBottom?: boolean;
   warning?: TimelineWarning;
+  providerEmpty?: boolean;
+  classifiableObserved?: boolean;
+}
+export interface TimelineHarvestState {
+  cells: Array<{ id: string; html: string }>;
+  classifiableIds: string[];
+  providerEmpty: boolean;
+}
+export interface TimelineHarvestUpdate {
+  state: TimelineHarvestState;
+  madeProgress: number;
 }
 interface TimelineBuild {
   result: ScrapeResult<XTimeline>;
@@ -579,7 +591,7 @@ function evaluateTimeline(
         new ScrapeWarning(
           warning,
           warning === "no_tweets_found"
-            ? "no classifiable tweets found after hydration"
+            ? "X explicitly reported that this timeline is empty"
             : warning === "scroll_stalled"
               ? "no new tweets after repeated settled scrolls"
               : `hit the ${options.maxScrolls ?? 20}-scroll ceiling before the bottom`,
@@ -611,37 +623,110 @@ function evaluateTimeline(
     },
   };
 }
+function hasExplicitTimelineEmpty(html: string): boolean {
+  const $ = cheerio.load(html);
+  return $('[data-testid="primaryColumn"],#primaryColumn')
+    .toArray()
+    .some(
+      (root) =>
+        $(root).find('[data-testid="emptyState"],[data-testid="empty_state_header_text"]').length >
+        0,
+    );
+}
+
+export function harvestTimelineFrame(
+  previous: TimelineHarvestState | undefined,
+  html: string,
+  profile: string,
+): TimelineHarvestUpdate {
+  const cells = new Map((previous?.cells ?? []).map((cell) => [cell.id, cell.html]));
+  const classifiable = new Set(previous?.classifiableIds ?? []);
+  let madeProgress = 0;
+  for (const candidate of timelineCells(html)) {
+    const existed = cells.has(candidate.id);
+    const wasClassifiable = classifiable.has(candidate.id);
+    const isClassifiable = timelineTweet(candidate.html, profile) !== null;
+    if (!existed || (isClassifiable && !wasClassifiable)) madeProgress += 1;
+    if (isClassifiable || !wasClassifiable) cells.set(candidate.id, candidate.html);
+    if (isClassifiable) classifiable.add(candidate.id);
+  }
+  return {
+    state: {
+      cells: [...cells].map(([id, cellHtml]) => ({ id, html: cellHtml })),
+      classifiableIds: [...classifiable],
+      providerEmpty: Boolean(previous?.providerEmpty) || hasExplicitTimelineEmpty(html),
+    },
+    madeProgress,
+  };
+}
+
+function finalizeTimeline(
+  cells: Array<{ id: string; html: string }>,
+  profile: string,
+  options: HandlerOptions,
+  evidence: TimelineEvidence,
+): ScrapeResult<XTimeline> {
+  const classifiableObserved =
+    evidence.classifiableObserved ||
+    cells.some((cell) => timelineTweet(cell.html, profile) !== null);
+  if (!classifiableObserved) {
+    if (!evidence.providerEmpty) {
+      throw new PresetDriftError(
+        "X timeline core structure missing (no classifiable tweets or allowlisted provider-empty state)",
+      );
+    }
+    const emptyEvidence: TimelineEvidence = { warning: "no_tweets_found" };
+    if (evidence.hitBottom !== undefined) emptyEvidence.hitBottom = evidence.hitBottom;
+    return evaluateTimeline(cells, profile, options, emptyEvidence).result;
+  }
+  const finalEvidence: TimelineEvidence = {};
+  if (evidence.hitBottom !== undefined) finalEvidence.hitBottom = evidence.hitBottom;
+  if (evidence.warning && evidence.warning !== "no_tweets_found")
+    finalEvidence.warning = evidence.warning;
+  return evaluateTimeline(cells, profile, options, finalEvidence).result;
+}
+
+export function finalizeTimelineHarvest(
+  state: TimelineHarvestState,
+  profile: string,
+  options: HandlerOptions = {},
+  evidence: TimelineEvidence = {},
+): ScrapeResult<XTimeline> {
+  return finalizeTimeline(state.cells, profile, options, {
+    ...evidence,
+    providerEmpty: state.providerEmpty,
+    classifiableObserved: state.cells.some((cell) => timelineTweet(cell.html, profile) !== null),
+  });
+}
+
 export function buildTimeline(
   cells: Array<{ id: string; html: string }>,
   profile: string,
   options: HandlerOptions = {},
   evidence: TimelineEvidence = {},
 ): ScrapeResult<XTimeline> {
-  return evaluateTimeline(cells, profile, options, evidence).result;
+  return finalizeTimeline(cells, profile, options, evidence);
 }
 export async function scrapeTimeline(
   url: string,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<XTimeline>> {
+  const injectedHtml = options.html;
+  const injected = injectedHtml !== undefined && injectedHtml !== null;
   let profile = "";
   try {
     [, profile] = timelineTarget(url);
   } catch (error) {
-    if (!options.html) throw error;
+    if (!injected) throw error;
   }
-  if (options.html) {
-    const cells = timelineCells(options.html);
-    return buildTimeline(
-      cells,
-      profile,
-      options,
-      cells.length ? {} : { warning: "no_tweets_found" },
-    );
+  if (injected) {
+    const harvested = harvestTimelineFrame(undefined, injectedHtml, profile);
+    return finalizeTimelineHarvest(harvested.state, profile, options);
   }
   const [target] = timelineTarget(url);
   await openPage(target, options.session, options.media, '[data-testid="primaryColumn"]');
   await checkXAuth(options.session);
-  const seen = new Map<string, string>();
+  let harvest: TimelineHarvestState | undefined;
   let stalled = 0;
   const maxScrolls = options.maxScrolls ?? 20;
   for (let scroll = 0; scroll <= maxScrolls; scroll += 1) {
@@ -660,27 +745,19 @@ export async function scrapeTimeline(
       typeof frame.innerHeight !== "number"
     )
       throw new Error("Timeline harvest failed: invalid frame result");
-    let added = 0;
-    for (const cell of timelineCells(frame.html))
-      if (!seen.has(cell.id)) {
-        seen.set(cell.id, cell.html);
-        added += 1;
-      }
+    const update = harvestTimelineFrame(harvest, frame.html, profile);
+    harvest = update.state;
     const bottom = frame.scrollTop + frame.innerHeight >= frame.scrollHeight - 4;
-    const cells = [...seen].map(([id, html]) => ({ id, html }));
-    const built = evaluateTimeline(cells, profile, options, { hitBottom: bottom });
-    if (built.hitLimit || built.caughtUp || bottom) {
-      if (!built.result.structured.tweets.length && !built.caughtUp && !seen.size)
-        return buildTimeline(cells, profile, options, {
-          hitBottom: bottom,
-          warning: "no_tweets_found",
-        });
-      return built.result;
-    }
+    const built = evaluateTimeline(harvest.cells, profile, options, { hitBottom: bottom });
+    if (built.hitLimit || built.caughtUp || bottom)
+      return finalizeTimelineHarvest(harvest, profile, options, { hitBottom: bottom });
     if (scroll === maxScrolls)
-      return buildTimeline(cells, profile, options, { warning: "max_scrolls_reached" });
-    stalled = added ? 0 : stalled + 1;
-    if (stalled >= 3) return buildTimeline(cells, profile, options, { warning: "scroll_stalled" });
+      return finalizeTimelineHarvest(harvest, profile, options, {
+        warning: "max_scrolls_reached",
+      });
+    stalled = update.madeProgress ? 0 : stalled + 1;
+    if (stalled >= 3)
+      return finalizeTimelineHarvest(harvest, profile, options, { warning: "scroll_stalled" });
     const scrolled = await runAgentBrowser(
       ["eval", "window.scrollBy(0, Math.floor(window.innerHeight * 0.85))"],
       options.session,
