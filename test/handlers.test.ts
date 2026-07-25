@@ -126,6 +126,120 @@ describe("conversation and social fail-closed handlers", () => {
       "Second post",
     ]);
   });
+  test("X thread keeps a same-author quote separate from top-level continuations", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/Alice"><span>Alice</span><span>@Alice</span></a></div>
+      <div data-testid="tweetText">Outer post</div>
+      <a href="/Alice/status/1"><time>first</time></a>
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+        <div data-testid="tweetText">Quoted words</div>
+        <a href="/alice/status/9"><time>quoted</time></a>
+      </article>
+    </article>
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/ALICE"><span>Alice</span><span>@ALICE</span></a></div>
+      <div data-testid="tweetText">Top-level continuation</div>
+      <a href="/alice/status/2"><time>second</time></a>
+    </article>`;
+    const result = await scrapeTweet("https://x.com/i/status/1", { html });
+
+    expect(result.structured.tweets.map((tweet) => tweet.text)).toEqual([
+      "Outer post",
+      "Top-level continuation",
+    ]);
+    expect(result.structured.quoted_tweet?.text).toBe("Quoted words");
+    expect(result.markdown.match(/Quoted words/g)).toHaveLength(1);
+  });
+  test("X thread leaves a structurally nested empty quote null", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">Primary post</div>
+      <a href="/alice/status/1"><time>first</time></a>
+      <article data-testid="tweet"><div aria-hidden="true"></div></article>
+    </article>
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">Primary continuation</div>
+      <a href="/alice/status/2"><time>second</time></a>
+    </article>`;
+    const result = await scrapeTweet("https://x.com/i/status/1", { html });
+
+    expect(result.structured.tweets.map((tweet) => tweet.text)).toEqual([
+      "Primary post",
+      "Primary continuation",
+    ]);
+    expect(result.structured.quoted_tweet).toBeNull();
+  });
+  test("X thread ignores a different-author quote when continuing the top-level author", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">First</div>
+      <a href="/alice/status/1"><time>first</time></a>
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/bob"><span>Bob</span><span>@bob</span></a></div>
+        <div data-testid="tweetText">Bob quote</div>
+      </article>
+    </article>
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">Second</div>
+      <a href="/alice/status/2"><time>second</time></a>
+    </article>`;
+    const result = await scrapeTweet("https://x.com/i/status/1", { html });
+
+    expect(result.structured.tweets.map((tweet) => tweet.text)).toEqual(["First", "Second"]);
+    expect(result.structured.quoted_tweet?.text).toBe("Bob quote");
+  });
+  test("X tweet fields belong to their nearest tweet container", async () => {
+    const html = `<article data-testid="tweet">
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/bob"><span>Bob</span><span>@bob</span></a></div>
+        <div data-testid="tweetText">Quote https://raw.example/owned</div>
+        <a href="https://docs.example/quote">Quote link</a>
+        <a href="/bob/status/10"><time>quoted time</time></a>
+      </article>
+    </article>`;
+    const result = await scrapeTweet("https://x.com/outer/status/10", { html });
+    const outer = result.structured.tweets[0]!;
+
+    expect(result.structured.author_name).toBe("");
+    expect(result.structured.author_handle).toBe("outer");
+    expect(outer).toMatchObject({ text: "", timestamp: "", permalink: "", links: [] });
+    expect(result.structured.quoted_tweet).toMatchObject({
+      text: "Quote https://raw.example/owned",
+      timestamp: "quoted time",
+      permalink: "https://x.com/bob/status/10",
+      links: ["https://docs.example/quote", "https://raw.example/owned"],
+    });
+  });
+  test("X status anchoring ignores IDs owned only by nested quotes", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/bob"><span>Bob</span><span>@bob</span></a></div>
+      <div data-testid="tweetText">Fallback first post</div>
+      <a href="/bob/status/1"><time>first</time></a>
+    </article>
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">Wrong outer selection</div>
+      <a href="/alice/status/2"><time>second</time></a>
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/eve"><span>Eve</span><span>@eve</span></a></div>
+        <div data-testid="tweetText">Target ID is only here</div>
+        <a href="/eve/status/99"><time>nested</time></a>
+      </article>
+    </article>
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">Later Alice post</div>
+      <a href="/alice/status/3"><time>third</time></a>
+    </article>`;
+    const result = await scrapeTweet("https://x.com/i/status/99", { html });
+
+    expect(result.structured.author_handle).toBe("bob");
+    expect(result.structured.tweets.map((tweet) => tweet.text)).toEqual(["Fallback first post"]);
+    expect(result.structured.quoted_tweet).toBeNull();
+  });
   test("X profile requires its username root", async () => {
     expect(
       scrapeProfile("https://x.com/nobody", {

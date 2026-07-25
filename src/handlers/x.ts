@@ -75,12 +75,38 @@ function absoluteX(href: string): string {
   if (/^https?:/.test(href)) return href;
   return href.startsWith("/") ? `https://x.com${href}` : href;
 }
-function authorInfo($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): [string, string, string] {
-  const user = tweet.find('[data-testid="User-Name"]').first();
+function ownedDescendants(
+  $: cheerio.CheerioAPI,
+  tweet: cheerio.Cheerio<any>,
+  selector: string,
+): cheerio.Cheerio<any> {
+  const candidate = tweet[0];
+  return tweet
+    .find(selector)
+    .filter(
+      (_index, element) =>
+        Boolean(candidate) && $(element).parents('[data-testid="tweet"]').first()[0] === candidate,
+    );
+}
+function authorInfo(
+  $: cheerio.CheerioAPI,
+  tweet: cheerio.Cheerio<any>,
+  owned = false,
+): [string, string, string] {
+  const user = (
+    owned
+      ? ownedDescendants($, tweet, '[data-testid="User-Name"]')
+      : tweet.find('[data-testid="User-Name"]')
+  ).first();
   let name = "";
   let handle = "";
   let url = "";
-  user.find("a[href]").each((_index, anchor) => {
+  const anchors = owned
+    ? ownedDescendants($, tweet, "a[href]").filter(
+        (_index, anchor) => $(anchor).parents('[data-testid="User-Name"]').first()[0] === user[0],
+      )
+    : user.find("a[href]");
+  anchors.each((_index, anchor) => {
     if (handle) return;
     const href = $(anchor).attr("href") ?? "";
     const match = href.match(/^\/(\w+)$/);
@@ -90,7 +116,12 @@ function authorInfo($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): [string
     const text = $(anchor).text().replace(/\s+/g, " ").trim();
     if (text && !text.startsWith("@")) name = text;
   });
-  user.find("span").each((_index, span) => {
+  const spans = owned
+    ? ownedDescendants($, tweet, "span").filter(
+        (_index, span) => $(span).parents('[data-testid="User-Name"]').first()[0] === user[0],
+      )
+    : user.find("span");
+  spans.each((_index, span) => {
     const text = $(span).text().replace(/\s+/g, " ").trim();
     if (!text || text === "·") return;
     if (text.startsWith("@") && !handle) handle = text.slice(1).toLowerCase();
@@ -111,14 +142,20 @@ function meaningfulLink(href: string, $: cheerio.CheerioAPI, anchor: any): boole
     return false;
   }
 }
-function tweetContent($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): TweetContent {
-  const textElement = tweet.find('[data-testid="tweetText"]').first();
+function tweetContent(
+  $: cheerio.CheerioAPI,
+  tweet: cheerio.Cheerio<any>,
+  owned = false,
+): TweetContent {
+  const descendants = (selector: string) =>
+    owned ? ownedDescendants($, tweet, selector) : tweet.find(selector);
+  const textElement = descendants('[data-testid="tweetText"]').first();
   const text = textElement
     .text()
     .replace(/\u00a0/g, " ")
     .trim();
   const links: string[] = [];
-  tweet.find("a[href]").each((_index, anchor) => {
+  descendants("a[href]").each((_index, anchor) => {
     const href = absoluteX($(anchor).attr("href") ?? "");
     if (meaningfulLink(href, $, anchor) && !links.includes(href)) links.push(href);
   });
@@ -126,7 +163,7 @@ function tweetContent($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): Tweet
     const href = match[0].replace(/[.,!?:;)]+$/, "");
     if (!links.includes(href)) links.push(href);
   }
-  const time = tweet.find("time").first();
+  const time = descendants("time").first();
   const parent = time.parent("a[href]");
   return new TweetContent({
     text,
@@ -135,15 +172,22 @@ function tweetContent($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): Tweet
     links,
   });
 }
-function tweetAuthor($: cheerio.CheerioAPI, tweet: cheerio.Cheerio<any>): string | null {
-  return authorInfo($, tweet)[1].toLowerCase() || null;
+function tweetAuthor(
+  $: cheerio.CheerioAPI,
+  tweet: cheerio.Cheerio<any>,
+  owned = false,
+): string | null {
+  return authorInfo($, tweet, owned)[1].toLowerCase() || null;
 }
 function buildThread(html: string, fallbackHandle = "", statusId?: string | null): TweetThread {
   const $ = cheerio.load(html);
-  let tweets = $('[data-testid="tweet"]');
+  let tweets = $('[data-testid="tweet"]').filter(
+    (_index, element) => $(element).parents('[data-testid="tweet"]').length === 0,
+  );
   if (statusId) {
     const matched = tweets.filter(
-      (_index, element) => $(element).find(`a[href*="/status/${statusId}"]`).length > 0,
+      (_index, element) =>
+        ownedDescendants($, $(element), `a[href*="/status/${statusId}"]`).length > 0,
     );
     if (matched.length) {
       const all = tweets.toArray();
@@ -154,18 +198,18 @@ function buildThread(html: string, fallbackHandle = "", statusId?: string | null
     throw new PresetDriftError("X tweet core structure missing (no [data-testid=tweet])");
   }
   const first = $(tweets[0]!);
-  const [name, parsedHandle, url] = authorInfo($, first);
+  const [name, parsedHandle, url] = authorInfo($, first, true);
   const handle = parsedHandle || fallbackHandle;
   const own: TweetContent[] = [];
   for (const element of tweets.toArray()) {
     const tweet = $(element);
-    if (tweetAuthor($, tweet) !== (parsedHandle || tweetAuthor($, first))) break;
-    own.push(tweetContent($, tweet));
+    if (tweetAuthor($, tweet, true) !== (parsedHandle || tweetAuthor($, first, true))) break;
+    own.push(tweetContent($, tweet, true));
   }
+  const nested = ownedDescendants($, first, '[data-testid="tweet"]').first();
   let quoted: TweetContent | null = null;
-  const nested = first.find('[data-testid="tweet"]').first();
   if (nested.length) {
-    const value = tweetContent($, nested);
+    const value = tweetContent($, nested, true);
     if (value.text || value.timestamp || value.permalink) quoted = value;
   }
   return new TweetThread({
