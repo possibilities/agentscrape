@@ -107,6 +107,8 @@ Routing policy is resolved before any provider dispatch, network fetch, or brows
 5. Unclaimed `.md` URLs use bounded direct HTTP
 6. Generic browser fallback for all other cases
 
+Automatic matching first gates each preset by its declared `domain` and `aliases`, with case-insensitive hostname and `www` normalization; `domain: "*"` is the explicit host-agnostic option. Content presets may declare zero `url_patterns` for explicit-only use. Every published automatic pattern must visibly begin with `^` and end with `$`, and runtime matching additionally requires the regex to consume the entire canonical, fragment-free URL. These publication and runtime checks prevent substring and top-level-alternation matches; explicit name-based selection remains independent of URL eligibility.
+
 A domain claimed by a preset fails closed on unsupported or ambiguous routes. Claimed-domain `.md` URLs require `--generic` to bypass preset policy. Because X serves both posts and long-form Articles from `/status/` URLs, the official status route classifies the rendered page by its strong Article-reader landmark before validating the effective `x-tweet` or `x-article` contract.
 
 Content handlers must return all artifact fields, non-empty Markdown, the declared structured schema, and Markdown identical to that schema's renderer. Missing provider structure raises typed drift rather than returning generic body text. Labeled zero balances remain valid for billing presets.

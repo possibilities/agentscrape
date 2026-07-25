@@ -205,7 +205,7 @@ function normalizeHost(host: string): string {
   return lower.startsWith("www.") ? lower.slice(4) : lower;
 }
 
-export function canonicalMatchUrl(value: unknown): string | null {
+function canonicalMatch(value: unknown): URL | null {
   if (typeof value !== "string" || !value) return null;
   try {
     const url = new URL(value);
@@ -219,10 +219,14 @@ export function canonicalMatchUrl(value: unknown): string | null {
       url.port = "";
     }
     url.hash = "";
-    return url.href;
+    return url;
   } catch {
     return null;
   }
+}
+
+export function canonicalMatchUrl(value: unknown): string | null {
+  return canonicalMatch(value)?.href ?? null;
 }
 
 function problems(data: Record<string, unknown>, label: string): string[] {
@@ -262,6 +266,11 @@ function problems(data: Record<string, unknown>, label: string): string[] {
   }
   for (const pattern of Array.isArray(data.url_patterns) ? data.url_patterns : []) {
     if (typeof pattern !== "string") continue;
+    if (!pattern.startsWith("^") || !pattern.endsWith("$")) {
+      result.push(
+        `${label}: url_pattern '${pattern}' must have visible start (^) and end ($) anchors`,
+      );
+    }
     try {
       new RegExp(pattern);
     } catch (error) {
@@ -371,11 +380,20 @@ export class PresetRegistry {
     return this.presets.find((preset) => preset.name === name) ?? null;
   }
   pageKindMatches(value: string): PresetConfig[] {
-    const url = canonicalMatchUrl(value);
-    if (!url) return [];
-    return this.presets.filter((preset) =>
-      (this.matchers.get(preset.name) ?? []).some((pattern) => pattern.test(url)),
-    );
+    const parsed = canonicalMatch(value);
+    if (!parsed) return [];
+    const url = parsed.href;
+    const hostname = normalizeHost(parsed.hostname);
+    return this.presets.filter((preset) => {
+      const hostMatches =
+        preset.domain === "*" ||
+        [preset.domain, ...preset.aliases].some((declared) => normalizeHost(declared) === hostname);
+      if (!hostMatches) return false;
+      return (this.matchers.get(preset.name) ?? []).some((pattern) => {
+        const match = pattern.exec(url);
+        return match?.index === 0 && match[0].length === url.length;
+      });
+    });
   }
   isClaimed(value: string): boolean {
     const canonical = canonicalMatchUrl(value);
