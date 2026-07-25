@@ -38,8 +38,11 @@ function timeoutMs(override?: number): number {
   const raw = Number(process.env[AGENT_BROWSER_TIMEOUT_ENV]);
   return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 30_000;
 }
+function runtimeHome(): string {
+  return process.env.HOME || homedir();
+}
 function knownUpstreamDown(): string | null {
-  const path = join(homedir(), ".local/state/browserctl/check-health-state.yaml");
+  const path = join(runtimeHome(), ".local/state/browserctl/check-health-state.yaml");
   if (!existsSync(path)) return null;
   try {
     const state = parseYaml(readFileSync(path, "utf8")) as Record<string, unknown>;
@@ -74,7 +77,7 @@ export async function withBrowserSignal<T>(
 function resolveBrowser(): string {
   const override = process.env[AGENT_BROWSER_BIN_ENV];
   if (override) return findExecutable(override) || override;
-  const managed = join(homedir(), ".local/bin/agent-browser");
+  const managed = join(runtimeHome(), ".local/bin/agent-browser");
   return (
     (existsSync(managed) && findExecutable(managed)) ||
     findExecutable("agent-browser") ||
