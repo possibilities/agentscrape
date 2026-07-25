@@ -104,6 +104,35 @@ describe("public TypeScript API", () => {
       source_id: "2013334888515088526",
     });
   });
+  test("projects a quote-only X post without counting the quote as a thread item", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <a href="/alice/status/1">Open post</a>
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/bob"><span>Bob</span><span>@bob</span></a></div>
+        <div data-testid="tweetText">Quoted content</div>
+        <a href="/bob/status/2">Open quote</a>
+        <a href="/bob/status/2"><time>quoted time</time></a>
+      </article>
+    </article>`;
+    const envelope = (await fetchMarkdown("https://x.com/alice/status/1", {
+      envelope: true,
+      html,
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("success");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "social_post",
+      content_kind: "post",
+      content_item_count: 1,
+    });
+    expect(envelope.artifacts[0]?.content).toContain("**Quoted Tweet:**");
+    expect(envelope.artifacts[0]?.content).toContain("Quoted content");
+    expect(envelope.relations).toContainEqual({
+      relation_type: "references",
+      target_url: "https://x.com/bob/status/2",
+    });
+  });
   test("classifies same-author X status sequences as threads", async () => {
     const html = readFileSync(join(import.meta.dir, "fixtures/x-thread-short.html"), "utf8");
     const envelope = (await fetchMarkdown("https://x.com/i/status/1001", {

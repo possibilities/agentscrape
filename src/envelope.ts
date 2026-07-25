@@ -256,7 +256,7 @@ function project(
     };
   }
   if (value instanceof TweetThread) {
-    if (!value.tweets.some((tweet) => tweet.text.trim()))
+    if (!value.tweets.some((tweet) => tweet.text.trim()) && !value.quoted_tweet?.text.trim())
       throw new EnvelopeBuildError("empty_content", "X post extraction returned no post text");
     return {
       implementation: "x-tweet",
