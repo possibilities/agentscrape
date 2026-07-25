@@ -62,7 +62,7 @@ For an operator cutover from any predecessor deployment, use this generic sequen
 | --- | --- | --- |
 | `fetch-markdown URL [DEST]` | Fetch Markdown, generic HTML, GitHub/Gist content, or a matched content preset | Writes `DEST`, plus sibling `*.raw.html` / `*.selected.html` when available |
 | `fetch-links URL` | Extract flat/two-level navigation or an X timeline | No local write unless redirected by the caller |
-| `discover-feed FILE --source-url URL` | Parse recorded RSS, Atom, or configured archive pages without network access | No local write unless redirected by the caller |
+| `discover-feed [FILE] --source-url URL` | Discover bounded live RSS/Atom feeds, or parse recorded feed/archive responses when `FILE` is supplied | No local write unless redirected by the caller |
 | `list-presets` | List official and local presets by mode | None |
 | `show-preset NAME` | Display a preset contract | None |
 | `validate-preset NAME_OR_PATH` | Validate strict preset YAML | None |
@@ -75,6 +75,26 @@ For an operator cutover from any predecessor deployment, use this generic sequen
 | `reconcile-queue` | Inventory or apply reconciliation for frozen indexed records | `--apply` mutates archived reconciliation state; inventory mode does not |
 
 Run `agentscrape --help` or any command with `--help` for options.
+
+## Feed discovery
+
+Omit `FILE` for live discovery owned by Agentscrape:
+
+```sh
+agentscrape discover-feed --source-url https://example.com/blog \
+  --validator-url https://example.com/feed.xml --etag '"feed-v4"'
+```
+
+Supply exactly one `FILE` to preserve network-free recorded-response parsing; recorded pagination remains explicit with repeatable `--page URL FILE` pairs:
+
+```sh
+agentscrape discover-feed response.xml --source-url https://example.com/feed.xml \
+  --page https://example.com/feed.xml?page=2 response-page-2.xml
+```
+
+Live `auto` mode accepts a feed response directly. For an HTML source it follows only an explicit `<link rel="alternate">` whose type is RSS, Atom, XML, or text/XML; it never treats generic page-body HTML as feed entries. Use `--source-kind archive` plus `--archive-entry-selector` for configured HTML archives. `--etag` and `--last-modified` become conditional request validators in live mode. Direct `--source-kind feed` binds them to `--source-url`; auto/homepage mode requires an exact `--validator-url`, and sends them only if that exact response URL is reached. A matching `304` produces a successful, complete empty window and retains those validators.
+
+Live transport uses direct HTTP(S) without ambient proxies. It revalidates and DNS-pins every source, redirect, discovered feed, and pagination URL; rejects credential-bearing, secret-bearing, private, reserved, and HTTPS-downgrade destinations; requests identity encoding; bounds redirects, overall response bytes and parser work (20 MB each), time, live pages (10), items, headers, and per-response bytes; and requires fatal UTF-8 decoding. The schema remains feed envelope version `1`, and `source_url` remains the requested source while page evidence records effective feed/page URLs.
 
 ## Routing and preset safety
 
@@ -142,4 +162,4 @@ bun run x-readiness -- --once
 
 See `docs/migration/standalone.md` for intentional standalone identity and compatibility differences.
 
-The offline suite covers handler fixtures, corpus replay, preset invariants, envelope projection, feed discovery, output formatting, and command smoke tests.
+The offline suite covers handler fixtures, corpus replay, preset invariants, envelope projection, recorded and fake-transport live feed discovery, output formatting, and command smoke tests. It makes no live internet calls.
