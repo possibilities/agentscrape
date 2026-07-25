@@ -8,6 +8,7 @@ import {
   AgentscrapeProviderError,
   AgentscrapeTimeoutError,
   AgentscrapeUpstreamDownError,
+  type ErrorClass,
   PresetConfigError,
   PresetDriftError,
   PresetOutputError,
@@ -48,6 +49,20 @@ const MESSAGES: Record<FailureClass, string> = {
   cancelled: "The extraction was cancelled.",
   internal_error: "The extraction failed unexpectedly.",
 };
+const BASE_ERROR_MAPPING = {
+  usage: ["invalid_request", false],
+  auth: ["authentication_required", false],
+  upstream: ["upstream_unavailable", true],
+  selection: ["invalid_request", false],
+  config: ["internal_error", false],
+  output: ["malformed_provider_output", false],
+  drift: ["malformed_provider_output", false],
+  browser: ["browser_error", true],
+  provider: ["provider_error", false],
+  timeout: ["timeout", true],
+  cancelled: ["cancelled", false],
+  runtime: ["internal_error", false],
+} as const satisfies Record<ErrorClass, readonly [FailureClass, boolean]>;
 
 export class EnvelopeBuildError extends Error {
   constructor(
@@ -501,23 +516,20 @@ export function classifyFailure(error: unknown): [FailureClass, boolean, string]
   if (value instanceof PresetOutputError || value instanceof PresetDriftError)
     return ["malformed_provider_output", false, value.message];
   if (value instanceof AgentscrapeError) {
-    if (value.errorClass === "usage") return ["invalid_request", false, value.message];
-    if (value.errorClass === "auth" || /authentication required/i.test(value.message))
-      return ["authentication_required", false, value.message];
-    const permanent = /not found|unsupported|does not exist|invalid/i.test(value.message);
-    return ["provider_error", !permanent, value.message];
+    const [failureClass, retryable] = BASE_ERROR_MAPPING[value.errorClass];
+    return [failureClass, retryable, value.message];
   }
+  if (value.name === "AbortError") return ["cancelled", false, value.message];
+  if (value.name === "TimeoutError") return ["timeout", true, value.message];
+  if (value instanceof SyntaxError || value instanceof URIError)
+    return ["malformed_provider_output", false, value.message];
   if (/authentication required/i.test(value.message))
     return ["authentication_required", false, value.message];
-  if (value.name === "AbortError" || /cancelled|canceled|interrupted/i.test(value.message))
+  if (/cancelled|canceled|interrupted/i.test(value.message))
     return ["cancelled", false, value.message];
   if (/timed out|timeout/i.test(value.message)) return ["timeout", true, value.message];
   if (/upstream down|ECONN|network|fetch failed|rate limit/i.test(value.message))
     return ["upstream_unavailable", true, value.message];
-  if (value instanceof SyntaxError || value instanceof URIError)
-    return ["malformed_provider_output", false, value.message];
-  if (/selector|preset '|could not extract status id from url/i.test(value.message))
-    return ["invalid_request", false, value.message];
   if (/browser|navigation|content not found|failed to open/i.test(value.message))
     return ["browser_error", true, value.message];
   return ["internal_error", false, value.message];

@@ -85,6 +85,24 @@ describe("public TypeScript API", () => {
     expect(envelope.metadata?.source_id).toBe("2047794182463394072");
     expect(envelope.artifacts[0]?.content).toContain("# Introducing Articles on X");
   });
+  test("an explicit X Article preset accepts the official status-form route", async () => {
+    const html = readFileSync(
+      join(import.meta.dir, "corpus/x-article/sample-001/page.html"),
+      "utf8",
+    );
+    const envelope = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
+      envelope: true,
+      preset: "x-article",
+      html,
+    })) as ExtractionEnvelope;
+
+    expect(envelope.status).toBe("success");
+    expect(envelope.extractor.implementation).toBe("x-article");
+    expect(envelope.metadata).toMatchObject({
+      content_type: "article",
+      source_id: "2047794182463394072",
+    });
+  });
   test("keeps ordinary status pages on the X tweet contract", async () => {
     const html = readFileSync(
       join(import.meta.dir, "corpus/x-tweet/sample-001/selected.html"),
@@ -159,6 +177,21 @@ describe("public TypeScript API", () => {
     expect(envelope.extractor.implementation).toBe("x-article");
     expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
   });
+  test("classifies DeepWiki loading and generating states as retryable timeouts", async () => {
+    for (const [url, name] of [
+      ["https://deepwiki.com/acme/widget", "deepwiki-wiki-page-loading.html"],
+      ["https://deepwiki.com/search/example_abc", "deepwiki-search-generating.html"],
+    ] as const) {
+      const envelope = (await fetchMarkdown(url, {
+        envelope: true,
+        html: readFileSync(join(import.meta.dir, "fixtures", name), "utf8"),
+      })) as ExtractionEnvelope;
+      expect(envelope).toMatchObject({
+        status: "failure",
+        failure: { failure_class: "timeout", retryable: true },
+      });
+    }
+  });
   test("classifies a bare X timeline shell as malformed provider output", async () => {
     const envelope = (await fetchMarkdown("https://x.com/sampleuser", {
       envelope: true,
@@ -169,6 +202,20 @@ describe("public TypeScript API", () => {
     expect(envelope.status).toBe("failure");
     expect(envelope.extractor.implementation).toBe("x-timeline");
     expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
+  });
+  test("separates explicit X route misuse from captured DOM drift", async () => {
+    const routeMismatch = (await fetchMarkdown("https://x.com/alice", {
+      envelope: true,
+      preset: "x-tweet",
+      html: "<html></html>",
+    })) as ExtractionEnvelope;
+    const capturedDrift = (await fetchMarkdown("https://x.com/alice/status/1", {
+      envelope: true,
+      preset: "x-tweet",
+      html: "<html></html>",
+    })) as ExtractionEnvelope;
+    expect(routeMismatch.failure?.failure_class).toBe("invalid_request");
+    expect(capturedDrift.failure?.failure_class).toBe("malformed_provider_output");
   });
   test("keeps explicit X presets strict for mismatched rendered DOM", async () => {
     const articleAsTweet = (await fetchMarkdown("https://x.com/i/status/2047794182463394072", {
@@ -186,6 +233,7 @@ describe("public TypeScript API", () => {
     expect(articleAsTweet.extractor.implementation).toBe("x-tweet");
     expect(tweetAsArticle.status).toBe("failure");
     expect(tweetAsArticle.extractor.implementation).toBe("x-article");
+    expect(tweetAsArticle.failure?.failure_class).toBe("malformed_provider_output");
   });
   test("standalone job submission is atomic and rejects indexed state before publication", async () => {
     const home = temp();

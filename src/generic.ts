@@ -1,5 +1,8 @@
 import * as cheerio from "cheerio";
-import { openPage, runAgentBrowser } from "./browser";
+import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "./browser";
+import { decodeBrowserEval, decodeBrowserEvalString } from "./browser-eval";
+import { cssSelectorProblem } from "./css-selector";
+import { AgentscrapeBrowserError, AgentscrapeUsageError } from "./errors";
 import type { HandlerOptions, ScrapeResult } from "./handlers/types";
 import { convertHtml } from "./html";
 import { GenericPage } from "./schemas";
@@ -41,6 +44,7 @@ export async function detectContentSelector(options: HandlerOptions = {}): Promi
     return "body";
   })()`;
   const result = await runAgentBrowser(["eval", code], options.session);
+  // Selector auto-detection is intentionally best-effort; body is the documented fallback.
   return result.exitCode === 0
     ? browserText(result.stdout).trim().replace(/^"|"$/g, "") || "body"
     : "body";
@@ -48,16 +52,22 @@ export async function detectContentSelector(options: HandlerOptions = {}): Promi
 
 export async function scrapePage(
   url: string,
-  selector = "body",
+  selector: string | undefined = undefined,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<GenericPage>> {
+  const callerSelector = selector !== undefined;
+  const defaultedSelector = selector ?? "body";
+  const selectorProblem = cssSelectorProblem(defaultedSelector);
+  if (selectorProblem)
+    throw new AgentscrapeUsageError(`Invalid selector '${defaultedSelector}': ${selectorProblem}`);
   await openPage(url, options.session, options.media);
-  const chosen = selector === "body" ? await detectContentSelector(options) : selector;
+  const chosen = callerSelector ? defaultedSelector : await detectContentSelector(options);
   const full = await runAgentBrowser(
     ["eval", "document.documentElement.outerHTML"],
     options.session,
   );
-  if (full.exitCode !== 0) throw new Error(`Failed to get page HTML: ${full.stderr}`);
+  requireAgentBrowserSuccess(full, "Failed to get page HTML");
+  const fullHtml = decodeBrowserEvalString(full.stdout, "Failed to get page HTML");
   const selection = await runAgentBrowser(
     [
       "eval",
@@ -65,24 +75,32 @@ export async function scrapePage(
     ],
     options.session,
   );
-  if (selection.exitCode !== 0) throw new Error(`Failed to query selector: ${selection.stderr}`);
-  let value: { error?: string; count?: number; html?: string };
-  try {
-    value = JSON.parse(selection.stdout) as typeof value;
-    if (typeof value === "string") value = JSON.parse(value) as typeof value;
-  } catch {
-    value = { html: selection.stdout };
+  requireAgentBrowserSuccess(selection, "Failed to query selector");
+  const decoded = decodeBrowserEval(selection.stdout, "Failed to query selector");
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
+    throw new AgentscrapeBrowserError("Failed to query selector: invalid eval result");
+  const value = decoded as { error?: unknown; count?: unknown; html?: unknown };
+  if (value.error === "no_match") {
+    if (value.count !== 0)
+      throw new AgentscrapeBrowserError("Failed to query selector: invalid eval result");
+    const error = `Selector '${chosen}' matched no elements`;
+    throw callerSelector ? new AgentscrapeUsageError(error) : new AgentscrapeBrowserError(error);
   }
-  if (value.error === "no_match") throw new Error(`Selector '${chosen}' matched no elements`);
-  if (value.error === "multiple_match")
-    throw new Error(`Selector '${chosen}' matched ${value.count} elements, expected exactly 1`);
-  const selectedHtml = value.html ?? "";
+  if (value.error === "multiple_match") {
+    if (typeof value.count !== "number" || !Number.isInteger(value.count) || value.count < 2)
+      throw new AgentscrapeBrowserError("Failed to query selector: invalid eval result");
+    const error = `Selector '${chosen}' matched ${value.count} elements, expected exactly 1`;
+    throw callerSelector ? new AgentscrapeUsageError(error) : new AgentscrapeBrowserError(error);
+  }
+  if (typeof value.html !== "string")
+    throw new AgentscrapeBrowserError("Failed to query selector: invalid eval result");
+  const selectedHtml = value.html;
   const $ = cheerio.load(selectedHtml);
   $("script,style,noscript,svg,iframe,button").remove();
   const markdown = convertHtml($.html());
   const structured = new GenericPage(url, markdown);
   return {
-    full_html: browserText(full.stdout),
+    full_html: fullHtml,
     selected_html: selectedHtml,
     markdown: structured.toMarkdown(),
     structured,

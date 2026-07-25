@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PresetDriftError } from "../src/errors";
+import { AgentscrapeTimeoutError, AgentscrapeUsageError, PresetDriftError } from "../src/errors";
 import {
   scrapeAnthropicBilling,
   scrapeClaudeBilling,
+  scrapeCodexUsage,
   scrapeOpenAiBilling,
   scrapePerplexityBilling,
 } from "../src/handlers/billing";
@@ -82,6 +83,13 @@ describe("official billing invariants", () => {
       }),
     ).rejects.toBeInstanceOf(PresetDriftError);
   });
+  test("Codex rejects a page without quota landmarks as drift", async () => {
+    await expect(
+      scrapeCodexUsage("https://chatgpt.com/codex/settings/usage", {
+        html: "<html><body>Usage</body></html>",
+      }),
+    ).rejects.toBeInstanceOf(PresetDriftError);
+  });
 });
 
 describe("conversation and social fail-closed handlers", () => {
@@ -98,12 +106,34 @@ describe("conversation and social fail-closed handlers", () => {
       }),
     ).rejects.toBeInstanceOf(PresetDriftError);
   });
-  test("X post requires its core post container", async () => {
-    expect(
+  test("X route mismatches are usage errors while captured DOM drift remains drift", async () => {
+    for (const request of [
+      scrapeTweet("https://x.com/nobody", { media: "offline-sentinel" }),
+      scrapeTweet("https://x.com/nobody?next=/somebody/status/1", {
+        html: fixture("preset-audit-x-tweet-no-tweet.html"),
+      }),
+      scrapeArticle("https://x.com/nobody?next=/i/article/1", {
+        html: fixture("preset-audit-x-article-no-container.html"),
+      }),
+    ])
+      await expect(request).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    await expect(
       scrapeTweet("https://x.com/nobody/status/1", {
         html: fixture("preset-audit-x-tweet-no-tweet.html"),
       }),
-    ).rejects.toThrow("core structure missing");
+    ).rejects.toBeInstanceOf(PresetDriftError);
+  });
+  test("X status validation accepts canonical URLs and trailing pathname segments", async () => {
+    const html = `<article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>
+      <div data-testid="tweetText">Post body</div>
+      <a href="/alice/status/1"><time>now</time></a>
+    </article>`;
+    for (const url of [
+      "https://x.com/alice/status/1",
+      "https://twitter.com/alice/status/1/photo/1?view=full#media",
+    ])
+      expect((await scrapeTweet(url, { html })).structured.tweets[0]?.text).toBe("Post body");
   });
   test("X post repairs truncated wrapped-link text without live redirect expansion", async () => {
     const html = `<article data-testid="tweet">
@@ -261,13 +291,13 @@ describe("conversation and social fail-closed handlers", () => {
       }),
     ).rejects.toThrow("core structure missing");
   });
-  test("X profile treats empty injected HTML as an offline capture", async () => {
+  test("X profile rejects an incompatible explicit route as usage", async () => {
     expect(
       scrapeProfile("https://x.com/alice/status/1", {
         html: "",
         media: "offline-sentinel",
       }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
+    ).rejects.toBeInstanceOf(AgentscrapeUsageError);
   });
   test("X article requires a reader and non-empty body", async () => {
     expect(
@@ -286,13 +316,20 @@ describe("conversation and social fail-closed handlers", () => {
       }),
     ).rejects.toThrow("reader container not found");
   });
-  test("X article warning vocabulary contains only reachable partial warning", async () => {
+  test("X article routes include canonical, trailing, and status forms", async () => {
     const html =
       '<div data-testid="twitterArticleReadView"><div data-testid="twitterArticleRichTextView"><p>Body</p></div></div>';
-    const result = await scrapeArticle("https://x.com/i/article/1", { html });
-    expect(result.structured.warnings.map((warning) => warning.code)).toEqual([
-      "partial_article_extract",
-    ]);
+    for (const url of [
+      "https://x.com/i/article/1",
+      "https://x.com/alice/article/1/photo/1?view=full#media",
+      "https://twitter.com/alice/articles/1",
+      "https://x.com/alice/status/1",
+    ]) {
+      const result = await scrapeArticle(url, { html });
+      expect(result.structured.warnings.map((warning) => warning.code)).toEqual([
+        "partial_article_extract",
+      ]);
+    }
   });
 });
 
@@ -317,7 +354,7 @@ describe("DeepWiki page-kind contracts", () => {
       scrapeWikiPage("https://deepwiki.com/acme/widget", {
         html: fixture("deepwiki-wiki-page-loading.html"),
       }),
-    ).rejects.toThrow("timed out");
+    ).rejects.toBeInstanceOf(AgentscrapeTimeoutError);
     for (const name of [
       "deepwiki-wiki-page-duplicate-content.html",
       "deepwiki-wiki-page-missing-root.html",
@@ -336,16 +373,22 @@ describe("DeepWiki page-kind contracts", () => {
     expect(search.toMarkdown()).not.toContain("SOURCE PREVIEW ONLY");
   });
   test("search rejects auth, loading, generating, and incomplete states", async () => {
-    for (const [name, text] of [
-      ["deepwiki-search-auth.html", "requires authentication"],
-      ["deepwiki-search-generating.html", "terminal state"],
-      ["deepwiki-search-incomplete.html", "incomplete"],
-    ] as const) {
-      expect(
-        scrapeSearchConversation("https://deepwiki.com/search/example_abc", {
-          html: fixture(name),
-        }),
-      ).rejects.toThrow(text);
-    }
+    await expect(
+      scrapeSearchConversation("https://deepwiki.com/search/example_abc", {
+        html: fixture("deepwiki-search-auth.html"),
+      }),
+    ).rejects.toThrow("requires authentication");
+    for (const html of [
+      '<div data-testid="search-loading-shell"></div>',
+      fixture("deepwiki-search-generating.html"),
+    ])
+      await expect(
+        scrapeSearchConversation("https://deepwiki.com/search/example_abc", { html }),
+      ).rejects.toBeInstanceOf(AgentscrapeTimeoutError);
+    await expect(
+      scrapeSearchConversation("https://deepwiki.com/search/example_abc", {
+        html: fixture("deepwiki-search-incomplete.html"),
+      }),
+    ).rejects.toThrow("incomplete");
   });
 });

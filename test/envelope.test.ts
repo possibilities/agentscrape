@@ -10,7 +10,15 @@ import {
 } from "../src/envelope";
 import {
   AgentscrapeAuthError,
+  AgentscrapeBrowserError,
+  AgentscrapeCancelledError,
+  AgentscrapeError,
+  AgentscrapeProviderError,
+  AgentscrapeRuntimeError,
+  AgentscrapeTimeoutError,
   AgentscrapeUpstreamDownError,
+  AgentscrapeUsageError,
+  type ErrorClass,
   PresetConfigError,
   PresetDriftError,
   PresetOutputError,
@@ -26,6 +34,7 @@ import {
   DeepWikiQARound,
   DeepWikiSearchConversation,
   DeepWikiWikiPage,
+  type FailureClass,
   GenericPage,
   OpenAIBilling,
   PerplexityBilling,
@@ -228,17 +237,71 @@ describe("version 1 extraction envelope", () => {
 });
 
 describe("failure projection and redaction", () => {
-  test("classifies typed preset and operational failures", () => {
-    expect(classifyFailure(new PresetSelectionError("route"))[0]).toBe("invalid_request");
-    expect(classifyFailure(new PresetConfigError("config"))[0]).toBe("internal_error");
-    expect(classifyFailure(new PresetOutputError("shape"))[0]).toBe("malformed_provider_output");
-    expect(classifyFailure(new PresetDriftError("root"))[0]).toBe("malformed_provider_output");
-    expect(classifyFailure(new AgentscrapeAuthError("login"))[0]).toBe("authentication_required");
-    expect(classifyFailure(new AgentscrapeUpstreamDownError("down"))).toEqual([
-      "upstream_unavailable",
-      true,
-      "down",
-    ]);
+  test("classifies every authoritative typed error without message heuristics", () => {
+    const typed = [
+      [new AgentscrapeUsageError("usage"), "invalid_request", false],
+      [new PresetSelectionError("selection"), "invalid_request", false],
+      [new AgentscrapeAuthError("auth"), "authentication_required", false],
+      [new AgentscrapeUpstreamDownError("upstream"), "upstream_unavailable", true],
+      [new PresetConfigError("config"), "internal_error", false],
+      [new PresetOutputError("output"), "malformed_provider_output", false],
+      [new PresetDriftError("drift"), "malformed_provider_output", false],
+      [new AgentscrapeBrowserError("browser", false), "browser_error", false],
+      [new AgentscrapeProviderError("provider", true), "provider_error", true],
+      [new AgentscrapeTimeoutError("timeout"), "timeout", true],
+      [new AgentscrapeCancelledError("cancelled"), "cancelled", false],
+      [new AgentscrapeRuntimeError("runtime"), "internal_error", false],
+    ] as const;
+    for (const [error, failureClass, retryable] of typed)
+      expect(classifyFailure(error).slice(0, 2), error.message).toEqual([failureClass, retryable]);
+
+    const baseMappings: Array<[ErrorClass, FailureClass, boolean]> = [
+      ["usage", "invalid_request", false],
+      ["selection", "invalid_request", false],
+      ["auth", "authentication_required", false],
+      ["upstream", "upstream_unavailable", true],
+      ["config", "internal_error", false],
+      ["runtime", "internal_error", false],
+      ["output", "malformed_provider_output", false],
+      ["drift", "malformed_provider_output", false],
+      ["browser", "browser_error", true],
+      ["provider", "provider_error", false],
+      ["timeout", "timeout", true],
+      ["cancelled", "cancelled", false],
+    ];
+    for (const [errorClass, failureClass, retryable] of baseMappings)
+      expect(
+        classifyFailure(new AgentscrapeError("misleading timeout auth selector", errorClass)),
+      ).toEqual([failureClass, retryable, "misleading timeout auth selector"]);
+    for (const message of ["timed out", "authentication required", "selector is invalid"])
+      expect(classifyFailure(new AgentscrapeRuntimeError(message)).slice(0, 2)).toEqual([
+        "internal_error",
+        false,
+      ]);
+  });
+  test("keeps only the approved raw-error compatibility mappings", () => {
+    for (const [error, failureClass, retryable] of [
+      [new Error("authentication required"), "authentication_required", false],
+      [new Error("operation canceled"), "cancelled", false],
+      [new Error("request timed out"), "timeout", true],
+      [new Error("fetch failed with ECONNRESET"), "upstream_unavailable", true],
+      [new Error("browser navigation failed"), "browser_error", true],
+      [new SyntaxError("bad JSON"), "malformed_provider_output", false],
+      [new URIError("bad URI"), "malformed_provider_output", false],
+      [new DOMException("aborted", "AbortError"), "cancelled", false],
+      [new DOMException("deadline", "TimeoutError"), "timeout", true],
+      [new Error("selector '#missing' matched nothing"), "internal_error", false],
+    ] as const)
+      expect(classifyFailure(error).slice(0, 2), error.message).toEqual([failureClass, retryable]);
+  });
+  test("raw concrete error types take precedence over misleading messages", () => {
+    for (const [error, failureClass, retryable] of [
+      [new DOMException("timed out", "AbortError"), "cancelled", false],
+      [new DOMException("operation cancelled", "TimeoutError"), "timeout", true],
+      [new SyntaxError("browser navigation failed"), "malformed_provider_output", false],
+      [new URIError("browser navigation failed"), "malformed_provider_output", false],
+    ] as const)
+      expect(classifyFailure(error).slice(0, 2), error.message).toEqual([failureClass, retryable]);
   });
   test("build errors preserve explicit classes", () => {
     expect(classifyFailure(new EnvelopeBuildError("empty_content", "empty"))).toEqual([

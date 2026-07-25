@@ -1,7 +1,13 @@
 import * as cheerio from "cheerio";
-import { openPage, runAgentBrowser } from "../browser";
+import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "../browser";
 import { browserEval, browserEvalString } from "../browser-eval";
-import { AgentscrapeAuthError, PresetDriftError } from "../errors";
+import {
+  AgentscrapeAuthError,
+  AgentscrapeBrowserError,
+  AgentscrapeRuntimeError,
+  AgentscrapeUsageError,
+  PresetDriftError,
+} from "../errors";
 import { convertHtml } from "../html";
 import { containsJwt, isSensitiveName } from "../redaction";
 import {
@@ -70,6 +76,42 @@ export function extractAuthorHandle(url: string): string | null {
 }
 export function extractProfileHandle(url: string): string | null {
   return url.match(/(?:x\.com|twitter\.com)\/(\w+)\/?$/)?.[1]?.toLowerCase() ?? null;
+}
+function xRouteUrl(value: string): URL | null {
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) &&
+      X_HOSTS.has(parsed.hostname.toLowerCase())
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+function requireStatusRoute(url: string): string {
+  const parsed = xRouteUrl(url);
+  const status = parsed?.pathname.match(/^\/[A-Za-z0-9_]+\/status\/(\d+)(?:\/.*)?$/)?.[1];
+  if (!status) throw new AgentscrapeUsageError(`Could not extract status ID from URL: ${url}`);
+  return status;
+}
+function requireProfileRoute(url: string): string {
+  let handle: string | undefined;
+  const parsed = xRouteUrl(url);
+  if (parsed) handle = parsed.pathname.match(/^\/([A-Za-z0-9_]+)\/?$/)?.[1]?.toLowerCase();
+  if (!handle) throw new AgentscrapeUsageError(`Could not extract handle from URL: ${url}`);
+  if (RESERVED.has(handle))
+    throw new AgentscrapeUsageError(
+      `'${handle}' is a reserved X path segment, not a profile handle`,
+    );
+  return handle;
+}
+function requireArticleRoute(url: string): void {
+  const parsed = xRouteUrl(url);
+  const pathname = parsed?.pathname ?? "";
+  const article = /^\/(?:i\/article|[A-Za-z0-9_]+\/articles?)\/\d+(?:\/.*)?$/.test(pathname);
+  const status = /^\/[A-Za-z0-9_]+\/status\/\d+(?:\/.*)?$/.test(pathname);
+  if (!parsed || (!article && !status))
+    throw new AgentscrapeUsageError(`URL is not an X Article route: ${url}`);
 }
 function absoluteX(href: string): string {
   if (/^https?:/.test(href)) return href;
@@ -326,7 +368,9 @@ export async function checkXAuth(session?: string | null): Promise<void> {
     "Failed to check X authentication state",
   );
   if (typeof required !== "boolean")
-    throw new Error("Failed to check X authentication state: expected a boolean result");
+    throw new AgentscrapeBrowserError(
+      "Failed to check X authentication state: expected a boolean result",
+    );
   if (required)
     throw new AgentscrapeAuthError("X.com authentication required - browser is not signed in");
 }
@@ -341,6 +385,7 @@ export async function captureXStatusPage(
   url: string,
   options: HandlerOptions = {},
 ): Promise<CapturedXStatusPage> {
+  requireStatusRoute(url);
   const live = options.html === undefined || options.html === null;
   const html =
     options.html ??
@@ -363,11 +408,11 @@ async function scrapeCapturedTweet(
   options: HandlerOptions,
   live: boolean,
 ): Promise<ScrapeResult<TweetThread>> {
-  const status = extractStatusId(url);
-  if (live && !status) throw new Error(`Could not extract status ID from URL: ${url}`);
+  const status = requireStatusRoute(url);
   const html = await prepareLinks(captured, options, live);
   const structured = buildThread(html, extractAuthorHandle(url) ?? "", status);
-  if (!structured.tweets.length) throw new Error(`Could not find tweet with status ID ${status}`);
+  if (!structured.tweets.length)
+    throw new PresetDriftError(`Could not find tweet with status ID ${status}`);
   const selected = structured.tweets.length === 1 ? html : `<div>${html}</div>`;
   return {
     full_html: live ? html : "",
@@ -381,6 +426,7 @@ export async function scrapeTweet(
   url: string,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<TweetThread>> {
+  requireStatusRoute(url);
   const live = options.html === undefined || options.html === null;
   const captured = options.html ?? (await browserHtml(url, options, '[data-testid="tweet"]'));
   return scrapeCapturedTweet(url, captured, options, live);
@@ -400,8 +446,7 @@ export async function scrapeProfile(
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<XProfile>> {
   const live = options.html === undefined || options.html === null;
-  if (live && !extractProfileHandle(url))
-    throw new Error(`Could not extract handle from URL: ${url}`);
+  requireProfileRoute(url);
   const captured = options.html ?? (await browserHtml(url, options, '[data-testid="UserName"]'));
   const full = await prepareLinks(captured, options, live);
   const $ = cheerio.load(full);
@@ -491,16 +536,24 @@ function compareVersion(left: string, right: string): number {
 
 function timelineTarget(value: string): [string, string] {
   const clean = value.trim();
-  let handle = clean.startsWith("@")
-    ? clean.slice(1)
-    : /^https?:/.test(clean)
-      ? clean.match(/(?:x\.com|twitter\.com)\/([A-Za-z0-9_]+)/)?.[1]
-      : clean.replace(/^\/+|\/+$/g, "");
+  let handle: string | undefined;
+  if (clean.startsWith("@")) handle = clean.slice(1);
+  else if (/^https?:/i.test(clean)) {
+    try {
+      const parsed = new URL(clean);
+      if (X_HOSTS.has(parsed.hostname.toLowerCase()))
+        handle = parsed.pathname.match(/^\/([A-Za-z0-9_]+)\/?$/)?.[1];
+    } catch {
+      /* reported as usage below */
+    }
+  } else handle = clean.replace(/^\/+|\/+$/g, "");
   if (!handle || !/^[A-Za-z0-9_]+$/.test(handle))
-    throw new Error(`Could not extract a profile handle from: '${value}'`);
+    throw new AgentscrapeUsageError(`Could not extract a profile handle from: '${value}'`);
   handle = handle.toLowerCase();
   if (RESERVED.has(handle))
-    throw new Error(`'${handle}' is a reserved X path segment, not a profile handle`);
+    throw new AgentscrapeUsageError(
+      `'${handle}' is a reserved X path segment, not a profile handle`,
+    );
   return [`https://x.com/${handle}`, handle];
 }
 function snowflakeIso(id: string): string {
@@ -758,12 +811,7 @@ export async function scrapeTimeline(
 ): Promise<ScrapeResult<XTimeline>> {
   const injectedHtml = options.html;
   const injected = injectedHtml !== undefined && injectedHtml !== null;
-  let profile = "";
-  try {
-    [, profile] = timelineTarget(url);
-  } catch (error) {
-    if (!injected) throw error;
-  }
+  const [, profile] = timelineTarget(url);
   if (injected) {
     const harvested = harvestTimelineFrame(undefined, injectedHtml, profile);
     return finalizeTimelineHarvest(harvested.state, profile, options);
@@ -781,7 +829,7 @@ export async function scrapeTimeline(
       "Timeline harvest failed",
     );
     if (!value || typeof value !== "object")
-      throw new Error("Timeline harvest failed: expected an object result");
+      throw new AgentscrapeBrowserError("Timeline harvest failed: expected an object result");
     const frame = value as Record<string, unknown>;
     if (
       typeof frame.html !== "string" ||
@@ -789,7 +837,7 @@ export async function scrapeTimeline(
       typeof frame.scrollHeight !== "number" ||
       typeof frame.innerHeight !== "number"
     )
-      throw new Error("Timeline harvest failed: invalid frame result");
+      throw new AgentscrapeBrowserError("Timeline harvest failed: invalid frame result");
     const update = harvestTimelineFrame(harvest, frame.html, profile);
     harvest = update.state;
     const bottom = frame.scrollTop + frame.innerHeight >= frame.scrollHeight - 4;
@@ -807,11 +855,11 @@ export async function scrapeTimeline(
       ["eval", "window.scrollBy(0, Math.floor(window.innerHeight * 0.85))"],
       options.session,
     );
-    if (scrolled.exitCode !== 0) throw new Error(`Timeline scroll failed: ${scrolled.stderr}`);
+    requireAgentBrowserSuccess(scrolled, "Timeline scroll failed");
     const waited = await runAgentBrowser(["wait", "400"], options.session);
-    if (waited.exitCode !== 0) throw new Error(`Timeline wait failed: ${waited.stderr}`);
+    requireAgentBrowserSuccess(waited, "Timeline wait failed");
   }
-  throw new Error("Timeline loop ended unexpectedly");
+  throw new AgentscrapeRuntimeError("Timeline loop ended unexpectedly");
 }
 
 function parseArticle(html: string, url: string): XArticle {
@@ -914,6 +962,7 @@ export async function scrapeArticle(
   url: string,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<XArticle>> {
+  requireArticleRoute(url);
   const live = options.html === undefined || options.html === null;
   const captured =
     options.html ?? (await browserHtml(url, options, '[data-testid="twitterArticleReadView"]'));
@@ -925,6 +974,7 @@ export async function scrapeCapturedXStatus(
   captured: CapturedXStatusPage,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<TweetThread | XArticle>> {
+  requireStatusRoute(url);
   return captured.kind === "article"
     ? scrapeCapturedArticle(url, captured.html, options, captured.live)
     : scrapeCapturedTweet(url, captured.html, options, captured.live);

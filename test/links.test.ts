@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { PresetDriftError } from "../src/errors";
+import { fetchLinks } from "../src/api";
+import { AgentscrapeUsageError, PresetDriftError } from "../src/errors";
 import { offlineExtractLinks, scrapeLinks } from "../src/links";
 
 const actualBrowser = await import("../src/browser");
@@ -63,7 +64,61 @@ describe("link extraction parity", () => {
     expect(evalSource).toContain("document.getElementById(controls)");
   });
 
-  test("classifies missing and empty required selectors as drift", async () => {
+  test("direct fetchLinks maps malformed, missing, and empty selectors to usage", async () => {
+    await expect(
+      fetchLinks("https://docs.test/docs", { sectionSelector: "[", session: "direct" }),
+    ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    expect(openPage).not.toHaveBeenCalled();
+
+    for (const frames of [
+      [
+        { rootCount: 0, links: [] },
+        { rootCount: 0, links: [] },
+        { rootCount: 0, links: [] },
+      ],
+      [snap(), snap(), snap()],
+    ]) {
+      snapshots = frames;
+      await expect(
+        fetchLinks("https://docs.test/docs", {
+          sectionSelector: "#navigation-items",
+          session: "direct",
+        }),
+      ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    }
+  });
+
+  test("does not let auto-matched presets ignore caller selectors", async () => {
+    const url = "https://x.com/agentscrape";
+    for (const selectors of [
+      { sectionSelector: "" },
+      { categorySelector: "" },
+      { categorySelector: "[" },
+      { toggleSelector: "[" },
+    ]) {
+      await expect(fetchLinks(url, { ...selectors, session: "direct" })).rejects.toBeInstanceOf(
+        AgentscrapeUsageError,
+      );
+    }
+    await expect(fetchLinks(url, { toggleSelector: "button", session: "direct" })).rejects.toThrow(
+      "provide --preset or at least one selector (--section-selector / --category-selector)",
+    );
+    expect(openPage).not.toHaveBeenCalled();
+    expect(runAgentBrowser).not.toHaveBeenCalled();
+  });
+
+  test("rejects explicit presets combined with caller selectors before browser effects", async () => {
+    await expect(
+      fetchLinks("https://docs.test/docs", {
+        preset: "docs-sidebar",
+        sectionSelector: "#navigation-items",
+      }),
+    ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    expect(openPage).not.toHaveBeenCalled();
+    expect(runAgentBrowser).not.toHaveBeenCalled();
+  });
+
+  test("classifies missing and empty required preset selectors as drift", async () => {
     snapshots = [
       { rootCount: 0, links: [] },
       { rootCount: 0, links: [] },
