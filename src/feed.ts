@@ -88,11 +88,172 @@ function clean(value: string | undefined | null, max = 500): string {
     .trim()
     .slice(0, max);
 }
+interface NormalizedDate {
+  timestamp: number;
+  assumedUtc: boolean;
+}
+
+const MONTHS = new Map(
+  ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].map(
+    (month, index) => [month, index + 1],
+  ),
+);
+const NAMED_ZONE_OFFSETS: Record<string, string> = {
+  Z: "+0000",
+  UT: "+0000",
+  UTC: "+0000",
+  GMT: "+0000",
+  EST: "-0500",
+  EDT: "-0400",
+  CST: "-0600",
+  CDT: "-0500",
+  MST: "-0700",
+  MDT: "-0600",
+  PST: "-0800",
+  PDT: "-0700",
+};
+const WEEKDAY =
+  "(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)";
+const MONTH =
+  "(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)";
+
+function militaryZoneOffset(zone: string): string | null {
+  if (zone.length !== 1) return null;
+  const code = zone.toUpperCase().charCodeAt(0);
+  if (code >= 65 && code <= 73) return `+${String(code - 64).padStart(2, "0")}00`;
+  if (code >= 75 && code <= 77) return `+${String(code - 65).padStart(2, "0")}00`;
+  if (code >= 78 && code <= 89) return `-${String(code - 77).padStart(2, "0")}00`;
+  return null;
+}
+
+function validDateParts(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): boolean {
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= days[month - 1]! &&
+    hour >= 0 &&
+    hour <= 23 &&
+    minute >= 0 &&
+    minute <= 59 &&
+    second >= 0 &&
+    second <= 59
+  );
+}
+
+/** Parses only closed feed date grammars after assigning an explicit UTC or numeric-offset basis. */
+function normalizeDate(value: string): NormalizedDate | null {
+  const raw = clean(value, 200);
+  if (!raw) return null;
+
+  let core = raw;
+  let offset: string | null = null;
+  const numericZone = core.match(/([+-])(\d{2}):?(\d{2})$/);
+  if (numericZone) {
+    const hours = Number(numericZone[2]);
+    const minutes = Number(numericZone[3]);
+    if (hours > 23 || minutes > 59) return null;
+    offset = `${numericZone[1]}${numericZone[2]}${numericZone[3]}`;
+    core = core.slice(0, numericZone.index).trimEnd();
+  } else if (/\dZ$/i.test(core)) {
+    offset = "+0000";
+    core = core.slice(0, -1).trimEnd();
+  } else {
+    const wordZone = core.match(/\s+([A-Za-z]+)$/);
+    if (wordZone && !/^(?:AM|PM)$/i.test(wordZone[1]!)) {
+      const zone = wordZone[1]!.toUpperCase();
+      offset = NAMED_ZONE_OFFSETS[zone] ?? militaryZoneOffset(zone);
+      if (!offset || zone === "J") return null;
+      core = core.slice(0, wordZone.index).trimEnd();
+    }
+  }
+
+  if (offset !== null && !/\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*(?:AM|PM))?$/i.test(core))
+    return null;
+  const trailingWord = core.match(/([A-Za-z]+)$/)?.[1];
+  if (trailingWord && !/^(?:AM|PM)$/i.test(trailingWord)) return null;
+
+  let year: number;
+  let month: number;
+  let day: number;
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  let fraction = "";
+
+  const isoDate = core.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const isoDateTime = core.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?$/,
+  );
+  const rfcOrder = core.match(
+    new RegExp(
+      `^(?:${WEEKDAY},?\\s+)?(\\d{1,2})\\s+(${MONTH})\\s+(\\d{4}),?\\s+(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2})(\\.\\d+)?)?(?:\\s*(AM|PM))?$`,
+      "i",
+    ),
+  );
+  const englishMonthFirst = core.match(
+    new RegExp(
+      `^(?:${WEEKDAY},?\\s+)?(${MONTH})\\s+(\\d{1,2})(?:st|nd|rd|th)?,\\s*(\\d{4})(?:,?\\s+(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2})(\\.\\d+)?)?(?:\\s*(AM|PM))?)?$`,
+      "i",
+    ),
+  );
+  const englishWeekdayFirst = core.match(
+    new RegExp(
+      `^${WEEKDAY},?\\s+(${MONTH})\\s+(\\d{1,2})\\s+(\\d{4})(?:,?\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2})(\\.\\d+)?)?(?:\\s*(AM|PM))?)?$`,
+      "i",
+    ),
+  );
+
+  if (isoDateTime) {
+    year = Number(isoDateTime[1]);
+    month = Number(isoDateTime[2]);
+    day = Number(isoDateTime[3]);
+    hour = Number(isoDateTime[4]);
+    minute = Number(isoDateTime[5]);
+    second = Number(isoDateTime[6] ?? 0);
+    fraction = isoDateTime[7] ?? "";
+  } else if (isoDate) {
+    year = Number(isoDate[1]);
+    month = Number(isoDate[2]);
+    day = Number(isoDate[3]);
+  } else {
+    const display = rfcOrder ?? englishMonthFirst ?? englishWeekdayFirst;
+    if (!display) return null;
+    const monthFirst = display === englishMonthFirst || display === englishWeekdayFirst;
+    year = Number(display[3]);
+    month = MONTHS.get(display[monthFirst ? 1 : 2]!.slice(0, 3).toLowerCase()) ?? 0;
+    day = Number(display[monthFirst ? 2 : 1]);
+    hour = Number(display[4] ?? 0);
+    minute = Number(display[5] ?? 0);
+    second = Number(display[6] ?? 0);
+    fraction = display[7] ?? "";
+    const meridiem = display[8]?.toUpperCase();
+    if (meridiem) {
+      if (hour < 1 || hour > 12) return null;
+      hour = (hour % 12) + (meridiem === "PM" ? 12 : 0);
+    }
+  }
+
+  if (!validDateParts(year, month, day, hour, minute, second)) return null;
+  const parseInput = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}${fraction}${offset ?? "Z"}`;
+  const timestamp = Date.parse(parseInput);
+  return Number.isFinite(timestamp) ? { timestamp, assumedUtc: offset === null } : null;
+}
+
 function date(value: string, warnings: Warning[], page: string): string | null {
   const raw = clean(value, 200);
   if (!raw) return null;
-  const timestamp = Date.parse(raw);
-  if (!Number.isFinite(timestamp)) {
+  const normalized = normalizeDate(raw);
+  if (!normalized) {
     warnings.push({
       code: "invalid_date",
       message: "An entry date could not be parsed and was omitted.",
@@ -100,13 +261,13 @@ function date(value: string, warnings: Warning[], page: string): string | null {
     });
     return null;
   }
-  if (!/(?:Z|[+-]\d\d:?\d\d|\b(?:GMT|UTC)\b)$/i.test(raw))
+  if (normalized.assumedUtc)
     warnings.push({
       code: "naive_date_assumed_utc",
       message: "A timezone-free entry date was interpreted as UTC.",
       page_url: page,
     });
-  return new Date(timestamp).toISOString().replace(".000Z", "Z");
+  return new Date(normalized.timestamp).toISOString().replace(".000Z", "Z");
 }
 function canonicalCandidates(values: string[], page: string, warnings: Warning[]): string[] {
   const result: string[] = [];
@@ -410,7 +571,9 @@ function failure(
   };
 }
 function itemTime(value: FeedDiscoveryItem): number {
-  return Date.parse(value.updated_at ?? value.published_at ?? "") || -8640000000000000;
+  return (
+    normalizeDate(value.updated_at ?? value.published_at ?? "")?.timestamp ?? -8640000000000000
+  );
 }
 function dedupe(items: FeedDiscoveryItem[]): FeedDiscoveryItem[] {
   const byId = new Map<string, FeedDiscoveryItem>();
@@ -538,6 +701,7 @@ interface CheckedFeedOptions {
   timeoutSeconds: number;
   sourceKind: "auto" | "feed" | "archive";
   archive: ArchiveOptions | undefined;
+  sinceTimestamp: NormalizedDate | null;
 }
 type FeedOptionsCheck =
   | { ok: true; value: CheckedFeedOptions }
@@ -569,6 +733,20 @@ function checkFeedOptions(options: FeedOptions): FeedOptionsCheck {
   const timeoutSeconds = options.timeoutSeconds ?? 10;
   const sourceKind = options.sourceKind ?? "auto";
   const archive = options.archive ?? undefined;
+  let sinceTimestamp: NormalizedDate | null = null;
+  let validSince = true;
+  if (options.since !== undefined && options.since !== null) {
+    if (
+      typeof options.since !== "string" ||
+      options.since.length < 1 ||
+      options.since.length > 100
+    ) {
+      validSince = false;
+    } else {
+      sinceTimestamp = normalizeDate(options.since);
+      validSince = sinceTimestamp !== null;
+    }
+  }
   if (
     !validInteger(maxBytes, 1, 20_000_000) ||
     !validInteger(maxPages, 1, 100) ||
@@ -577,11 +755,7 @@ function checkFeedOptions(options: FeedOptions): FeedOptionsCheck {
     timeoutSeconds < 0.001 ||
     timeoutSeconds > 300 ||
     !PAGE_KINDS.has(sourceKind) ||
-    (options.since !== undefined &&
-      options.since !== null &&
-      (typeof options.since !== "string" ||
-        options.since.length > 100 ||
-        !Number.isFinite(Date.parse(options.since)))) ||
+    !validSince ||
     (archive !== undefined && !validArchive(archive)) ||
     (sourceKind === "archive" && !archive) ||
     (options.signal !== undefined && !(options.signal instanceof AbortSignal))
@@ -600,6 +774,7 @@ function checkFeedOptions(options: FeedOptions): FeedOptionsCheck {
       timeoutSeconds,
       sourceKind: sourceKind as CheckedFeedOptions["sourceKind"],
       archive,
+      sinceTimestamp,
     },
   };
 }
@@ -611,7 +786,17 @@ export function discoverFeed(
 ): FeedDiscoveryResult {
   const checked = checkFeedOptions(options);
   if (!checked.ok) return checked.result;
-  const { source, maxBytes, maxPages, maxItems, timeoutSeconds, sourceKind } = checked.value;
+  return discoverCheckedFeed(initial, options, checked.value, recorded);
+}
+
+function discoverCheckedFeed(
+  initial: RecordedFeedPage,
+  options: FeedOptions,
+  checked: CheckedFeedOptions,
+  recorded: RecordedFeedPage[],
+): FeedDiscoveryResult {
+  const { source, maxBytes, maxPages, maxItems, timeoutSeconds, sourceKind, sinceTimestamp } =
+    checked;
   if (
     !validPage(initial) ||
     !Array.isArray(recorded) ||
@@ -852,14 +1037,7 @@ export function discoverFeed(
   const dated = items.filter((value) => itemTime(value) > -8640000000000000);
   const newest = dated.sort((a, b) => itemTime(b) - itemTime(a))[0];
   const newestSeen = newest?.updated_at ?? newest?.published_at ?? null;
-  if (options.since) {
-    const cutoff = Date.parse(options.since);
-    if (!Number.isFinite(cutoff))
-      return failure(
-        source,
-        "invalid_options",
-        "The since value must be an ISO-8601 or RFC-822 date.",
-      );
+  if (sinceTimestamp !== null) {
     items = items.filter((value) => {
       const time = itemTime(value);
       if (time === -8640000000000000) {
@@ -870,7 +1048,7 @@ export function discoverFeed(
         partial = true;
         return true;
       }
-      return time >= cutoff;
+      return time >= sinceTimestamp.timestamp;
     });
   }
   items.sort((a, b) => itemTime(b) - itemTime(a) || a.stable_id.localeCompare(b.stable_id));
@@ -1539,9 +1717,16 @@ export async function discoverFeedLive(
       );
     }
     parsedWorkBytes += parseInputBytes;
-    const result = discoverFeed(
+    const parseTimeoutSeconds = Math.max(0.001, remaining / 1000);
+    const parseOptions = parserOptions(options, parseKind, parseTimeoutSeconds);
+    const result = discoverCheckedFeed(
       initial,
-      parserOptions(options, parseKind, Math.max(0.001, remaining / 1000)),
+      parseOptions,
+      {
+        ...checked.value,
+        sourceKind: parseKind,
+        timeoutSeconds: parseTimeoutSeconds,
+      },
       recorded,
     );
     previous = result;

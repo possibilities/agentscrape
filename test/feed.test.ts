@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
@@ -75,6 +76,12 @@ function scriptedRequestFactory(
     }) as ClientRequest["end"];
     return request;
   };
+}
+
+function datedAtom(dates: string[]): string {
+  return `<feed xmlns="http://www.w3.org/2005/Atom">${dates
+    .map((value, index) => `<entry><id>date-${index}</id><updated>${value}</updated></entry>`)
+    .join("")}</feed>`;
 }
 
 function fakeTransport(
@@ -279,6 +286,162 @@ describe("network-free feed discovery", () => {
     expect(result.items[0]?.title).toBe("Undated archive post");
     expect(result.warnings.some((warning) => warning.code === "undated_item")).toBeTrue();
   });
+  test("normalizes naive feed date forms as UTC and warns only after success", () => {
+    const source = "https://dates.example.com/atom.xml";
+    const dates = [
+      "2026-03-08T02:30:00",
+      "2026-07-09",
+      "Thu, 09 Jul 2026 14:30:00",
+      "July 9, 2026 at 2:30 PM",
+      "Thursday, July 9, 2026 12:05 AM",
+    ];
+    const result = discoverFeed({ url: source, content: datedAtom(dates) }, { sourceUrl: source });
+
+    expect(
+      Object.fromEntries(result.items.map((entry) => [entry.stable_id, entry.updated_at])),
+    ).toEqual({
+      "date-0": "2026-03-08T02:30:00Z",
+      "date-1": "2026-07-09T00:00:00Z",
+      "date-2": "2026-07-09T14:30:00Z",
+      "date-3": "2026-07-09T14:30:00Z",
+      "date-4": "2026-07-09T00:05:00Z",
+    });
+    expect(result.warnings.map((warning) => warning.code)).toEqual(
+      dates.map(() => "naive_date_assumed_utc"),
+    );
+  });
+
+  test("normalizes every supported explicit timezone without naive warnings", () => {
+    const source = "https://dates.example.com/atom.xml";
+    const dates = [
+      "2026-07-09T12:00:00Z",
+      "2026-07-09T12:00:00+0530",
+      "2026-07-09T12:00:00-04:30",
+      "Thu, 09 Jul 2026 12:00:00 GMT",
+      "09 Jul 2026 12:00:00 UTC",
+      "09 Jul 2026 12:00:00 UT",
+      "09 Jul 2026 12:00:00 EST",
+      "09 Jul 2026 12:00:00 A",
+      "09 Jul 2026 12:00:00 M",
+      "09 Jul 2026 12:00:00 N",
+      "09 Jul 2026 12:00:00 Y",
+    ];
+    const result = discoverFeed({ url: source, content: datedAtom(dates) }, { sourceUrl: source });
+
+    expect(
+      Object.fromEntries(result.items.map((entry) => [entry.stable_id, entry.updated_at])),
+    ).toEqual({
+      "date-0": "2026-07-09T12:00:00Z",
+      "date-1": "2026-07-09T06:30:00Z",
+      "date-2": "2026-07-09T16:30:00Z",
+      "date-3": "2026-07-09T12:00:00Z",
+      "date-4": "2026-07-09T12:00:00Z",
+      "date-5": "2026-07-09T12:00:00Z",
+      "date-6": "2026-07-09T17:00:00Z",
+      "date-7": "2026-07-09T11:00:00Z",
+      "date-8": "2026-07-09T00:00:00Z",
+      "date-9": "2026-07-09T13:00:00Z",
+      "date-10": "2026-07-10T00:00:00Z",
+    });
+    expect(
+      result.warnings.some((warning) => warning.code === "naive_date_assumed_utc"),
+    ).toBeFalse();
+    expect(result.warnings.some((warning) => warning.code === "invalid_date")).toBeFalse();
+  });
+
+  test("rejects unsupported, invalid, and malformed entry and since dates", () => {
+    const source = "https://dates.example.com/atom.xml";
+    const invalidDates = [
+      "09 Jul 2026 12:00:00 CET",
+      "09 Jul 2026 12:00:00 XYZ",
+      "09 Jul 2026 12:00:00 J",
+      "09 Jul 2026 12:00:00A",
+      "2026-07-09T12:00:00+2400",
+      "2026-07-09T12:00:00+12:60",
+      "2026-02-30T12:00:00Z",
+      "July bananas, 2026",
+    ];
+    const result = discoverFeed(
+      { url: source, content: datedAtom(invalidDates) },
+      { sourceUrl: source },
+    );
+
+    expect(result.items.every((entry) => entry.updated_at === null)).toBeTrue();
+    expect(result.warnings.map((warning) => warning.code)).toEqual(
+      invalidDates.map(() => "invalid_date"),
+    );
+    for (const since of invalidDates) {
+      const invalidSince = discoverFeed(
+        { url: source, content: '<feed xmlns="http://www.w3.org/2005/Atom"/>' },
+        { sourceUrl: source, since },
+      );
+      expect(invalidSince.failure?.code, since).toBe("invalid_options");
+    }
+  });
+
+  test("is byte-stable across host timezones for cutoff, dedupe, order, and cursor", () => {
+    const source = "https://stable.example.com/feed.xml";
+    const scenario = `<feed xmlns="http://www.w3.org/2005/Atom">
+      <entry><id>gap</id><title>Gap item</title><updated>2026-03-08T02:30:00</updated></entry>
+      <entry><id>old-copy</id><title>Local-time contender</title><link href="/same"/><updated>2026-03-08T02:40:00</updated></entry>
+      <entry><id>new-copy</id><title>Canonical winner</title><link href="/same"/><updated>2026-03-08T10:35:00Z</updated></entry>
+      <entry><id>boundary</id><title>Boundary item</title><updated>2026-03-08T02:35:00</updated></entry>
+      <entry><id>latest</id><title>Latest item</title><updated>2026-03-08T11:00:00Z</updated></entry>
+    </feed>`;
+    const feedModule = join(import.meta.dir, "../src/feed.ts");
+    const script = `
+      import { discoverFeed } from ${JSON.stringify(feedModule)};
+      const result = discoverFeed(
+        { url: ${JSON.stringify(source)}, content: ${JSON.stringify(scenario)} },
+        { sourceUrl: ${JSON.stringify(source)}, since: "2026-03-08T02:35:00" },
+      );
+      const stable = {
+        status: result.status,
+        newest_seen_at: result.cursor.newest_seen_at,
+        items: result.items.map(({ stable_id, title, published_at, updated_at }) => ({
+          stable_id, title, published_at, updated_at,
+        })),
+        warning_codes: result.warnings.map(({ code }) => code),
+      };
+      process.stdout.write(JSON.stringify(stable));
+    `;
+    const outputs = ["UTC", "America/Los_Angeles"].map((timezone) => {
+      const child = spawnSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, TZ: timezone },
+      });
+      expect(child.status, child.stderr).toBe(0);
+      return child.stdout;
+    });
+
+    expect(outputs[1]).toBe(outputs[0]);
+    expect(JSON.parse(outputs[0]!)).toEqual({
+      status: "partial",
+      newest_seen_at: "2026-03-08T11:00:00Z",
+      items: [
+        {
+          stable_id: "latest",
+          title: "Latest item",
+          published_at: null,
+          updated_at: "2026-03-08T11:00:00Z",
+        },
+        {
+          stable_id: "https://stable.example.com/same",
+          title: "Canonical winner",
+          published_at: null,
+          updated_at: "2026-03-08T10:35:00Z",
+        },
+        {
+          stable_id: "boundary",
+          title: "Boundary item",
+          published_at: null,
+          updated_at: "2026-03-08T02:35:00Z",
+        },
+      ],
+      warning_codes: ["naive_date_assumed_utc", "naive_date_assumed_utc", "naive_date_assumed_utc"],
+    });
+  });
+
   test("malformed XML returns a bounded failure rather than throwing", () => {
     const result = discoverFeed(
       { url: "https://blog.example.com/feed.xml", content: content("invalid.xml") },
@@ -325,6 +488,7 @@ describe("network-free feed discovery", () => {
       { timeoutSeconds: 0.0009 },
       { timeoutSeconds: 301 },
       { sourceKind: "other" },
+      { since: "" },
       { since: "not a date" },
       { since: "x".repeat(101) },
       { sourceKind: "archive" },
