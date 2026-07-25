@@ -109,7 +109,7 @@ Routing policy is resolved before any provider dispatch, network fetch, or brows
 1. Explicit `--preset` wins (with name-based selection, not URL pattern validation)
 2. `--generic` forces browser fallback (conflicts with `--preset`)
 3. Automatic preset matching for unambiguous page-kind patterns
-4. Parseable GitHub/Gist URLs use `gh` (unless preset/generic specified)
+4. Parseable GitHub/Gist URLs use `gh` (unless preset/generic specified); each top-level operation has a 60-second deadline, a 16 MB aggregate `gh` stdout budget, and a maximum of 100 nonempty Gist files
 5. Unclaimed `.md` URLs use bounded direct HTTP
 6. Generic browser fallback for all other cases
 
