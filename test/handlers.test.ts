@@ -15,7 +15,7 @@ import {
   scrapeSearchConversation,
   scrapeWikiPage,
 } from "../src/handlers/deepwiki";
-import { scrapeArticle, scrapeProfile, scrapeTweet } from "../src/handlers/x";
+import { scrapeArticle, scrapeProfile, scrapeTimeline, scrapeTweet } from "../src/handlers/x";
 
 const fixtures = join(import.meta.dir, "fixtures");
 const corpus = join(import.meta.dir, "corpus");
@@ -62,6 +62,12 @@ describe("official billing invariants", () => {
     expect(
       scrapePerplexityBilling("https://www.perplexity.ai/account/api/billing", {
         html: fixture("preset-audit-perplexity-billing-missing-landmark.html"),
+      }),
+    ).rejects.toBeInstanceOf(PresetDriftError);
+    expect(
+      scrapePerplexityBilling("https://www.perplexity.ai/account/api/billing", {
+        html: "",
+        media: "offline-sentinel",
       }),
     ).rejects.toBeInstanceOf(PresetDriftError);
   });
@@ -240,12 +246,28 @@ describe("conversation and social fail-closed handlers", () => {
     expect(result.structured.tweets.map((tweet) => tweet.text)).toEqual(["Fallback first post"]);
     expect(result.structured.quoted_tweet).toBeNull();
   });
+  test("X timeline treats empty injected HTML as an offline capture", async () => {
+    expect(
+      scrapeTimeline("https://x.com/alice", {
+        html: "",
+        media: "offline-sentinel",
+      }),
+    ).rejects.toBeInstanceOf(PresetDriftError);
+  });
   test("X profile requires its username root", async () => {
     expect(
       scrapeProfile("https://x.com/nobody", {
         html: fixture("preset-audit-x-profile-no-username.html"),
       }),
     ).rejects.toThrow("core structure missing");
+  });
+  test("X profile treats empty injected HTML as an offline capture", async () => {
+    expect(
+      scrapeProfile("https://x.com/alice/status/1", {
+        html: "",
+        media: "offline-sentinel",
+      }),
+    ).rejects.toBeInstanceOf(PresetDriftError);
   });
   test("X article requires a reader and non-empty body", async () => {
     expect(

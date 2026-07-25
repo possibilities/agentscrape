@@ -205,7 +205,7 @@ export async function scrapePerplexityBilling(
   options: HandlerOptions = {},
 ): Promise<ScrapeResult<PerplexityBilling>> {
   let html = options.html;
-  if (!html) {
+  if (html === undefined || html === null) {
     await openPage(url, options.session, options.media);
     const current = await browserEvalString(
       "window.location.href",
