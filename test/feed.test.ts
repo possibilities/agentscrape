@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
@@ -240,6 +241,55 @@ describe("network-free feed discovery", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.title).toBe("Updated title");
     expect(result.items[0]?.stable_id).toBe("https://blog.example.com/posts/same");
+  });
+  test("hashes distinct IDs beyond their shared long prefix", () => {
+    const prefix = "x".repeat(4096);
+    const ids = [`${prefix}-one`, `${prefix}-two`];
+    const url = "https://collision.example.com/feed.xml";
+    const xml = `<feed xmlns="http://www.w3.org/2005/Atom">${ids
+      .map((id, index) => `<entry><id>${id}</id><title>Entry ${index}</title></entry>`)
+      .join("")}</feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+    const expected = ids
+      .map((id) => `sha256:${createHash("sha256").update(id).digest("hex")}`)
+      .sort();
+
+    expect(result.status).toBe("success");
+    expect(result.items).toHaveLength(2);
+    expect(result.items.map((item) => item.stable_id).sort()).toEqual(expected);
+    expect(result.items.every((item) => /^sha256:[0-9a-f]{64}$/.test(item.stable_id))).toBeTrue();
+    expect(result.items.every((item) => item.upstream_id === null)).toBeTrue();
+    expect(result.items.every((item) => item.identity_source === "hashed_upstream_id")).toBeTrue();
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(ids[0]!);
+    expect(serialized).not.toContain(ids[1]!);
+  });
+
+  test("normalizes a short upstream ID before exposing it", () => {
+    const url = "https://normalize.example.com/feed.xml";
+    const xml = `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id> \n\tprefixed\x7F entry  value\r\n </id></entry></feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.stable_id).toBe("prefixed entry value");
+    expect(result.items[0]?.upstream_id).toBe("prefixed entry value");
+    expect(result.items[0]?.identity_source).toBe("upstream_id");
+  });
+
+  test("hashes a JWT-shaped upstream ID without exposing it", () => {
+    const url = "https://hashing.example.com/feed.xml";
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const xml = `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>${jwt}</id></entry></feed>`;
+    const result = discoverFeed({ url, content: xml }, { sourceUrl: url });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.stable_id).toBe(
+      `sha256:${createHash("sha256").update(jwt).digest("hex")}`,
+    );
+    expect(result.items[0]?.upstream_id).toBeNull();
+    expect(result.items[0]?.identity_source).toBe("hashed_upstream_id");
+    expect(JSON.stringify(result)).not.toContain(jwt);
   });
   test("configured archives traverse recorded pages and expose loop boundaries", () => {
     const first = "https://blog.example.com/archive?page=1";

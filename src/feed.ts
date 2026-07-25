@@ -77,7 +77,7 @@ class FeedFault extends Error {
     super(message);
   }
 }
-function clean(value: string | undefined | null, max = 500): string {
+function normalizeText(value: string | undefined | null): string {
   return [...(value ?? "")]
     .map((character) => {
       const code = character.charCodeAt(0);
@@ -85,8 +85,11 @@ function clean(value: string | undefined | null, max = 500): string {
     })
     .join("")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
+    .trim();
+}
+
+function clean(value: string | undefined | null, max = 500): string {
+  return normalizeText(value).slice(0, max);
 }
 interface NormalizedDate {
   timestamp: number;
@@ -298,17 +301,17 @@ function item(
   warnings: Warning[],
 ): FeedDiscoveryItem | null {
   const candidates = canonicalCandidates(input.urls, page, warnings);
-  const id = clean(input.id, 4096);
+  const normalizedId = normalizeText(input.id);
   let stable = "";
   let upstream: string | null = null;
   let identity: FeedDiscoveryItem["identity_source"] = "canonical_url";
-  if (id) {
-    if (id.length <= 512 && !containsJwt(id)) {
-      stable = id;
-      upstream = id;
+  if (normalizedId) {
+    if (normalizedId.length <= 512 && !containsJwt(normalizedId)) {
+      stable = normalizedId;
+      upstream = normalizedId;
       identity = "upstream_id";
     } else {
-      stable = `sha256:${createHash("sha256").update(id).digest("hex")}`;
+      stable = `sha256:${createHash("sha256").update(normalizedId, "utf8").digest("hex")}`;
       identity = "hashed_upstream_id";
     }
   } else if (candidates[0]) stable = candidates[0];
