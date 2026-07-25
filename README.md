@@ -98,7 +98,16 @@ Live transport uses direct HTTP(S) without ambient proxies. It revalidates and D
 
 ## Routing and preset safety
 
-A parseable GitHub or Gist URL uses `gh`; a `.md` URL uses bounded direct HTTP; all other URLs use the strict preset registry. Automatic matching requires exactly one anchored page-kind pattern. Because X serves both posts and long-form Articles from `/status/` URLs, the official status route classifies the rendered page by its strong Article-reader landmark before validating the effective `x-tweet` or `x-article` contract. Explicit presets remain strict. A domain claimed by an official preset fails closed on unsupported or ambiguous routes. `--generic` is the only generic override on a claimed domain and conflicts with `--preset`.
+Routing policy is resolved before any provider dispatch, network fetch, or browser navigation. The system validates the URL and parameters first, then determines a single execution route:
+
+1. Explicit `--preset` wins (with name-based selection, not URL pattern validation)
+2. `--generic` forces browser fallback (conflicts with `--preset`)
+3. Automatic preset matching for unambiguous page-kind patterns
+4. Parseable GitHub/Gist URLs use `gh` (unless preset/generic specified)
+5. Unclaimed `.md` URLs use bounded direct HTTP
+6. Generic browser fallback for all other cases
+
+A domain claimed by a preset fails closed on unsupported or ambiguous routes. Claimed-domain `.md` URLs require `--generic` to bypass preset policy. Because X serves both posts and long-form Articles from `/status/` URLs, the official status route classifies the rendered page by its strong Article-reader landmark before validating the effective `x-tweet` or `x-article` contract.
 
 Content handlers must return all artifact fields, non-empty Markdown, the declared structured schema, and Markdown identical to that schema's renderer. Missing provider structure raises typed drift rather than returning generic body text. Labeled zero balances remain valid for billing presets.
 
