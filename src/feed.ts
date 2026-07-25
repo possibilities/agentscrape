@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as cheerio from "cheerio";
 import { XMLValidator } from "fast-xml-parser";
+import { cssSelectorProblem } from "./css-selector";
 import {
   createDirectFeedTransport,
   type FeedTransport,
@@ -34,7 +35,7 @@ export interface RecordedFeedPage {
 export interface ArchiveOptions {
   startUrl?: string | null | undefined;
   entrySelector: string;
-  linkSelector?: string | undefined;
+  linkSelector?: string | null | undefined;
   dateSelector?: string | null | undefined;
   dateAttribute?: string | null | undefined;
   updatedSelector?: string | null | undefined;
@@ -454,12 +455,7 @@ function parseArchive(
 ): ParsedPage {
   const warningCount = warnings.length;
   const $ = cheerio.load(content);
-  let entries: cheerio.Cheerio<any>;
-  try {
-    entries = $(options.entrySelector);
-  } catch {
-    throw new FeedFault("malformed_archive", "The archive entry selector is invalid.");
-  }
+  const entries = $(options.entrySelector);
   if (!entries.length)
     warnings.push({
       code: "no_archive_entries",
@@ -676,20 +672,31 @@ function validPage(value: unknown): value is RecordedFeedPage {
     validValidators(value.validators)
   );
 }
+const ARCHIVE_SELECTOR_FIELDS = [
+  "entrySelector",
+  "linkSelector",
+  "dateSelector",
+  "updatedSelector",
+  "nextSelector",
+  "titleSelector",
+  "tombstoneSelector",
+] as const;
+function archiveSelectorProblem(value: Record<string, unknown>): string | null {
+  for (const field of ARCHIVE_SELECTOR_FIELDS) {
+    const selector = value[field];
+    if (field !== "entrySelector" && (selector === undefined || selector === null)) continue;
+    if (typeof selector !== "string" || selector.length < 1 || selector.length > 500) return field;
+    if (cssSelectorProblem(selector)) return field;
+  }
+  return null;
+}
 function validArchive(value: unknown): value is ArchiveOptions {
   if (!recordValue(value) || !onlyFields(value, ARCHIVE_FIELDS)) return false;
   return (
+    archiveSelectorProblem(value) === null &&
     optionalString(value.startUrl, 4096) &&
-    optionalString(value.entrySelector, 500, 1) &&
-    typeof value.entrySelector === "string" &&
-    optionalString(value.linkSelector, 500, 1) &&
-    optionalString(value.dateSelector, 500) &&
     optionalString(value.dateAttribute, 100) &&
-    optionalString(value.updatedSelector, 500) &&
-    optionalString(value.nextSelector, 500) &&
-    optionalString(value.idAttribute, 100) &&
-    optionalString(value.titleSelector, 500) &&
-    optionalString(value.tombstoneSelector, 500)
+    optionalString(value.idAttribute, 100)
   );
 }
 function validInteger(value: number, minimum: number, maximum: number): boolean {

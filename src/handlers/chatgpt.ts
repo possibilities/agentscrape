@@ -1,5 +1,6 @@
 import * as cheerio from "cheerio";
-import { openPage, runAgentBrowser } from "../browser";
+import { openPage } from "../browser";
+import { browserEvalString } from "../browser-eval";
 import { PresetDriftError } from "../errors";
 import { renderRichMarkdown } from "../html";
 import { ChatGPTConversation, ConversationTurn } from "../schemas";
@@ -15,16 +16,11 @@ export async function scrapeConversation(
   let html = options.html ?? null;
   if (html === null) {
     await openPage(url, options.session, options.media, "article[data-turn-id]");
-    const result = await runAgentBrowser(
-      ["eval", "document.documentElement.outerHTML"],
+    html = await browserEvalString(
+      "document.documentElement.outerHTML",
       options.session,
+      "Failed to extract conversation",
     );
-    if (result.exitCode !== 0) throw new Error(`Failed to extract conversation: ${result.stderr}`);
-    try {
-      html = JSON.parse(result.stdout) as string;
-    } catch {
-      html = result.stdout;
-    }
   }
   const $ = cheerio.load(html);
   const turns: ConversationTurn[] = [];

@@ -7,8 +7,11 @@ import {
   AGENT_BROWSER_BIN_ENV,
   AGENT_BROWSER_TIMEOUT_ENV,
   openPage,
+  requireAgentBrowserSuccess,
   resetBrowserUnavailableCache,
+  runAgentBrowser,
 } from "../src/browser";
+import { browserEval } from "../src/browser-eval";
 import {
   buildFailureEnvelope,
   classifyFailure,
@@ -20,6 +23,8 @@ import {
   AgentscrapeCancelledError,
   AgentscrapeHttpError,
   AgentscrapeProviderError,
+  AgentscrapeTimeoutError,
+  AgentscrapeUpstreamDownError,
 } from "../src/errors";
 import { fetchGithubIfApplicable } from "../src/github";
 import type { ExtractionEnvelope } from "../src/schemas";
@@ -295,6 +300,97 @@ describe("envelope URL and diagnostic security", () => {
     ).toEqual(["provider_error", false]);
     expect(classifyFailure(new AgentscrapeBrowserError("navigation"))[0]).toBe("browser_error");
     expect(classifyFailure(new AgentscrapeCancelledError())[0]).toBe("cancelled");
+  });
+});
+
+describe("typed agent-browser command boundary", () => {
+  test("classifies eval command failures and timeout-shaped results", async () => {
+    const directory = temp();
+    const home = temp();
+    const browser = executable(
+      directory,
+      "agent-browser",
+      `case "$*" in
+  *browser-failure*) printf 'protocol failure' >&2; exit 7 ;;
+  *upstream-failure*) printf 'upstream down: browserctl unavailable' >&2; exit 1 ;;
+  *timeout-failure*) printf 'browser operation timeout exceeded' >&2; exit 1 ;;
+  *) printf 'null' ;;
+esac`,
+    );
+    process.env.HOME = home;
+    process.env[AGENT_BROWSER_BIN_ENV] = browser;
+    resetBrowserUnavailableCache();
+
+    await expect(browserEval("browser-failure")).rejects.toBeInstanceOf(AgentscrapeBrowserError);
+    await expect(browserEval("upstream-failure")).rejects.toBeInstanceOf(
+      AgentscrapeUpstreamDownError,
+    );
+    await expect(browserEval("timeout-failure")).rejects.toBeInstanceOf(AgentscrapeTimeoutError);
+  });
+
+  test("marks a missing browser executable nonretryable", async () => {
+    process.env.HOME = temp();
+    process.env[AGENT_BROWSER_BIN_ENV] = join(temp(), "missing-agent-browser");
+    resetBrowserUnavailableCache();
+    try {
+      await runAgentBrowser(["eval", "null"]);
+      throw new Error("missing executable unexpectedly ran");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AgentscrapeBrowserError);
+      expect((error as AgentscrapeBrowserError).retryable).toBeFalse();
+    }
+  });
+
+  test("the shared result guard ignores incidental stderr on success and preserves failure precedence", () => {
+    for (const stderr of [
+      "operation cancelled",
+      "upstream down: browserctl unavailable",
+      "timeout exceeded",
+    ]) {
+      expect(() =>
+        requireAgentBrowserSuccess({
+          argv: ["agent-browser"],
+          exitCode: 0,
+          stdout: "ok",
+          stderr,
+          timedOut: false,
+          truncated: false,
+        }),
+      ).not.toThrow();
+    }
+    expect(() =>
+      requireAgentBrowserSuccess({
+        argv: ["agent-browser"],
+        exitCode: 130,
+        stdout: "",
+        stderr: "operation cancelled after timeout",
+        timedOut: true,
+        truncated: false,
+      }),
+    ).toThrow(AgentscrapeCancelledError);
+  });
+
+  test("best-effort browser probes ignore incidental stderr on successful commands", async () => {
+    process.env.HOME = temp();
+    for (const [index, stderr] of [
+      "operation cancelled",
+      "upstream down: browserctl unavailable",
+      "timeout exceeded",
+    ].entries()) {
+      const browser = executable(
+        temp(),
+        `agent-browser-${index}`,
+        `printf '%s' ${JSON.stringify(stderr)} >&2
+case "$*" in
+  *" eval window.location.href") printf '"https://example.com/page"' ;;
+esac`,
+      );
+      process.env[AGENT_BROWSER_BIN_ENV] = browser;
+      resetBrowserUnavailableCache();
+      await expect(
+        openPage("https://example.com/page", `incidental-${index}`),
+      ).resolves.toBeUndefined();
+    }
   });
 });
 

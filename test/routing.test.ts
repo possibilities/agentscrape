@@ -330,6 +330,80 @@ esac
   });
 });
 
+describe("generic caller selector provenance", () => {
+  test("an explicit body selector bypasses auto-detection and selects body", async () => {
+    const value = fixture();
+    writeFileSync(
+      value.browser,
+      `#!/bin/sh
+printf '%s\n' "$*" >> "$BROWSER_MARKER"
+case "$*" in
+  *" eval window.location.href") printf '"about:blank"' ;;
+  *" open "*) ;;
+  *" wait --load networkidle") ;;
+  *" eval document.documentElement.outerHTML") printf '"<html><body>Selected body</body></html>"' ;;
+  *'querySelectorAll("body")'*) printf '{"html":"<body>Selected body</body>"}' ;;
+  *hasText*) printf 'auto-detection must not run' >&2; exit 9 ;;
+  *) printf 'unexpected command: %s' "$*" >&2; exit 1 ;;
+esac
+`,
+    );
+    const output = await program(
+      value,
+      resultBody(
+        "https://example.invalid/page",
+        `{ generic: true, selector: "body", session: "explicit-body" }`,
+      ),
+    );
+
+    expect(output.value.markdown).toContain("Selected body");
+    const commands = readFileSync(value.browserMarker, "utf8");
+    expect(commands).toContain('querySelectorAll("body")');
+    expect(commands).not.toContain("const hasText");
+  });
+
+  for (const [label, selector, selection] of [
+    ["malformed", "[", null],
+    ["missing", "#missing", '{"error":"no_match","count":0}'],
+    ["multiple", ".many", '{"error":"multiple_match","count":2}'],
+  ] as const) {
+    test(`${label} caller selectors are typed usage errors`, async () => {
+      const value = fixture();
+      if (selection !== null) {
+        writeFileSync(
+          value.browser,
+          `#!/bin/sh
+printf '%s\\n' "$*" >> "$BROWSER_MARKER"
+case "$*" in
+  *" eval window.location.href") printf '"about:blank"' ;;
+  *" open "*) ;;
+  *" wait --load networkidle") ;;
+  *" eval document.documentElement.outerHTML") printf '"<html><body><main>Body</main></body></html>"' ;;
+  *querySelectorAll*) printf '%s' ${JSON.stringify(selection)} ;;
+  *" close") ;;
+  *) printf 'unexpected command: %s' "$*" >&2; exit 1 ;;
+esac
+`,
+        );
+      }
+      const output = await program(
+        value,
+        resultBody(
+          "https://example.invalid/page",
+          `{ generic: true, selector: ${JSON.stringify(selector)} }`,
+        ),
+      );
+
+      expect(output.value.error).toMatchObject({
+        name: "AgentscrapeUsageError",
+        errorClass: "usage",
+      });
+      const commands = readFileSync(value.browserMarker, "utf8");
+      if (label === "malformed") expect(commands).not.toContain(" open ");
+    });
+  }
+});
+
 describe("claimed domains fail closed", () => {
   test("rejects an unsupported .md URL on a claimed domain", async () => {
     const value = fixture();
@@ -353,6 +427,23 @@ describe("claimed domains fail closed", () => {
 });
 
 describe("request validation precedes every route side effect", () => {
+  test("an invalid live X tweet route has no browser side effects", async () => {
+    const value = fixture();
+    const output = await program(
+      value,
+      resultBody(
+        "https://x.com/alice?next=/bob/status/123",
+        `{ preset: "x-tweet", session: "route-validation" }`,
+      ),
+    );
+
+    expect(output.value.error).toMatchObject({
+      name: "AgentscrapeUsageError",
+      errorClass: "usage",
+    });
+    expectMarkers(value, []);
+  });
+
   for (const [label, url] of [
     ["malformed", "not-a-url"],
     ["non-HTTP", "ftp://example.com/file.md"],

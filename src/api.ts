@@ -4,11 +4,13 @@ import { basename, dirname, extname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
   closeSession,
+  requireAgentBrowserSuccess,
   resetBrowserUnavailableCache,
   runAgentBrowser,
   withBrowserProfile,
   withBrowserSignal,
 } from "./browser";
+import { cssSelectorProblem } from "./css-selector";
 import {
   buildFailureEnvelope,
   buildSuccessEnvelope,
@@ -251,8 +253,7 @@ async function browserFinalUrl(session?: string | null, signal?: AbortSignal): P
     undefined,
     signal,
   );
-  if (result.exitCode !== 0)
-    throw new AgentscrapeBrowserError(`failed to capture final URL: ${result.stderr}`);
+  requireAgentBrowserSuccess(result, "Failed to capture final URL");
   let value: unknown = result.stdout.trim();
   try {
     value = JSON.parse(value as string);
@@ -378,7 +379,7 @@ export async function fetchMarkdown(
         browserUsed = true;
         result = await withBrowserSignal(options.signal, () =>
           withBrowserProfile(options.browserProfile, async () =>
-            scrapePage(requested, options.selector ?? "body", options),
+            scrapePage(requested, options.selector, options),
           ),
         );
       } else if (route.kind === "github") {
@@ -444,14 +445,14 @@ export async function fetchLinks(
   options: FetchLinksOptions = {},
 ): Promise<ScrapeResult<LinkList>> {
   if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1))
-    throw new AgentscrapeError("--limit must be a positive integer", "usage");
+    throw new AgentscrapeUsageError("--limit must be a positive integer");
   if (
     options.maxScrolls !== undefined &&
     (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
   )
-    throw new AgentscrapeError("--max-scrolls must be a positive integer", "usage");
+    throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
   if (options.sinceId !== undefined && options.sinceId !== null && !/^\d+$/.test(options.sinceId))
-    throw new AgentscrapeError("--since-id must contain only digits", "usage");
+    throw new AgentscrapeUsageError("--since-id must contain only digits");
   const timelineKeys: Array<[keyof HandlerOptions, string]> = [
     ["limit", "--limit"],
     ["maxScrolls", "--max-scrolls"],
@@ -462,47 +463,64 @@ export async function fetchLinks(
   const supplied = timelineKeys.find(
     ([key]) => options[key] !== undefined && options[key] !== false && options[key] !== null,
   );
+  const hasCallerSelector = [
+    options.sectionSelector,
+    options.categorySelector,
+    options.toggleSelector,
+  ].some((selector) => selector !== undefined && selector !== null);
+  if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
+    throw new AgentscrapeUsageError("an explicit preset cannot be combined with caller selectors");
   let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
   let resolvedPreset: string | null = null;
   try {
     const registry = loadRegistry();
     const preset = options.preset
       ? registry.byName(options.preset)
-      : !options.sectionSelector && !options.categorySelector
+      : !hasCallerSelector
         ? matchPreset(url, registry.presets)
         : null;
     if (options.preset && !preset)
-      throw new AgentscrapeError(`preset '${options.preset}' not found`, "usage");
+      throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
     resolvedPreset = preset?.name ?? null;
     if (supplied && resolvedPreset !== "x-timeline")
-      throw new AgentscrapeError(
-        `${supplied[1]} is only valid with the x-timeline preset`,
-        "usage",
-      );
+      throw new AgentscrapeUsageError(`${supplied[1]} is only valid with the x-timeline preset`);
+    for (const [label, selector] of [
+      ["section selector", options.sectionSelector],
+      ["category selector", options.categorySelector],
+      ["toggle selector", options.toggleSelector],
+    ] as const) {
+      if (selector === undefined || selector === null) continue;
+      const problem = cssSelectorProblem(selector);
+      if (problem) throw new AgentscrapeUsageError(`Invalid ${label} '${selector}': ${problem}`);
+    }
     result = await withBrowserSignal(options.signal, () =>
       withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
         if (preset) return scrapeWithPreset(url, preset, options);
         let links: LinkItem[];
-        if (options.sectionSelector && options.categorySelector)
-          links = await scrapeNavLinks(
-            url,
-            options.sectionSelector,
-            options.categorySelector,
-            options.toggleSelector ?? undefined,
-            options,
-          );
-        else if (options.sectionSelector || options.categorySelector)
-          links = await scrapeLinks(
-            url,
-            options.sectionSelector ?? options.categorySelector!,
-            options.toggleSelector ?? undefined,
-            options,
-          );
-        else
-          throw new AgentscrapeError(
-            "provide --preset or at least one selector (--section-selector / --category-selector)",
-            "usage",
-          );
+        try {
+          if (options.sectionSelector && options.categorySelector)
+            links = await scrapeNavLinks(
+              url,
+              options.sectionSelector,
+              options.categorySelector,
+              options.toggleSelector ?? undefined,
+              options,
+            );
+          else if (options.sectionSelector || options.categorySelector)
+            links = await scrapeLinks(
+              url,
+              options.sectionSelector ?? options.categorySelector!,
+              options.toggleSelector ?? undefined,
+              options,
+            );
+          else
+            throw new AgentscrapeUsageError(
+              "provide --preset or at least one selector (--section-selector / --category-selector)",
+            );
+        } catch (error) {
+          if (error instanceof PresetDriftError) throw new AgentscrapeUsageError(error.message);
+          throw error;
+        }
         const structured = new LinkList(links);
         return {
           full_html: "",
@@ -518,9 +536,8 @@ export async function fetchLinks(
   }
   throwIfAborted(options.signal);
   if (!result.links)
-    throw new AgentscrapeError(
+    throw new AgentscrapeUsageError(
       `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
-      "usage",
     );
   return result as ScrapeResult<LinkList>;
 }

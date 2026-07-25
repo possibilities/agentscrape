@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
-import { openPage, runAgentBrowser } from "./browser";
+import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "./browser";
 import { browserEval, browserEvalString } from "./browser-eval";
-import { AgentscrapeValueError, PresetDriftError } from "./errors";
+import { AgentscrapeBrowserError, AgentscrapeValueError, PresetDriftError } from "./errors";
 import type { HandlerOptions } from "./handlers/types";
 import type { LinkItem } from "./schemas";
 
@@ -131,12 +131,14 @@ async function browserSnapshot(
       `Failed to extract links for selector '${selector}'`,
     );
     if (!validSnapshot(value))
-      throw new Error(`Failed to extract links for selector '${selector}': invalid eval result`);
+      throw new AgentscrapeBrowserError(
+        `Failed to extract links for selector '${selector}': invalid eval result`,
+      );
     last = value;
     if (last.rootCount && last.links.length) return last;
     if (attempt < 2) {
       const waited = await runAgentBrowser(["wait", "1000"], session);
-      if (waited.exitCode !== 0) throw new Error(`failed waiting for links: ${waited.stderr}`);
+      requireAgentBrowserSuccess(waited, "Failed while waiting for links");
     }
   }
   return last;
@@ -163,7 +165,9 @@ async function discoverToggles(
     `Failed to find toggles for selector '${selector}'`,
   );
   if (!value || typeof value !== "object")
-    throw new Error(`Failed to find toggles for selector '${selector}': invalid eval result`);
+    throw new AgentscrapeBrowserError(
+      `Failed to find toggles for selector '${selector}': invalid eval result`,
+    );
   const info = value as Record<string, unknown>;
   if (
     typeof info.rootCount !== "number" ||
@@ -171,7 +175,9 @@ async function discoverToggles(
     !Array.isArray(info.labels) ||
     !info.labels.every((label) => typeof label === "string")
   )
-    throw new Error(`Failed to find toggles for selector '${selector}': invalid eval result`);
+    throw new AgentscrapeBrowserError(
+      `Failed to find toggles for selector '${selector}': invalid eval result`,
+    );
   return info as unknown as ToggleInfo;
 }
 
@@ -197,13 +203,14 @@ async function clickToggle(
     session,
     `Failed to click toggle ${index + 1}`,
   );
-  if (value !== true)
+  if (typeof value !== "boolean")
+    throw new AgentscrapeBrowserError(`Failed to click toggle ${index + 1}: invalid eval result`);
+  if (!value)
     throw new PresetDriftError(
       `toggle_selector '${toggleSelector}' changed while expanding '${selector}'`,
     );
   const waited = await runAgentBrowser(["wait", "500"], session);
-  if (waited.exitCode !== 0)
-    throw new Error(`failed waiting for toggle expansion: ${waited.stderr}`);
+  requireAgentBrowserSuccess(waited, "Failed while waiting for toggle expansion");
 }
 
 async function collectLinks(

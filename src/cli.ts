@@ -12,7 +12,7 @@ import {
   type ScrapeResult,
   structuredJson,
 } from "./api";
-import { runAgentBrowser, setMediaMode } from "./browser";
+import { requireAgentBrowserSuccess, runAgentBrowser, setMediaMode } from "./browser";
 import { checkPresets } from "./canary";
 import { captureCorpus, testCorpus } from "./corpus";
 import { AgentscrapeError, AgentscrapeUsageError, cancellationError } from "./errors";
@@ -47,7 +47,7 @@ const COMMANDS: Array<[string, string]> = [
   ["reconcile-queue", "Inventory or reconcile frozen queue records"],
 ];
 const COMMAND_HELP: Record<string, string> = {
-  "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
+  "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: auto main/article/body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
   "fetch-links": `Usage: agentscrape fetch-links URL [OPTIONS]\n\nOptions:\n  --preset NAME                  Select a links preset\n  --section-selector CSS         Section/navigation selector\n  --category-selector CSS        Category selector for two-level navigation\n  --toggle-selector CSS          Toggle/tab selector\n  --limit INTEGER                Positive X timeline item limit\n  --max-scrolls INTEGER          Positive X timeline scroll limit\n  --since-id ID                  Numeric X status cursor\n  --include-replies              Include X replies\n  --include-reposts              Include X reposts\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --json | --yaml | --markdown   Select output (default: yaml)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
   "discover-feed": `Usage: agentscrape discover-feed [FILE] --source-url URL [OPTIONS]\n\nWith no FILE, Agentscrape fetches the source and pagination pages directly. One FILE preserves network-free recorded-response parsing.\n\nOptions:\n  --source-url URL               Requested feed, homepage, or archive URL (required)\n  --source-kind KIND             Source interpretation: auto, feed, or archive (default: auto)\n  --page URL FILE                Recorded pagination page; requires FILE (repeatable)\n  --etag VALUE                   Conditional ETag, or recorded initial-page validator\n  --last-modified VALUE          Conditional Last-Modified, or recorded validator\n  --validator-url URL            Exact live response URL bound to validators\n  --since DATE                   Retain entries at or after DATE\n  --max-response-bytes INTEGER   1..20000000 per response (default: 2000000)\n  --max-pages INTEGER            Recorded 1..100; live 1..10 (default: 10)\n  --max-items INTEGER            1..10000 entries (default: 1000)\n  --timeout-seconds FLOAT        0.001..300 overall seconds (default: 10)\n  --archive-start-url URL        Optional configured archive start URL\n  --archive-entry-selector CSS   Required for archive discovery\n  --archive-link-selector CSS    Archive entry link selector\n  --archive-date-selector CSS    Archive publication date selector\n  --archive-date-attribute NAME  Archive date attribute\n  --archive-updated-selector CSS Archive update date selector\n  --archive-next-selector CSS    Archive pagination selector\n  --archive-id-attribute NAME    Archive stable ID attribute\n  --archive-title-selector CSS   Archive title selector\n  --archive-tombstone-selector CSS Archive tombstone selector\n  --format FORMAT                Output format: json or yaml (default: json)\n  -h, --help                     Show help`,
   "list-presets": "Usage: agentscrape list-presets [--format json|yaml|human]",
@@ -343,7 +343,7 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
     throw new AgentscrapeUsageError("--media must be light or dark");
   const envelope = selected === "envelope";
   const result = await fetchMarkdown(url, {
-    selector: one(parsed, "--selector") ?? "body",
+    selector: one(parsed, "--selector"),
     media,
     session: one(parsed, "--session"),
     preset: one(parsed, "--preset"),
@@ -702,7 +702,7 @@ async function sessionCommand(
     return 0;
   }
   const result = await runAgentBrowser(["open", "about:blank"], name, undefined, undefined, signal);
-  if (result.exitCode !== 0) throw new Error(result.stderr.trim());
+  requireAgentBrowserSuccess(result, "Failed to open browser session");
   try {
     await setMediaMode("dark", name, signal);
   } catch {

@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
-import { openPage, runAgentBrowser } from "../browser";
+import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "../browser";
 import { browserEvalString } from "../browser-eval";
-import { AgentscrapeAuthError, AgentscrapeRuntimeError, PresetDriftError } from "../errors";
+import { AgentscrapeAuthError, AgentscrapeTimeoutError, PresetDriftError } from "../errors";
 import { renderRichMarkdown, safeLink } from "../html";
 import {
   DeepWikiCitation,
@@ -57,7 +57,7 @@ function parseWiki(html: string, url: string): DeepWikiWikiPage {
   if ($('[data-testid="wiki-auth-required"]').length)
     throw new AgentscrapeAuthError("DeepWiki wiki page requires authentication");
   if ($('[data-testid="wiki-loading-state"]').length)
-    throw new AgentscrapeRuntimeError(
+    throw new AgentscrapeTimeoutError(
       "DeepWiki wiki page did not finish loading: timed out waiting",
     );
   const roots = $(`#${WIKI_ROOT}`);
@@ -96,7 +96,7 @@ function parseSearch(html: string, url: string): DeepWikiSearchConversation {
   if ($('[data-testid="search-auth-required"]').length)
     throw new AgentscrapeAuthError("DeepWiki search conversation requires authentication");
   if ($('[data-testid="search-loading-shell"]').length)
-    throw new AgentscrapeRuntimeError(
+    throw new AgentscrapeTimeoutError(
       "DeepWiki search conversation did not finish loading: timed out waiting",
     );
   const roots = $(`[data-testid="${SEARCH_ROOT}"]`);
@@ -112,7 +112,7 @@ function parseSearch(html: string, url: string): DeepWikiSearchConversation {
   elements.each((index, element) => {
     const round = $(element);
     if (round.find('[data-testid="search-round-generating"]').length)
-      throw new AgentscrapeRuntimeError(
+      throw new AgentscrapeTimeoutError(
         "DeepWiki search conversation has not reached a terminal state: timed out waiting for a round to finish generating",
       );
     round.find('[data-testid="search-source-preview"]').remove();
@@ -160,9 +160,10 @@ async function liveHtml(
     );
     if (!terminal || !cheerio.load(html)('[data-testid="search-round-generating"]').length)
       return html;
-    await runAgentBrowser(["wait", "2000"], options.session);
+    const waited = await runAgentBrowser(["wait", "2000"], options.session);
+    requireAgentBrowserSuccess(waited, "Failed while waiting for DeepWiki search generation");
   }
-  throw new AgentscrapeRuntimeError(
+  throw new AgentscrapeTimeoutError(
     "DeepWiki search conversation did not reach a terminal state: timed out waiting",
   );
 }

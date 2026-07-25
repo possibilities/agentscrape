@@ -497,6 +497,6 @@ export async function scrapeCodexUsage(
     schema.weekly_remaining_pct === null &&
     schema.code_review_remaining_pct === null
   )
-    throw new Error("Failed to parse Codex usage quota percentages");
+    throw new PresetDriftError("Codex usage page missing required quota landmarks");
   return result(html, schema);
 }

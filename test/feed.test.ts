@@ -8,6 +8,7 @@ import type { RequestOptions } from "node:https";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
+  type ArchiveOptions,
   createDirectFeedTransport,
   discoverFeed,
   discoverFeedLive,
@@ -562,6 +563,66 @@ describe("network-free feed discovery", () => {
     ).toBe("invalid_options");
   });
 
+  test("preflights all seven archive CSS selector fields", () => {
+    const source = "https://blog.example.com/archive";
+    const initial = { url: source, content: "<html></html>", kind: "archive" as const };
+    for (const field of [
+      "entrySelector",
+      "linkSelector",
+      "dateSelector",
+      "updatedSelector",
+      "nextSelector",
+      "titleSelector",
+      "tombstoneSelector",
+    ] as const) {
+      const archive = { entrySelector: "article", [field]: "[" } as ArchiveOptions;
+      const result = discoverFeed(initial, { sourceUrl: source, sourceKind: "archive", archive });
+      expect(result, field).toMatchObject({
+        status: "failure",
+        items: [],
+        pagination: { pages: [] },
+        failure: { code: "invalid_options", retryable: false },
+      });
+    }
+    for (const field of [
+      "linkSelector",
+      "dateSelector",
+      "updatedSelector",
+      "nextSelector",
+      "titleSelector",
+      "tombstoneSelector",
+    ] as const) {
+      const archive = { entrySelector: "article", [field]: "" } as ArchiveOptions;
+      expect(
+        discoverFeed(initial, { sourceUrl: source, sourceKind: "archive", archive }).failure?.code,
+        field,
+      ).toBe("invalid_options");
+    }
+  });
+
+  test("a valid archive selector matching no entries stays partial", () => {
+    const source = "https://blog.example.com/archive";
+    const result = discoverFeed(
+      { url: source, content: "<html><main></main></html>", kind: "archive" },
+      {
+        sourceUrl: source,
+        sourceKind: "archive",
+        archive: {
+          entrySelector: "article.entry",
+          linkSelector: null,
+          dateSelector: null,
+          updatedSelector: null,
+          nextSelector: null,
+          titleSelector: null,
+          tombstoneSelector: null,
+        },
+      },
+    );
+    expect(result.status).toBe("partial");
+    expect(result.failure).toBeNull();
+    expect(result.warnings.some((warning) => warning.code === "no_archive_entries")).toBeTrue();
+  });
+
   test("response, item, cancellation, and option bounds are explicit", () => {
     const source = "https://blog.example.com/feed.xml";
     expect(
@@ -771,6 +832,30 @@ describe("direct feed socket boundary", () => {
 });
 
 describe("deterministic live feed discovery", () => {
+  test("rejects malformed archive selectors before calling transport", async () => {
+    let calls = 0;
+    const result = await discoverFeedLive(
+      {
+        sourceUrl: "https://blog.example.com/archive",
+        sourceKind: "archive",
+        archive: { entrySelector: "article", nextSelector: "[" },
+      },
+      {
+        transport: async () => {
+          calls += 1;
+          throw new Error("transport must not be called");
+        },
+      },
+    );
+    expect(result).toMatchObject({
+      status: "failure",
+      items: [],
+      pagination: { pages: [] },
+      failure: { code: "invalid_options", retryable: false },
+    });
+    expect(calls).toBe(0);
+  });
+
   test("fetches a direct RSS source and records the redirect-effective page URL", async () => {
     const source = "https://blog.example.com/feed.xml";
     const effective = "https://cdn.example.com/feed.xml";

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { withBrowserSignal } from "./browser";
+import { cssSelectorProblem } from "./css-selector";
 import { PresetConfigError, PresetOutputError, PresetSelectionError } from "./errors";
 import {
   scrapeAnthropicBilling,
@@ -299,6 +300,18 @@ function problems(data: Record<string, unknown>, label: string): string[] {
       result.push(`${label}: nav-links mode requires 'section_selector'`);
     if (typeof data.category_selector !== "string" || !data.category_selector)
       result.push(`${label}: nav-links mode requires 'category_selector'`);
+  }
+  const selectorFields =
+    mode === "links"
+      ? ["selector", "toggle_selector"]
+      : mode === "nav-links"
+        ? ["section_selector", "category_selector", "toggle_selector"]
+        : [];
+  for (const field of selectorFields) {
+    const value = data[field];
+    if (typeof value !== "string") continue;
+    const problem = cssSelectorProblem(value);
+    if (problem) result.push(`${label}: field '${field}' is not valid CSS: ${problem}`);
   }
   return result;
 }

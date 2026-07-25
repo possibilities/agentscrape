@@ -299,6 +299,21 @@ describe("strict preset registry", () => {
     writeFileSync(path, "name: bad\nsummary: x\ndomain: x.test\nmode: links\n");
     expect(validatePresetFile(path)).toContain("links mode requires 'selector'");
   });
+  test("rejects malformed preset selector syntax at publication time", () => {
+    const official = directory();
+    const local = directory();
+    writePreset(
+      local,
+      "bad-selector",
+      "name: bad-selector\nsummary: Invalid CSS\ndomain: docs.test\nmode: links\nselector: '['\n",
+    );
+    expect(validatePresetFile(join(local, "bad-selector.yaml")).join(" ")).toContain(
+      "not valid CSS",
+    );
+    expect(() => loadRegistry({ officialDir: official, localDir: local })).toThrow(
+      PresetConfigError,
+    );
+  });
   test("explicit TypeScript registration safely binds a custom handler and schema", async () => {
     class CustomPage extends ScrapeSchema {
       constructor(public content: string) {

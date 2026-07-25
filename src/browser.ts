@@ -6,8 +6,11 @@ import { parse as parseYaml } from "yaml";
 import {
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
+  AgentscrapeCancelledError,
   AgentscrapeTimeoutError,
   AgentscrapeUpstreamDownError,
+  AgentscrapeUsageError,
+  asError,
   throwIfAborted,
 } from "./errors";
 import { findExecutable, type ProcessResult, runProcess } from "./subprocess";
@@ -106,11 +109,22 @@ export async function runAgentBrowser(
   const profile = browserProfile || active.profile;
   if (profile) argv.push("--browserctl-profile", profile);
   argv.push(...args);
-  const result = await runProcess(argv, {
-    timeoutMs: timeoutMs(timeoutOverrideMs),
-    maxOutputBytes: 8_000_000,
-    ...(selectedSignal ? { signal: selectedSignal } : {}),
-  });
+  let result: ProcessResult;
+  try {
+    result = await runProcess(argv, {
+      timeoutMs: timeoutMs(timeoutOverrideMs),
+      maxOutputBytes: 8_000_000,
+      ...(selectedSignal ? { signal: selectedSignal } : {}),
+    });
+  } catch (error) {
+    throwIfAborted(selectedSignal);
+    const value = asError(error);
+    const missingExecutable = /not found on PATH|ENOENT|no such file/i.test(value.message);
+    throw new AgentscrapeBrowserError(
+      `Failed to run agent-browser: ${value.message}`,
+      !missingExecutable,
+    );
+  }
   throwIfAborted(selectedSignal);
   if (result.timedOut) {
     result.stderr = `${AGENT_BROWSER_TIMEOUT_PREFIX}${timeoutMs(timeoutOverrideMs) / 1000}s: ${argv.join(" ")}`;
@@ -124,6 +138,9 @@ export async function runAgentBrowser(
   return result;
 }
 function throwUpstream(result: ProcessResult): void {
+  if (result.exitCode === 0) return;
+  if (isCancelledResult(result))
+    throw new AgentscrapeCancelledError(result.stderr.trim() || "operation cancelled");
   if (result.stderr.startsWith(UPSTREAM_DOWN_PREFIX))
     throw new AgentscrapeUpstreamDownError(result.stderr);
 }
@@ -131,13 +148,26 @@ function isTimeoutResult(result: ProcessResult): boolean {
   return (
     result.timedOut ||
     result.stderr.startsWith(AGENT_BROWSER_TIMEOUT_PREFIX) ||
-    /\b(?:timed out|timeout(?: of)? .* exceeded)\b/i.test(result.stderr)
+    /\b(?:timed out|timeout(?: of)?(?: .*?)? exceeded)\b/i.test(result.stderr)
   );
 }
-function throwCritical(result: ProcessResult): void {
-  if (result.exitCode === 0) return;
-  throwUpstream(result);
-  if (isTimeoutResult(result)) throw new AgentscrapeTimeoutError(result.stderr);
+function isCancelledResult(result: ProcessResult): boolean {
+  return result.exitCode === 130 || /\b(?:cancelled|canceled|interrupted)\b/i.test(result.stderr);
+}
+
+/** Require a successful agent-browser command while preserving stable operational error types. */
+export function requireAgentBrowserSuccess(
+  result: ProcessResult,
+  command = "agent-browser command failed",
+  retryable = true,
+): ProcessResult {
+  if (result.exitCode === 0) return result;
+  const detail = result.stderr.trim() || `agent-browser exited with status ${result.exitCode}`;
+  if (isCancelledResult(result)) throw new AgentscrapeCancelledError(detail);
+  if (result.stderr.startsWith(UPSTREAM_DOWN_PREFIX))
+    throw new AgentscrapeUpstreamDownError(result.stderr);
+  if (isTimeoutResult(result)) throw new AgentscrapeTimeoutError(detail);
+  throw new AgentscrapeBrowserError(`${command}: ${detail}`, retryable);
 }
 export async function setMediaMode(
   media?: string | null,
@@ -147,10 +177,7 @@ export async function setMediaMode(
   if (!media) return;
   const mode = media.toLowerCase();
   if (!["light", "dark"].includes(mode))
-    throw new AgentscrapeBrowserError(
-      `Invalid media mode '${media}'. Expected light or dark`,
-      false,
-    );
+    throw new AgentscrapeUsageError(`Invalid media mode '${media}'. Expected light or dark`);
   const result = await runAgentBrowser(
     ["set", "media", mode],
     session,
@@ -158,19 +185,19 @@ export async function setMediaMode(
     undefined,
     signal,
   );
-  throwCritical(result);
-  if (result.exitCode !== 0)
-    throw new AgentscrapeBrowserError(result.stderr.trim() || `Failed to set media mode: ${mode}`);
+  requireAgentBrowserSuccess(result, `Failed to set media mode: ${mode}`);
 }
 async function currentUrl(session?: string | null): Promise<string | null> {
   const result = await runAgentBrowser(["eval", "window.location.href"], session);
   throwUpstream(result);
+  // Navigation evidence is a best-effort probe; its absence is handled by the primary command.
   return result.exitCode === 0 ? result.stdout.trim().replace(/^"|"$/g, "") : null;
 }
 async function diagnostics(session?: string | null): Promise<Record<string, string>> {
   const evalValue = async (expression: string) => {
     const result = await runAgentBrowser(["eval", expression], session);
     throwUpstream(result);
+    // Diagnostics never replace the primary browser failure.
     return result.exitCode === 0 ? result.stdout.trim().replace(/^"|"$/g, "") : "";
   };
   const screenshot = `/tmp/agentscrape-debug-${process.pid}.png`;
@@ -181,6 +208,7 @@ async function diagnostics(session?: string | null): Promise<Record<string, stri
   ]);
   const captured = await runAgentBrowser(["screenshot", screenshot], session);
   throwUpstream(captured);
+  // Screenshot capture is also diagnostic-only and may fail without changing classification.
   return { url, title, hint, screenshot };
 }
 function reachedNavigationTarget(
@@ -228,6 +256,7 @@ export async function openPage(
     );
 
   if (contentSelector) {
+    // Individual selector waits are retry probes; exhaustion becomes one typed browser failure.
     for (let attempt = 0; attempt < (navigationFailed ? 5 : 2); attempt += 1) {
       const result = await runAgentBrowser(["wait", contentSelector], session);
       throwUpstream(result);
@@ -257,8 +286,7 @@ export async function warmClaudeSession(
   await openPage("https://claude.ai", session, media, CLAUDE_APP_READY_SELECTOR);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const result = await runAgentBrowser(["eval", "document.body?.innerText || ''"], session);
-    if (result.exitCode !== 0)
-      throw new AgentscrapeBrowserError(`Failed to inspect Claude session: ${result.stderr}`);
+    requireAgentBrowserSuccess(result, "Failed to inspect Claude session");
     const lowered = result.stdout.toLowerCase();
     if (lowered.includes("new chat")) return;
     if (
@@ -267,11 +295,13 @@ export async function warmClaudeSession(
       )
     )
       throw new AgentscrapeAuthError("Claude authentication required - browser is not signed in");
-    await runAgentBrowser(["wait", "2000"], session);
+    const waited = await runAgentBrowser(["wait", "2000"], session);
+    requireAgentBrowserSuccess(waited, "Failed while waiting for the Claude session");
   }
   throw new AgentscrapeBrowserError("Claude session did not reach the signed-in app");
 }
 export async function closeSession(session?: string | null, signal?: AbortSignal): Promise<void> {
+  // Session close is cleanup-only: a completed nonzero command is intentionally best-effort.
   await runProcess([resolveBrowser(), "--session", session || defaultSession(), "close"], {
     timeoutMs: 30_000,
     maxOutputBytes: 64_000,

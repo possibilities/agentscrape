@@ -1,8 +1,8 @@
-import { runAgentBrowser, UPSTREAM_DOWN_PREFIX } from "./browser";
-import { AgentscrapeUpstreamDownError } from "./errors";
+import { requireAgentBrowserSuccess, runAgentBrowser } from "./browser";
+import { AgentscrapeBrowserError } from "./errors";
 
-function fail(context: string, detail: string): Error {
-  return new Error(`${context}: ${detail}`);
+function fail(context: string, detail: string): AgentscrapeBrowserError {
+  return new AgentscrapeBrowserError(`${context}: ${detail}`);
 }
 
 export function decodeBrowserEval(stdout: string, context = "browser eval"): unknown {
@@ -26,11 +26,7 @@ export async function browserEval(
   context = "browser eval failed",
 ): Promise<unknown> {
   const result = await runAgentBrowser(["eval", expression], session);
-  if (result.exitCode !== 0) {
-    const detail = result.stderr.trim() || `agent-browser exited with status ${result.exitCode}`;
-    if (detail.startsWith(UPSTREAM_DOWN_PREFIX)) throw new AgentscrapeUpstreamDownError(detail);
-    throw fail(context, detail);
-  }
+  requireAgentBrowserSuccess(result, context);
   return decodeBrowserEval(result.stdout, context);
 }
 
