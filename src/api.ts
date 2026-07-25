@@ -1,5 +1,4 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
@@ -52,6 +51,7 @@ import {
   selectPreset,
   validateContentResult,
 } from "./presets";
+import { resolveQueuePaths } from "./queue-paths";
 
 export {
   type ContentHandlerRegistration,
@@ -565,7 +565,7 @@ export function submitScrapeJob(
     throw new Error(
       "indexed scrape queue submissions are frozen; use the dedicated ingestion command",
     );
-  const queue = join(homedir(), ".local/share/agentscrape/queue");
+  const queue = resolveQueuePaths().queue;
   mkdirSync(queue, { recursive: true, mode: 0o700 });
   const name = `${Date.now()}-${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}.yaml`;
   const destinationPath = join(queue, name);

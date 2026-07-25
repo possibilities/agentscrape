@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   convertHtml,
@@ -22,6 +22,29 @@ function temp(): string {
   const path = mkdtempSync(join(tmpdir(), "agentscrape-api-"));
   temporary.push(path);
   return path;
+}
+function queueEnvironment(home: string, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+  delete env.AGENTSCRAPE_DATA_HOME;
+  delete env.XDG_DATA_HOME;
+  return { ...env, ...overrides };
+}
+async function runSubmission(
+  body: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const script = `import { submitScrapeJob } from ${JSON.stringify(join(import.meta.dir, "../src/api.ts"))};\n${body}`;
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { code, stdout, stderr };
 }
 
 describe("public TypeScript API", () => {
@@ -235,17 +258,25 @@ describe("public TypeScript API", () => {
     expect(tweetAsArticle.extractor.implementation).toBe("x-article");
     expect(tweetAsArticle.failure?.failure_class).toBe("malformed_provider_output");
   });
-  test("standalone job submission is atomic and rejects indexed state before publication", async () => {
-    const home = temp();
-    const script = `import { submitScrapeJob } from ${JSON.stringify(join(import.meta.dir, "../src/api.ts"))}; console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", {summarize:true, frontmatter:{url:"https://example.com/a"}}));`;
-    const child = Bun.spawn([process.execPath, "-e", script], {
-      env: { ...process.env, HOME: home },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
-    expect(code).toBe(0);
-    const path = stdout.trim();
+  test("standalone submission resolves an explicit queue root at call time", async () => {
+    const root = temp();
+    const home = join(root, "home");
+    const xdg = join(root, "xdg");
+    const importTimeRoot = join(root, "import-time-explicit");
+    const callTimeRoot = join(root, "call-time-explicit");
+    const result = await runSubmission(
+      `process.env.AGENTSCRAPE_DATA_HOME = ${JSON.stringify(callTimeRoot)};
+console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", { summarize: true, frontmatter: { url: "https://example.com/a" } }));`,
+      queueEnvironment(home, {
+        AGENTSCRAPE_DATA_HOME: importTimeRoot,
+        XDG_DATA_HOME: xdg,
+      }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    const path = result.stdout.trim();
+    expect(dirname(path)).toBe(join(callTimeRoot, "queue"));
     expect(existsSync(path)).toBeTrue();
     expect(parseYaml(readFileSync(path, "utf8"))).toEqual({
       url: "https://example.com/a",
@@ -253,15 +284,77 @@ describe("public TypeScript API", () => {
       summarize: true,
       frontmatter: { url: "https://example.com/a" },
     });
+    expect(existsSync(join(importTimeRoot, "queue"))).toBeFalse();
+    expect(existsSync(join(xdg, "agentscrape", "queue"))).toBeFalse();
+    expect(existsSync(join(home, ".local", "share", "agentscrape", "queue"))).toBeFalse();
+  });
 
-    const rejectedHome = temp();
-    const rejected = `import { submitScrapeJob } from ${JSON.stringify(join(import.meta.dir, "../src/api.ts"))}; try { submitScrapeJob("https://example.com/a", "/tmp/a.md", {indexer:"agentbrain"}); } catch { process.exit(7); }`;
-    const rejectedChild = Bun.spawn([process.execPath, "-e", rejected], {
-      env: { ...process.env, HOME: rejectedHome },
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    expect(await rejectedChild.exited).toBe(7);
-    expect(existsSync(join(rejectedHome, ".local/share/agentscrape/queue"))).toBeFalse();
+  test("standalone submission uses the XDG queue fallback", async () => {
+    const root = temp();
+    const home = join(root, "home");
+    const xdg = join(root, "xdg");
+    const result = await runSubmission(
+      'console.log(submitScrapeJob("https://example.com/xdg", "/tmp/xdg.md"));',
+      queueEnvironment(home, { XDG_DATA_HOME: xdg }),
+    );
+
+    expect(result.code).toBe(0);
+    const path = result.stdout.trim();
+    expect(dirname(path)).toBe(join(xdg, "agentscrape", "queue"));
+    expect(existsSync(path)).toBeTrue();
+    expect(existsSync(join(home, ".local", "share", "agentscrape", "queue"))).toBeFalse();
+  });
+
+  test("standalone submission retains the HOME queue default", async () => {
+    const home = temp();
+    const result = await runSubmission(
+      'console.log(submitScrapeJob("https://example.com/home", "/tmp/home.md"));',
+      queueEnvironment(home),
+    );
+
+    expect(result.code).toBe(0);
+    const path = result.stdout.trim();
+    expect(dirname(path)).toBe(join(home, ".local", "share", "agentscrape", "queue"));
+    expect(existsSync(path)).toBeTrue();
+  });
+
+  test("invalid configured queue roots fail without fallback publication", async () => {
+    for (const configured of ["explicit", "xdg"] as const) {
+      const root = temp();
+      const home = join(root, "home");
+      const xdg = join(root, "xdg");
+      const invalid = `relative-${configured}-${Date.now()}`;
+      const env = queueEnvironment(home, {
+        XDG_DATA_HOME: configured === "xdg" ? invalid : xdg,
+        ...(configured === "explicit" ? { AGENTSCRAPE_DATA_HOME: invalid } : {}),
+      });
+      const result = await runSubmission(
+        `try { submitScrapeJob("https://example.com/invalid", "/tmp/invalid.md"); } catch (error) { console.log(error instanceof Error ? error.message : String(error)); }`,
+        env,
+      );
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(
+        `${configured === "explicit" ? "AGENTSCRAPE_DATA_HOME" : "XDG_DATA_HOME"} must be a non-empty absolute path without NUL bytes`,
+      );
+      expect(existsSync(join(xdg, "agentscrape", "queue"))).toBeFalse();
+      expect(existsSync(join(home, ".local", "share", "agentscrape", "queue"))).toBeFalse();
+    }
+  });
+
+  test("frozen indexed and source submissions reject before queue resolution", async () => {
+    for (const options of [{ indexer: "agentbrain" }, { source: "test-ingress" }]) {
+      const home = temp();
+      const result = await runSubmission(
+        `try { submitScrapeJob("https://example.com/frozen", "/tmp/frozen.md", ${JSON.stringify(options)}); } catch (error) { console.log(error instanceof Error ? error.message : String(error)); }`,
+        queueEnvironment(home, { AGENTSCRAPE_DATA_HOME: "invalid-relative-root" }),
+      );
+
+      expect(result.code).toBe(0);
+      expect(result.stdout.trim()).toBe(
+        "indexed scrape queue submissions are frozen; use the dedicated ingestion command",
+      );
+      expect(existsSync(join(home, ".local", "share", "agentscrape", "queue"))).toBeFalse();
+    }
   });
 });
