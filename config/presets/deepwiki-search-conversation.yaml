@@ -3,6 +3,6 @@ summary: "DeepWiki persisted /search/ conversation: ordered Q&A rounds with cita
 domain: deepwiki.com
 mode: content
 url_patterns:
-  - 'https?://(www\.)?deepwiki\.com/search/[\w-]+'
+  - '^https?://(?:www\.)?deepwiki\.com/search/[\w-]+/?(?:\?.*)?$'
 handler: deepwiki.scrape_search_conversation
 schema: DeepWikiSearchConversation
