@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const sourceRoot = join(import.meta.dir, "..");
 let root = sourceRoot;
@@ -195,10 +195,17 @@ async function previousCheckout(persistent = false): Promise<string> {
   return realpathSync(checkout);
 }
 
-function normalizeCopiedSymlinks(path: string): void {
+function normalizeCopiedSymlinks(path: string, root: string, copiedFrom?: string): void {
   const info = lstatSync(path);
   if (info.isSymbolicLink()) {
-    const target = readlinkSync(path);
+    let target = readlinkSync(path);
+    if (isAbsolute(target)) {
+      let mapped: string | undefined;
+      if (target === root || target.startsWith(`${root}${sep}`)) mapped = target;
+      else if (copiedFrom && (target === copiedFrom || target.startsWith(`${copiedFrom}${sep}`)))
+        mapped = join(root, relative(copiedFrom, target));
+      if (mapped) target = relative(dirname(path), mapped);
+    }
     unlinkSync(path);
     symlinkSync(target, path);
     return;
@@ -206,7 +213,7 @@ function normalizeCopiedSymlinks(path: string): void {
   if (!info.isDirectory()) return;
   const mode = info.mode & 0o777;
   if (!(mode & 0o200)) chmodSync(path, mode | 0o200);
-  for (const name of readdirSync(path)) normalizeCopiedSymlinks(join(path, name));
+  for (const name of readdirSync(path)) normalizeCopiedSymlinks(join(path, name), root, copiedFrom);
   if (!(mode & 0o200)) chmodSync(path, mode);
 }
 
@@ -215,9 +222,9 @@ function copyTree(source: string, destination: string): void {
     recursive: true,
     mode: fsConstants.COPYFILE_FICLONE,
   });
-  // Node may preserve hard-linked symlink inodes on Linux. Recreate each link so the fixture
-  // matches the production install and Agentbuilds' required nlink=1 snapshot contract.
-  normalizeCopiedSymlinks(destination);
+  // Node may preserve hard-linked or source-absolute symlinks on Linux. Recreate each link so the
+  // fixture matches a fresh production install and Agentbuilds' contained nlink=1 contract.
+  normalizeCopiedSymlinks(destination, destination, source);
 }
 
 function preseedSuiteSnapshots(
@@ -694,6 +701,7 @@ beforeAll(async () => {
   );
   expect(productionInstall.code, productionInstall.stderr).toBe(0);
   expect(existsSync(join(suiteProductionTemplate, "node_modules", "typescript"))).toBeFalse();
+  normalizeCopiedSymlinks(suiteProductionTemplate, suiteProductionTemplate);
   const seal = (path: string): void => {
     const info = lstatSync(path);
     if (info.isSymbolicLink()) return;
