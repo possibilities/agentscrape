@@ -27,6 +27,17 @@ export class AgentscrapeUsageError extends AgentscrapeError {
     this.name = "AgentscrapeUsageError";
   }
 }
+export type AgentscrapeNetworkPolicyReason = "private_destination" | "browser_egress_unverifiable";
+export class AgentscrapeNetworkPolicyError extends AgentscrapeUsageError {
+  constructor(public readonly reason: AgentscrapeNetworkPolicyReason) {
+    super(
+      reason === "private_destination"
+        ? "The destination is not public; pass allowPrivateNetwork only for trusted network access."
+        : "Browser-backed live navigation requires explicit unrestricted network consent.",
+    );
+    this.name = "AgentscrapeNetworkPolicyError";
+  }
+}
 export class AgentscrapeAuthError extends AgentscrapeError {
   constructor(message: string) {
     super(message, "auth");

@@ -176,12 +176,12 @@ describe("policy-first automatic routing", () => {
     });
   }
 
-  test("routes an unclaimed .md pathname through the bounded fetch even with a query", async () => {
+  test("routes an unclaimed .md pathname through pinned direct HTTP rather than native fetch", async () => {
     const value = fixture();
     const output = await program(value, resultBody("https://docs.invalid/guide.md?download=1"));
 
-    expect(output.value.markdown).toBe("# fake direct Markdown");
-    expectMarkers(value, ["fetch"]);
+    expect(output.value.error).toMatchObject({ errorClass: "provider" });
+    expectMarkers(value, []);
   });
 });
 
@@ -269,7 +269,10 @@ url_patterns:
   test("generic forces the browser instead of GitHub or direct fetch", async () => {
     for (const url of ["https://github.com/owner/repository", "https://docs.invalid/guide.md"]) {
       const value = fixture();
-      const output = await program(value, resultBody(url, `{ generic: true }`));
+      const output = await program(
+        value,
+        resultBody(url, `{ generic: true, allowPrivateNetwork: true }`),
+      );
 
       expect(output.value.error).toBeDefined();
       expectMarkers(value, ["browser"]);
@@ -313,6 +316,7 @@ esac
     envelope: true,
     generic: true,
     selector: "main",
+    allowPrivateNetwork: true,
   });
   console.log(JSON.stringify(result));`,
     );
@@ -352,7 +356,7 @@ esac
       value,
       resultBody(
         "https://example.invalid/page",
-        `{ generic: true, selector: "body", session: "explicit-body" }`,
+        `{ generic: true, selector: "body", session: "explicit-body", allowPrivateNetwork: true }`,
       ),
     );
 
@@ -390,7 +394,7 @@ esac
         value,
         resultBody(
           "https://example.invalid/page",
-          `{ generic: true, selector: ${JSON.stringify(selector)} }`,
+          `{ generic: true, selector: ${JSON.stringify(selector)}, allowPrivateNetwork: true }`,
         ),
       );
 

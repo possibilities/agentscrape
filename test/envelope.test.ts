@@ -13,6 +13,7 @@ import {
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
   AgentscrapeError,
+  AgentscrapeNetworkPolicyError,
   AgentscrapeProviderError,
   AgentscrapeRuntimeError,
   AgentscrapeTimeoutError,
@@ -240,6 +241,8 @@ describe("failure projection and redaction", () => {
   test("classifies every authoritative typed error without message heuristics", () => {
     const typed = [
       [new AgentscrapeUsageError("usage"), "invalid_request", false],
+      [new AgentscrapeNetworkPolicyError("private_destination"), "invalid_request", false],
+      [new AgentscrapeNetworkPolicyError("browser_egress_unverifiable"), "invalid_request", false],
       [new PresetSelectionError("selection"), "invalid_request", false],
       [new AgentscrapeAuthError("auth"), "authentication_required", false],
       [new AgentscrapeUpstreamDownError("upstream"), "upstream_unavailable", true],

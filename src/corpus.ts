@@ -11,10 +11,16 @@ import {
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { closeSession, runAgentBrowser } from "./browser";
+import {
+  closeSession,
+  currentBrowserNetworkPolicy,
+  runAgentBrowser,
+  withBrowserNetworkPolicy,
+} from "./browser";
 import {
   AgentscrapeAuthError,
   AgentscrapeError,
+  AgentscrapeNetworkPolicyError,
   AgentscrapeRuntimeError,
   AgentscrapeUpstreamDownError,
   AgentscrapeValueError,
@@ -261,87 +267,93 @@ export async function captureCorpus(
     expectFailure?: string | null | undefined;
     root?: string | undefined;
     signal?: AbortSignal | undefined;
+    allowPrivateNetwork?: boolean | undefined;
   } = {},
 ): Promise<string> {
-  if (options.expectFailure && !FAILURE_TYPES[options.expectFailure])
-    throw new Error(
-      `unknown --expect-failure type '${options.expectFailure}'. Known types: ${Object.keys(FAILURE_TYPES).sort().join(", ")}`,
-    );
-  const registry = loadRegistry();
-  const preset = options.preset
-    ? registry.byName(options.preset)
-    : matchPreset(url, registry.presets);
-  if (!preset)
-    throw new Error(
-      options.preset
-        ? `preset '${options.preset}' not found`
-        : "no matching preset found. Use --preset to specify one.",
-    );
-  if (preset.mode !== "content")
-    throw new Error(
-      `capture-corpus only supports content mode (preset '${preset.name}' is ${preset.mode})`,
-    );
-  const session = `agentscrape-capture-${process.pid}`;
-  let result: ScrapeResult | undefined;
-  let outcome: unknown = null;
-  let rendered = "";
-  try {
-    throwIfAborted(options.signal);
-    result = await scrapeWithPreset(url, preset, { session, signal: options.signal });
-  } catch (error) {
-    outcome = error;
-  } finally {
-    try {
-      const html = await runAgentBrowser(
-        ["eval", "document.documentElement.outerHTML"],
-        session,
-        undefined,
-        undefined,
-        options.signal,
+  return withBrowserNetworkPolicy(options.allowPrivateNetwork, async () => {
+    if (options.expectFailure && !FAILURE_TYPES[options.expectFailure])
+      throw new Error(
+        `unknown --expect-failure type '${options.expectFailure}'. Known types: ${Object.keys(FAILURE_TYPES).sort().join(", ")}`,
       );
-      if (html.exitCode === 0) rendered = html.stdout;
-    } catch {
-      /* best effort */
+    const registry = loadRegistry();
+    const preset = options.preset
+      ? registry.byName(options.preset)
+      : matchPreset(url, registry.presets);
+    if (!preset)
+      throw new Error(
+        options.preset
+          ? `preset '${options.preset}' not found`
+          : "no matching preset found. Use --preset to specify one.",
+      );
+    if (preset.mode !== "content")
+      throw new Error(
+        `capture-corpus only supports content mode (preset '${preset.name}' is ${preset.mode})`,
+      );
+    const session = `agentscrape-capture-${process.pid}`;
+    let result: ScrapeResult | undefined;
+    let outcome: unknown = null;
+    let rendered = "";
+    try {
+      throwIfAborted(options.signal);
+      result = await scrapeWithPreset(url, preset, { session, signal: options.signal });
+    } catch (error) {
+      if (error instanceof AgentscrapeNetworkPolicyError) throw error;
+      outcome = error;
+    } finally {
+      if (currentBrowserNetworkPolicy()) {
+        try {
+          const html = await runAgentBrowser(
+            ["eval", "document.documentElement.outerHTML"],
+            session,
+            undefined,
+            undefined,
+            options.signal,
+          );
+          if (html.exitCode === 0) rendered = html.stdout;
+        } catch {
+          /* best effort */
+        }
+        await closeSession(session);
+      }
     }
-    await closeSession(session);
-  }
-  if (options.signal?.aborted) throw cancellationError(options.signal);
-  const directory = join(options.root ?? ROOT, preset.name);
-  if (outcome) {
-    if (!options.expectFailure) throw outcome;
+    if (options.signal?.aborted) throw cancellationError(options.signal);
+    const directory = join(options.root ?? ROOT, preset.name);
+    if (outcome) {
+      if (!options.expectFailure) throw outcome;
+      const meta: Meta = {
+        version: 1,
+        preset: preset.name,
+        mode: preset.mode,
+        url,
+        expect: "failure",
+        failure: {
+          type: options.expectFailure,
+          message_captured: outcome instanceof Error ? outcome.message : String(outcome),
+        },
+      };
+      verifyFailure(meta, outcome);
+      return atomicSample(directory, {
+        "meta.yaml": stringifyYaml(meta),
+        ...(rendered ? { "page.html": rendered } : {}),
+      });
+    }
+    if (options.expectFailure)
+      throw new Error(`expected failure type '${options.expectFailure}' but the scrape succeeded`);
+    if (!result) throw new Error("scrape returned no result");
     const meta: Meta = {
       version: 1,
       preset: preset.name,
       mode: preset.mode,
       url,
-      expect: "failure",
-      failure: {
-        type: options.expectFailure,
-        message_captured: outcome instanceof Error ? outcome.message : String(outcome),
-      },
+      expect: "success",
+      structured: plain(result.structured),
     };
-    verifyFailure(meta, outcome);
     return atomicSample(directory, {
       "meta.yaml": stringifyYaml(meta),
-      ...(rendered ? { "page.html": rendered } : {}),
+      ...(result.full_html ? { "page.html": result.full_html } : {}),
+      ...(result.selected_html ? { "selected.html": result.selected_html } : {}),
+      ...(result.markdown ? { "expected.md": result.markdown } : {}),
     });
-  }
-  if (options.expectFailure)
-    throw new Error(`expected failure type '${options.expectFailure}' but the scrape succeeded`);
-  if (!result) throw new Error("scrape returned no result");
-  const meta: Meta = {
-    version: 1,
-    preset: preset.name,
-    mode: preset.mode,
-    url,
-    expect: "success",
-    structured: plain(result.structured),
-  };
-  return atomicSample(directory, {
-    "meta.yaml": stringifyYaml(meta),
-    ...(result.full_html ? { "page.html": result.full_html } : {}),
-    ...(result.selected_html ? { "selected.html": result.selected_html } : {}),
-    ...(result.markdown ? { "expected.md": result.markdown } : {}),
   });
 }
 export { CorpusError, loadMeta, runSample };

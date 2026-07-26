@@ -13,10 +13,17 @@ import { join } from "node:path";
 import { fetchLinks, fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
+  openPage,
   resetBrowserUnavailableCache,
   runAgentBrowser,
+  withBrowserNetworkPolicy,
   withBrowserSession,
+  withBrowserSignal,
 } from "../src/browser";
+import { checkPresets } from "../src/canary";
+import { captureCorpus } from "../src/corpus";
+import { AgentscrapeCancelledError, AgentscrapeNetworkPolicyError } from "../src/errors";
+import { loadRegistry, scrapeWithPreset } from "../src/presets";
 
 const temporary: string[] = [];
 const originalBrowser = process.env[AGENT_BROWSER_BIN_ENV];
@@ -147,7 +154,12 @@ function expectOwnedSessions(items: BrowserEvent[], count: number): string[] {
   return names;
 }
 
-const genericOptions = { generic: true, selector: "main", envelope: true } as const;
+const genericOptions = {
+  generic: true,
+  selector: "main",
+  envelope: true,
+  allowPrivateNetwork: true,
+} as const;
 
 describe("owned browser session scopes", () => {
   test("concurrent implicit fetchMarkdown roots interleave without sharing or premature close", async () => {
@@ -182,7 +194,10 @@ describe("owned browser session scopes", () => {
     const value = fixture(true);
     const [markdown, links] = await Promise.all([
       fetchMarkdown("https://example.com/page", genericOptions),
-      fetchLinks("https://example.com/docs", { sectionSelector: ".links" }),
+      fetchLinks("https://example.com/docs", {
+        sectionSelector: ".links",
+        allowPrivateNetwork: true,
+      }),
     ]);
 
     expect(markdown).toMatchObject({ status: "success" });
@@ -219,7 +234,7 @@ describe("owned browser session scopes", () => {
         ...genericOptions,
         session: "nested-explicit",
       });
-      await runAgentBrowser(["eval", "window.location.href"]);
+      await withBrowserNetworkPolicy(true, () => runAgentBrowser(["eval", "window.location.href"]));
     });
 
     const items = events(value);
@@ -243,13 +258,132 @@ describe("owned browser session scopes", () => {
   });
 });
 
+describe("browser network consent", () => {
+  test("rejects API and low-level HTTP navigation without commands or synthetic closes", async () => {
+    const value = fixture();
+    const markdown = await fetchMarkdown("https://example.com/page", {
+      generic: true,
+      selector: "main",
+      envelope: true,
+    });
+    expect(markdown).toMatchObject({
+      status: "failure",
+      failure: { failure_class: "invalid_request", retryable: false },
+    });
+    await expect(
+      fetchLinks("https://example.com/docs", { sectionSelector: ".links" }),
+    ).rejects.toBeInstanceOf(AgentscrapeNetworkPolicyError);
+    await expect(runAgentBrowser(["open", "https://example.com"])).rejects.toMatchObject({
+      reason: "browser_egress_unverifiable",
+    });
+    expect(events(value)).toEqual([]);
+  });
+
+  test("denies eval expressions and non-HTTP opens before marking or closing a session", async () => {
+    const value = fixture();
+    await withBrowserSession(undefined, async (scope) => {
+      for (const args of [
+        ["eval", "location.href='http://127.0.0.1/'"],
+        ["eval", "fetch('http://127.0.0.1/')"],
+        ["open", "data:text/html,network-bypass"],
+        ["open", "file:///etc/passwd"],
+      ]) {
+        await expect(runAgentBrowser(args)).rejects.toBeInstanceOf(AgentscrapeNetworkPolicyError);
+      }
+      await expect(openPage("data:text/html,network-bypass")).rejects.toBeInstanceOf(
+        AgentscrapeNetworkPolicyError,
+      );
+      expect(scope.used).toBeFalse();
+    });
+    expect(events(value)).toEqual([]);
+  });
+
+  test("cancellation precedes consent without using or closing an owned session", async () => {
+    const value = fixture();
+    const direct = new AbortController();
+    direct.abort();
+    await withBrowserSession(undefined, async (scope) => {
+      await expect(
+        runAgentBrowser(
+          ["eval", "window.location.href"],
+          undefined,
+          undefined,
+          undefined,
+          direct.signal,
+        ),
+      ).rejects.toBeInstanceOf(AgentscrapeCancelledError);
+
+      const active = new AbortController();
+      await withBrowserSignal(active.signal, async () => {
+        active.abort();
+        await expect(runAgentBrowser(["open", "https://example.com"])).rejects.toBeInstanceOf(
+          AgentscrapeCancelledError,
+        );
+        await expect(openPage("about:blank")).rejects.toBeInstanceOf(AgentscrapeCancelledError);
+      });
+      expect(scope.used).toBeFalse();
+    });
+    expect(events(value)).toEqual([]);
+  });
+
+  test("an explicit false narrows inherited consent and only low-level about:blank is exempt", async () => {
+    const value = fixture();
+    await withBrowserNetworkPolicy(true, async () => {
+      const denied = await fetchMarkdown("https://example.com/page", {
+        generic: true,
+        selector: "main",
+        envelope: true,
+        allowPrivateNetwork: false,
+      });
+      expect(denied).toMatchObject({ status: "failure" });
+    });
+    await expect(openPage("about:blank")).rejects.toBeInstanceOf(AgentscrapeNetworkPolicyError);
+    expect(events(value)).toEqual([]);
+
+    expect((await runAgentBrowser(["open", "about:blank"], "blank-session")).exitCode).toBe(0);
+    expect(events(value)).toEqual([{ session: "blank-session", command: ["open", "about:blank"] }]);
+  });
+
+  test("direct preset, corpus, and canary paths deny before executable cleanup", async () => {
+    const value = fixture();
+    const preset = loadRegistry().byName("x-tweet")!;
+    await expect(scrapeWithPreset("https://x.com/example/status/1", preset)).rejects.toBeInstanceOf(
+      AgentscrapeNetworkPolicyError,
+    );
+    const corpusRoot = join(value.root, "corpus");
+    await expect(
+      captureCorpus("https://x.com/example/status/1", {
+        preset: "x-tweet",
+        expectFailure: "AgentscrapeError",
+        root: corpusRoot,
+      }),
+    ).rejects.toBeInstanceOf(AgentscrapeNetworkPolicyError);
+    expect(existsSync(join(corpusRoot, "x-tweet"))).toBeFalse();
+    const canaryPath = join(value.root, "canaries.yaml");
+    writeFileSync(canaryPath, "x-tweet:\n  url: https://x.com/example/status/1\n");
+    await expect(checkPresets({ presets: ["x-tweet"], canaryPath })).rejects.toBeInstanceOf(
+      AgentscrapeNetworkPolicyError,
+    );
+    expect(events(value)).toEqual([]);
+
+    const allowed = await checkPresets({
+      presets: ["x-tweet"],
+      canaryPath,
+      allowPrivateNetwork: true,
+    });
+    expect(allowed.results[0]?.status).not.toBe("not_configured");
+    expect(events(value).length).toBeGreaterThan(0);
+  });
+});
+
 describe("browser-free and low-level session behavior", () => {
   test("direct Markdown, offline HTML, and invalid requests issue no browser command or close", async () => {
     const value = fixture();
-    globalThis.fetch = (async () =>
-      new Response("# Direct", { status: 200 })) as unknown as typeof fetch;
-
-    const direct = await fetchMarkdown("https://example.com/readme.md");
+    const server = Bun.serve({ port: 0, fetch: () => new Response("# Direct") });
+    const direct = await fetchMarkdown(`http://127.0.0.1:${server.port}/readme.md`, {
+      allowPrivateNetwork: true,
+    });
+    server.stop(true);
     expect(direct).toMatchObject({ markdown: "# Direct" });
     await expect(
       fetchMarkdown("https://x.com/example/status/123", {
@@ -263,7 +397,9 @@ describe("browser-free and low-level session behavior", () => {
 
   test("runAgentBrowser outside a scope retains the PID fallback", async () => {
     const value = fixture();
-    const result = await runAgentBrowser(["eval", "window.location.href"]);
+    const result = await withBrowserNetworkPolicy(true, () =>
+      runAgentBrowser(["eval", "window.location.href"]),
+    );
     expect(result.exitCode).toBe(0);
     expect(events(value)).toEqual([
       { session: `agentscrape-${process.pid}`, command: ["eval", "window.location.href"] },
@@ -281,7 +417,9 @@ describe("browser-free and low-level session behavior", () => {
     let name = "";
     await withBrowserSession(undefined, async (scope) => {
       name = scope.name;
-      const result = await runAgentBrowser(["open", "https://example.com"]);
+      const result = await withBrowserNetworkPolicy(true, () =>
+        runAgentBrowser(["open", "https://example.com"]),
+      );
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("upstream down");
     });
@@ -298,21 +436,25 @@ describe("browser-free and low-level session behavior", () => {
       `is_down: true\nlast_run_at: ${new Date().toISOString()}\nreason: scoped outage\n`,
     );
     let firstName = "";
-    await withBrowserSession(undefined, async (scope) => {
-      firstName = scope.name;
-      expect((await runAgentBrowser(["eval", "first"])).exitCode).toBe(1);
-      rmSync(health);
-      await withBrowserSession(undefined, async (nested) => {
-        expect(nested).toBe(scope);
-        expect((await runAgentBrowser(["eval", "nested"])).exitCode).toBe(1);
-      });
-    });
+    await withBrowserNetworkPolicy(true, () =>
+      withBrowserSession(undefined, async (scope) => {
+        firstName = scope.name;
+        expect((await runAgentBrowser(["eval", "first"])).exitCode).toBe(1);
+        rmSync(health);
+        await withBrowserSession(undefined, async (nested) => {
+          expect(nested).toBe(scope);
+          expect((await runAgentBrowser(["eval", "nested"])).exitCode).toBe(1);
+        });
+      }),
+    );
 
     let secondName = "";
-    await withBrowserSession(undefined, async (scope) => {
-      secondName = scope.name;
-      expect((await runAgentBrowser(["eval", "window.location.href"])).exitCode).toBe(0);
-    });
+    await withBrowserNetworkPolicy(true, () =>
+      withBrowserSession(undefined, async (scope) => {
+        secondName = scope.name;
+        expect((await runAgentBrowser(["eval", "window.location.href"])).exitCode).toBe(0);
+      }),
+    );
     expect(secondName).not.toBe(firstName);
     expect(events(value)).toEqual([
       { session: firstName, command: ["close"] },

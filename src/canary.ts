@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { closeSession } from "./browser";
+import { closeSession, currentBrowserNetworkPolicy, withBrowserNetworkPolicy } from "./browser";
 import { classifyFailure } from "./envelope";
-import { cancellationError, throwIfAborted } from "./errors";
+import { AgentscrapeNetworkPolicyError, cancellationError, throwIfAborted } from "./errors";
 import { loadRegistry, scrapeWithPreset, validateContentResult } from "./presets";
 import { redactDiagnostic } from "./redaction";
 import type { ScrapeSchema } from "./schemas";
@@ -52,67 +52,79 @@ export function checkInvariants(
   return violations;
 }
 export async function checkPresets(
-  options: { presets?: string[]; canaryPath?: string; signal?: AbortSignal } = {},
+  options: {
+    presets?: string[];
+    canaryPath?: string;
+    signal?: AbortSignal;
+    allowPrivateNetwork?: boolean | undefined;
+  } = {},
 ): Promise<CanaryEnvelope> {
-  const path = options.canaryPath ?? join(import.meta.dir, "../config/preset-canaries.yaml");
-  const parsed = parseYaml(readFileSync(path, "utf8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-    throw new Error("preset-canaries.yaml must be a mapping of preset name to config");
-  const canaries = parsed as Record<string, Canary>;
-  const names = options.presets?.length ? options.presets : Object.keys(canaries).sort();
-  const registry = loadRegistry();
-  const results: CanaryResult[] = [];
-  for (const name of names) {
-    throwIfAborted(options.signal);
-    const canary = canaries[name];
-    const preset = registry.byName(name);
-    if (!canary) {
-      results.push({ preset: name, status: "not_configured", detail: "no canary configured" });
-      continue;
+  return withBrowserNetworkPolicy(options.allowPrivateNetwork, async () => {
+    const path = options.canaryPath ?? join(import.meta.dir, "../config/preset-canaries.yaml");
+    const parsed = parseYaml(readFileSync(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("preset-canaries.yaml must be a mapping of preset name to config");
+    const canaries = parsed as Record<string, Canary>;
+    const names = options.presets?.length ? options.presets : Object.keys(canaries).sort();
+    const registry = loadRegistry();
+    const results: CanaryResult[] = [];
+    for (const name of names) {
+      throwIfAborted(options.signal);
+      const canary = canaries[name];
+      const preset = registry.byName(name);
+      if (!canary) {
+        results.push({ preset: name, status: "not_configured", detail: "no canary configured" });
+        continue;
+      }
+      if (!preset) {
+        results.push({
+          preset: name,
+          status: "not_configured",
+          detail: "preset not found in registry",
+        });
+        continue;
+      }
+      if (!canary.url) {
+        results.push({
+          preset: name,
+          status: "not_configured",
+          detail: "no canary url configured",
+        });
+        continue;
+      }
+      const session = `agentscrape-canary-${process.pid}-${name}`;
+      try {
+        const result = await scrapeWithPreset(canary.url, preset, {
+          session,
+          signal: options.signal,
+        });
+        if (preset.mode === "content") validateContentResult(result, preset);
+        const violations = checkInvariants(canary.invariants, result.structured, result.markdown);
+        results.push(
+          violations.length
+            ? { preset: name, status: "drift", detail: redactDiagnostic(violations.join("; ")) }
+            : { preset: name, status: "pass", detail: "" },
+        );
+      } catch (error) {
+        if (options.signal?.aborted) throw cancellationError(options.signal);
+        if (error instanceof AgentscrapeNetworkPolicyError) throw error;
+        const [failureClass, _retryable, evidence] = classifyFailure(error);
+        const status = [
+          "malformed_provider_output",
+          "empty_content",
+          "output_limit_exceeded",
+        ].includes(failureClass)
+          ? "drift"
+          : "operational_failure";
+        results.push({
+          preset: name,
+          status,
+          detail: `${failureClass}: ${redactDiagnostic(evidence)}`,
+        });
+      } finally {
+        if (currentBrowserNetworkPolicy()) await closeSession(session);
+      }
     }
-    if (!preset) {
-      results.push({
-        preset: name,
-        status: "not_configured",
-        detail: "preset not found in registry",
-      });
-      continue;
-    }
-    if (!canary.url) {
-      results.push({ preset: name, status: "not_configured", detail: "no canary url configured" });
-      continue;
-    }
-    const session = `agentscrape-canary-${process.pid}-${name}`;
-    try {
-      const result = await scrapeWithPreset(canary.url, preset, {
-        session,
-        signal: options.signal,
-      });
-      if (preset.mode === "content") validateContentResult(result, preset);
-      const violations = checkInvariants(canary.invariants, result.structured, result.markdown);
-      results.push(
-        violations.length
-          ? { preset: name, status: "drift", detail: redactDiagnostic(violations.join("; ")) }
-          : { preset: name, status: "pass", detail: "" },
-      );
-    } catch (error) {
-      if (options.signal?.aborted) throw cancellationError(options.signal);
-      const [failureClass, _retryable, evidence] = classifyFailure(error);
-      const status = [
-        "malformed_provider_output",
-        "empty_content",
-        "output_limit_exceeded",
-      ].includes(failureClass)
-        ? "drift"
-        : "operational_failure";
-      results.push({
-        preset: name,
-        status,
-        detail: `${failureClass}: ${redactDiagnostic(evidence)}`,
-      });
-    } finally {
-      await closeSession(session);
-    }
-  }
-  return { checked_at: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"), results };
+    return { checked_at: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"), results };
+  });
 }

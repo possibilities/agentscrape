@@ -1,5 +1,10 @@
 import * as cheerio from "cheerio";
-import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "../browser";
+import {
+  currentBrowserNetworkPolicy,
+  openPage,
+  requireAgentBrowserSuccess,
+  runAgentBrowser,
+} from "../browser";
 import { browserEval, browserEvalString } from "../browser-eval";
 import {
   AgentscrapeAuthError,
@@ -9,6 +14,8 @@ import {
   PresetDriftError,
 } from "../errors";
 import { convertHtml } from "../html";
+import { resolveNetworkAddress } from "../network-policy";
+import { pinnedHeader, requestPinnedHttp } from "../pinned-http";
 import { containsJwt, isSensitiveName } from "../redaction";
 import {
   ScrapeWarning,
@@ -310,13 +317,26 @@ async function prepareLinks(
         try {
           const timeout = AbortSignal.timeout(5000);
           const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
-          const response = await fetch(redirect, {
-            redirect: "manual",
-            headers: { "user-agent": "agentscrape/1.0" },
+          const url = new URL(redirect);
+          const address = await resolveNetworkAddress(url, {
+            allowPrivateNetwork: options.allowPrivateNetwork ?? currentBrowserNetworkPolicy(),
             signal,
           });
-          await response.body?.cancel();
-          const expanded = safeExpandedRedirect(response.headers.get("location") ?? "", redirect);
+          const response = await requestPinnedHttp({
+            url,
+            address,
+            method: "HEAD",
+            headers: {
+              connection: "close",
+              "user-agent": "agentscrape/1.0",
+            },
+            maxResponseBytes: 0,
+            signal,
+          });
+          const expanded = safeExpandedRedirect(
+            pinnedHeader(response.headers, "location") ?? "",
+            redirect,
+          );
           if (expanded) {
             $("a[href]").each((_index, anchor) => {
               if ($(anchor).attr("href") === redirect) $(anchor).attr("href", expanded);

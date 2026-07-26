@@ -62,9 +62,9 @@ describe("public TypeScript API", () => {
         new Response("# Direct\n\nBody", { headers: { "content-type": "text/markdown" } }),
     });
     try {
-      const value = (await fetchMarkdown(
-        `http://127.0.0.1:${server.port}/page.md`,
-      )) as ScrapeResult;
+      const value = (await fetchMarkdown(`http://127.0.0.1:${server.port}/page.md`, {
+        allowPrivateNetwork: true,
+      })) as ScrapeResult;
       expect(value.markdown).toBe("# Direct\n\nBody");
       expect(value.structured.toMarkdown()).toBe(value.markdown);
       expect(value.full_html).toBe("");
@@ -72,12 +72,40 @@ describe("public TypeScript API", () => {
       server.stop(true);
     }
   });
+  test("only immediate network-policy envelopes receive usage exit behavior", async () => {
+    const invalid = (await fetchMarkdown("not-a-url", {
+      envelope: true,
+    })) as ExtractionEnvelope;
+    expect(invalid.failure?.failure_class).toBe("invalid_request");
+    expect(envelopeExitCode(invalid)).toBe(1);
+
+    const denied = (await fetchMarkdown("https://example.com/page", {
+      envelope: true,
+      generic: true,
+    })) as ExtractionEnvelope;
+    expect(denied.failure?.failure_class).toBe("invalid_request");
+    expect(envelopeExitCode(denied)).toBe(2);
+    expect(JSON.parse(JSON.stringify(denied))).toEqual(denied);
+    expect(Object.keys(denied).sort()).toEqual([
+      "artifacts",
+      "extractor",
+      "failure",
+      "final_url",
+      "metadata",
+      "relations",
+      "requested_url",
+      "schema_version",
+      "status",
+    ]);
+    expect(envelopeExitCode(JSON.parse(JSON.stringify(denied)) as ExtractionEnvelope)).toBe(1);
+  });
   test("direct Markdown envelope retains version 1 and classified limits", async () => {
     const server = Bun.serve({ port: 0, fetch: () => new Response("12345") });
     try {
       const envelope = (await fetchMarkdown(`http://127.0.0.1:${server.port}/page.md`, {
         envelope: true,
         maxContentBytes: 4,
+        allowPrivateNetwork: true,
       })) as ExtractionEnvelope;
       expect(envelope.schema_version).toBe("1");
       expect(envelope.status).toBe("failure");
@@ -266,7 +294,7 @@ describe("public TypeScript API", () => {
     const callTimeRoot = join(root, "call-time-explicit");
     const result = await runSubmission(
       `process.env.AGENTSCRAPE_DATA_HOME = ${JSON.stringify(callTimeRoot)};
-console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", { summarize: true, frontmatter: { url: "https://example.com/a" } }));`,
+console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", { summarize: true, frontmatter: { url: "https://example.com/a" }, allowPrivateNetwork: false }));`,
       queueEnvironment(home, {
         AGENTSCRAPE_DATA_HOME: importTimeRoot,
         XDG_DATA_HOME: xdg,
@@ -283,6 +311,7 @@ console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", { summarize: t
       destination: "/tmp/a.md",
       summarize: true,
       frontmatter: { url: "https://example.com/a" },
+      allow_private_network: false,
     });
     expect(existsSync(join(importTimeRoot, "queue"))).toBeFalse();
     expect(existsSync(join(xdg, "agentscrape", "queue"))).toBeFalse();

@@ -37,7 +37,13 @@ export const FROZEN_DIR = queuePaths.frozen;
 export const RETRY_DIR = queuePaths.retry;
 export const FAILED_DIR = queuePaths.failed;
 export const RECONCILIATION_DIR = queuePaths.reconciliation;
-const JOB_FIELDS = new Set(["url", "destination", "summarize", "frontmatter"]);
+const JOB_FIELDS = new Set([
+  "url",
+  "destination",
+  "summarize",
+  "frontmatter",
+  "allow_private_network",
+]);
 const RECORD_FIELDS = new Set([...JOB_FIELDS, "indexer", "source"]);
 const FROZEN_LABELS = new Set(["agentbrain", "research-cache"]);
 const MAX_RECORD_BYTES = 256_000;
@@ -1400,6 +1406,7 @@ function parseStandaloneJob(raw: Buffer): Record<string, unknown> {
     !job.destination.trim() ||
     job.destination.length > 4096 ||
     ("summarize" in job && typeof job.summarize !== "boolean") ||
+    ("allow_private_network" in job && typeof job.allow_private_network !== "boolean") ||
     ("frontmatter" in job &&
       (!job.frontmatter || typeof job.frontmatter !== "object" || Array.isArray(job.frontmatter)))
   )
@@ -1411,7 +1418,13 @@ async function executeJob(
   signal: AbortSignal | undefined,
 ): Promise<void> {
   const destination = expandHome(String(job.destination));
-  await fetchMarkdown(String(job.url), { destination, signal });
+  await fetchMarkdown(String(job.url), {
+    destination,
+    signal,
+    ...(typeof job.allow_private_network === "boolean"
+      ? { allowPrivateNetwork: job.allow_private_network }
+      : {}),
+  });
   const frontmatter = { ...(job.frontmatter as Record<string, unknown> | undefined) };
   if (job.summarize) {
     const body = stripFrontmatter(readFileSync(destination, "utf8"));
@@ -1969,6 +1982,8 @@ function classify(area: RecordInfo["area"], path: string, raw: Uint8Array): Reco
   )
     return fail("invalid_destination");
   if ("summarize" in job && typeof job.summarize !== "boolean") return fail("invalid_summarize");
+  if ("allow_private_network" in job && typeof job.allow_private_network !== "boolean")
+    return fail("invalid_allow_private_network");
   if (
     job.frontmatter !== undefined &&
     (!job.frontmatter || typeof job.frontmatter !== "object" || Array.isArray(job.frontmatter))
@@ -1991,6 +2006,9 @@ function classify(area: RecordInfo["area"], path: string, raw: Uint8Array): Reco
     frontmatter,
     source: typeof job.source === "string" ? job.source.trim() : null,
     summarize: job.summarize === true,
+    ...(typeof job.allow_private_network === "boolean"
+      ? { allow_private_network: job.allow_private_network }
+      : {}),
   };
   if (JSON.stringify(evidence).length > 4500) return fail("evidence_too_large");
   let classification = "scrape-only";
