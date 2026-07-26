@@ -156,6 +156,8 @@ Official presets cover Anthropic, Claude, OpenAI, and Perplexity billing; ChatGP
 
 For deployment readiness, `bun run x-readiness -- --once` probes the PATH-resolved Agentscrape executable for both X presets and the timeline cursor flag. Each subprocess has a five-second deadline and bounded output. Every check prints one JSON status object; exit 0 means ready, 1 means present but not ready, and 2 means Agentscrape is missing. Without `--once`, use `--interval SECONDS` and optional `--timeout SECONDS` to watch.
 
+Under a responsive event loop, a subprocess timeout, cancellation, output overflow, or capture/wait terminal event is followed by at most a fixed 100 ms teardown grace, using local stdout/stderr cancellation rather than waiting indefinitely for pipe EOF. A requested timeout therefore settles in `timeoutMs` plus up to 100 ms plus event-loop scheduling. The runner sends `SIGKILL` to the original detached process group, but arbitrary descendants that create a new session with `setsid` may survive; those processes are outside containment and are not claimed as killed.
+
 ## Output contract
 
 `fetch-markdown` defaults to Markdown. `--json` and `--yaml` serialize structured output. `--envelope` emits the provider-neutral extraction envelope with schema version `1`, extractor identity `agentscrape`, one bounded UTF-8 Markdown artifact, normalized metadata/relations, or a classified failure. Existing envelope keys and enum shapes are stable.

@@ -18,7 +18,7 @@ import { loadRegistry } from "../src/presets";
 import { retryDelay } from "../src/queue";
 import { isSensitiveName, redactDiagnostic, sanitizeErrorInPlace } from "../src/redaction";
 import { DeepWikiSearchConversation, DeepWikiWikiPage } from "../src/schemas";
-import { runProcess } from "../src/subprocess";
+import { __testChildExitTeardown, runProcess } from "../src/subprocess";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -147,6 +147,66 @@ describe("bounded subprocess and cancellation", () => {
     expect(result.exitCode).toBe(124);
     expect(result.timedOut).toBeTrue();
   });
+  test("unrefs after rejected child-exit observation without marking it fulfilled", async () => {
+    const error = new Error("synthetic child.exited rejection");
+    const observed = await __testChildExitTeardown(Promise.reject(error));
+    expect(observed.rejectionCallbackInvoked).toBeTrue();
+    expect(observed.cause?.kind).toBe("child_exit_error");
+    expect(observed.cause?.error).toBe(error);
+    expect(Object.isFrozen(observed.cause)).toBeTrue();
+    expect(observed.exitFulfilled).toBeFalse();
+    expect(observed.unrefCalls).toBe(1);
+  });
+  test("does not unref after a fulfilled numeric child exit", async () => {
+    const observed = await __testChildExitTeardown(Promise.resolve(17));
+    expect(observed.exitFulfilled).toBeTrue();
+    expect(observed.exitCode).toBe(17);
+    expect(observed.rejectionCallbackInvoked).toBeFalse();
+    expect(observed.cause).toBeNull();
+    expect(observed.unrefCalls).toBe(0);
+  });
+  test("makes a non-preaborted zero timeout deterministic", async () => {
+    const result = await runProcess([process.execPath, "-e", 'process.stdout.write("too late")'], {
+      timeoutMs: 0,
+    });
+    expect(result.exitCode).toBe(124);
+    expect(result.stdout).toBe("");
+    expect(result.timedOut).toBeTrue();
+    expect(result.truncated).toBeFalse();
+  });
+  test("returns pre-aborted cancellation before missing-executable lookup", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runProcess([join(_temp(), "missing-executable")], {
+      signal: controller.signal,
+    });
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toBe("operation cancelled");
+    expect(result.timedOut).toBeFalse();
+    expect(result.truncated).toBeFalse();
+  });
+  test("lets an abort observed during listener registration beat a zero timeout", async () => {
+    const controller = new AbortController();
+    const signal = {
+      get aborted() {
+        return controller.signal.aborted;
+      },
+      addEventListener(_type: string, listener: Parameters<AbortSignal["addEventListener"]>[1]) {
+        controller.signal.addEventListener("abort", listener);
+        controller.abort();
+      },
+      removeEventListener(
+        _type: string,
+        listener: Parameters<AbortSignal["removeEventListener"]>[1],
+      ) {
+        controller.signal.removeEventListener("abort", listener);
+      },
+    } as unknown as AbortSignal;
+    const result = await runProcess(["sleep", "2"], { timeoutMs: 0, signal });
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toBe("operation cancelled");
+    expect(result.timedOut).toBeFalse();
+  });
   test("honors AbortSignal cancellation", async () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 10);
@@ -159,6 +219,14 @@ describe("bounded subprocess and cancellation", () => {
       maxOutputBytes: 10,
     });
     expect(result.stdout).toBe("x".repeat(10));
+    expect(result.truncated).toBeTrue();
+  });
+  test("treats the first nonempty byte as overflow when the output cap is zero", async () => {
+    const result = await runProcess(["printf", "%s", "x"], { maxOutputBytes: 0 });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+    expect(result.timedOut).toBeFalse();
     expect(result.truncated).toBeTrue();
   });
 });
