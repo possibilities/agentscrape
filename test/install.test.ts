@@ -9,9 +9,12 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -192,11 +195,29 @@ async function previousCheckout(persistent = false): Promise<string> {
   return realpathSync(checkout);
 }
 
+function normalizeCopiedSymlinks(path: string): void {
+  const info = lstatSync(path);
+  if (info.isSymbolicLink()) {
+    const target = readlinkSync(path);
+    unlinkSync(path);
+    symlinkSync(target, path);
+    return;
+  }
+  if (!info.isDirectory()) return;
+  const mode = info.mode & 0o777;
+  if (!(mode & 0o200)) chmodSync(path, mode | 0o200);
+  for (const name of readdirSync(path)) normalizeCopiedSymlinks(join(path, name));
+  if (!(mode & 0o200)) chmodSync(path, mode);
+}
+
 function copyTree(source: string, destination: string): void {
   cpSync(source, destination, {
     recursive: true,
     mode: fsConstants.COPYFILE_FICLONE,
   });
+  // Node may preserve hard-linked symlink inodes on Linux. Recreate each link so the fixture
+  // matches the production install and Agentbuilds' required nlink=1 snapshot contract.
+  normalizeCopiedSymlinks(destination);
 }
 
 function preseedSuiteSnapshots(
