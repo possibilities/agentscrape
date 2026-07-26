@@ -22,7 +22,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { fetchMarkdown, resetBrowserUnavailableCache } from "./api";
+import { fetchMarkdown } from "./api";
 import { AgentscrapeUpstreamDownError, cancellationError, throwIfAborted } from "./errors";
 import { resolveQueuePaths } from "./queue-paths";
 import { isSensitiveName, JWT_RE } from "./redaction";
@@ -1411,7 +1411,6 @@ async function executeJob(
   signal: AbortSignal | undefined,
 ): Promise<void> {
   const destination = expandHome(String(job.destination));
-  resetBrowserUnavailableCache();
   await fetchMarkdown(String(job.url), { destination, signal });
   const frontmatter = { ...(job.frontmatter as Record<string, unknown> | undefined) };
   if (job.summarize) {

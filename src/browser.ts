@@ -1,9 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import type { BigIntStats } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { isMap, parseDocument } from "yaml";
 import {
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
@@ -14,6 +23,7 @@ import {
   asError,
   throwIfAborted,
 } from "./errors";
+import { boundUtf8, redactDiagnostic } from "./redaction";
 import { findExecutable, type ProcessResult, runProcess } from "./subprocess";
 
 export const AGENT_BROWSER_BIN_ENV = "AGENTSCRAPE_AGENT_BROWSER_BIN";
@@ -21,7 +31,13 @@ export const AGENT_BROWSER_TIMEOUT_ENV = "AGENTSCRAPE_AGENT_BROWSER_TIMEOUT";
 export const AGENT_BROWSER_TIMEOUT_PREFIX = "agent-browser timed out after ";
 export const UPSTREAM_DOWN_PREFIX = "upstream down: ";
 export const CLAUDE_APP_READY_SELECTOR = "[data-testid='account-settings'], main";
-let unavailableReason: string | null = null;
+const OUTAGE_CACHE_TTL_MS = 30_000;
+const OUTAGE_CACHE_MAX_ENTRIES = 64;
+const HEALTH_FRESHNESS_MS = 15 * 60_000;
+const HEALTH_FUTURE_SKEW_MS = 60_000;
+const HEALTH_MAX_BYTES = 16 * 1024;
+const UPSTREAM_REASON_MAX_BYTES = 1024;
+const outageCache = new Map<string, { reason: string; expiresAtMs: number }>();
 export interface BrowserSessionScope {
   name: string;
   owned: boolean;
@@ -59,21 +75,194 @@ function timeoutMs(override?: number): number {
 function runtimeHome(): string {
   return process.env.HOME || homedir();
 }
-function knownUpstreamDown(): string | null {
-  const path = join(runtimeHome(), ".local/state/browserctl/check-health-state.yaml");
-  if (!existsSync(path)) return null;
+function healthStatePath(home: string): string {
+  return join(home, ".local/state/browserctl/check-health-state.yaml");
+}
+interface Rfc3339Timestamp {
+  floorMs: number;
+  subMsNonzero: boolean;
+}
+function parseRfc3339(value: string): Rfc3339Timestamp | null {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/.exec(
+      value,
+    );
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[10] === undefined ? 0 : Number(match[10]);
+  const offsetMinute = match[11] === undefined ? 0 : Number(match[11]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  )
+    return null;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (day < 1 || day > daysInMonth[month - 1]!) return null;
+
+  // Convert the civil date using integer arithmetic so fractional precision is retained
+  // independently from Date's millisecond-only representation.
+  const adjustedYear = year - (month <= 2 ? 1 : 0);
+  const era = Math.floor(adjustedYear / 400);
+  const yearOfEra = adjustedYear - era * 400;
+  const adjustedMonth = month + (month > 2 ? -3 : 9);
+  const dayOfYear = Math.floor((153 * adjustedMonth + 2) / 5) + day - 1;
+  const dayOfEra =
+    yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
+  const epochDays = era * 146_097 + dayOfEra - 719_468;
+  const fraction = match[7] ?? "";
+  const milliseconds = Number(fraction.padEnd(3, "0").slice(0, 3));
+  const localMs = ((epochDays * 24 + hour) * 60 * 60 + minute * 60 + second) * 1000 + milliseconds;
+  const offsetMs = (offsetHour * 60 + offsetMinute) * 60_000;
+  const floorMs = localMs + (match[9] === "-" ? offsetMs : -offsetMs);
+  return {
+    floorMs,
+    subMsNonzero: /[1-9]/.test(fraction.slice(3)),
+  };
+}
+type HealthStat = BigIntStats;
+function sameHealthStat(left: HealthStat, right: HealthStat): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs &&
+    left.uid === right.uid &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink
+  );
+}
+function secureHealthStat(value: HealthStat): boolean {
+  const getuid = process.getuid;
+  return (
+    value.isFile() &&
+    value.nlink === 1n &&
+    (value.mode & 0o022n) === 0n &&
+    value.size >= 1n &&
+    value.size <= BigInt(HEALTH_MAX_BYTES) &&
+    (!getuid || value.uid === BigInt(getuid.call(process)))
+  );
+}
+function readHealthState(path: string): Record<string, unknown> | null {
+  let descriptor: number;
   try {
-    const state = parseYaml(readFileSync(path, "utf8")) as Record<string, unknown>;
-    if (state.is_down !== true || typeof state.last_run_at !== "string") return null;
-    const age = Date.now() - new Date(state.last_run_at).getTime();
-    if (!Number.isFinite(age) || age > 15 * 60_000) return null;
-    return `browserctl: ${typeof state.reason === "string" ? state.reason : "browserctl is down"}`;
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch {
     return null;
   }
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    const namedBefore = lstatSync(path, { bigint: true });
+    if (
+      !secureHealthStat(before) ||
+      !secureHealthStat(namedBefore) ||
+      namedBefore.isSymbolicLink() ||
+      !sameHealthStat(before, namedBefore)
+    )
+      return null;
+    const raw = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < raw.byteLength) {
+      const count = readSync(descriptor, raw, offset, raw.byteLength - offset, offset);
+      if (count === 0) return null;
+      offset += count;
+    }
+    const after = fstatSync(descriptor, { bigint: true });
+    const namedAfter = lstatSync(path, { bigint: true });
+    if (
+      !secureHealthStat(after) ||
+      !secureHealthStat(namedAfter) ||
+      namedAfter.isSymbolicLink() ||
+      !sameHealthStat(before, after) ||
+      !sameHealthStat(namedBefore, namedAfter) ||
+      !sameHealthStat(after, namedAfter)
+    )
+      return null;
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    const document = parseDocument(text, { uniqueKeys: true });
+    if (document.errors.length > 0 || !isMap(document.contents)) return null;
+    const state = document.toJS({ maxAliasCount: 0 }) as unknown;
+    return state && typeof state === "object" && !Array.isArray(state)
+      ? (state as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      closeSync(descriptor);
+    } catch {
+      // This advisory reader is fail-open, including when descriptor cleanup itself fails.
+    }
+  }
+}
+function upstreamReason(value: string): string {
+  return boundUtf8(
+    `${UPSTREAM_DOWN_PREFIX}${redactDiagnostic(value, UPSTREAM_REASON_MAX_BYTES)}`,
+    UPSTREAM_REASON_MAX_BYTES,
+  );
+}
+function knownUpstreamDown(
+  path: string,
+  now: number,
+): { reason: string; expiresAtMs: number } | null {
+  const state = readHealthState(path);
+  if (state?.is_down !== true || typeof state.last_run_at !== "string") return null;
+  const observedAt = parseRfc3339(state.last_run_at);
+  if (observedAt === null) return null;
+  const staleBoundaryMs = now - HEALTH_FRESHNESS_MS;
+  const futureBoundaryMs = now + HEALTH_FUTURE_SKEW_MS;
+  if (
+    observedAt.floorMs < staleBoundaryMs ||
+    observedAt.floorMs > futureBoundaryMs ||
+    (observedAt.floorMs === futureBoundaryMs && observedAt.subMsNonzero)
+  )
+    return null;
+  const rawDetail =
+    typeof state.reason === "string" && state.reason.trim() ? state.reason : "browserctl is down";
+  const redactedDetail = redactDiagnostic(rawDetail, UPSTREAM_REASON_MAX_BYTES);
+  const detail =
+    redactedDetail === "no additional diagnostic" ? "browserctl is down" : redactedDetail;
+  return {
+    reason: upstreamReason(`browserctl: ${detail}`),
+    expiresAtMs: Math.min(
+      now + OUTAGE_CACHE_TTL_MS,
+      observedAt.floorMs + HEALTH_FRESHNESS_MS + (observedAt.subMsNonzero ? 1 : 0),
+    ),
+  };
+}
+function outageKey(session: string, profile: string | null, browser: string, path: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify([session, profile, browser, path]))
+    .digest("hex");
+}
+function pruneOutageCache(now: number): void {
+  for (const [key, value] of outageCache) {
+    if (now >= value.expiresAtMs) outageCache.delete(key);
+  }
+}
+function setOutage(key: string, value: { reason: string; expiresAtMs: number }, now: number): void {
+  pruneOutageCache(now);
+  outageCache.delete(key);
+  outageCache.set(key, value);
+  while (outageCache.size > OUTAGE_CACHE_MAX_ENTRIES) {
+    const oldest = outageCache.keys().next().value;
+    if (oldest === undefined) break;
+    outageCache.delete(oldest);
+  }
 }
 export function resetBrowserUnavailableCache(): void {
-  unavailableReason = null;
+  outageCache.clear();
 }
 export function currentBrowserProfile(): string | null {
   return context().profile;
@@ -113,10 +302,10 @@ export async function withBrowserSession<T>(
     if (owner && scope.used) await closeSession(capturedName);
   }
 }
-function resolveBrowser(): string {
+function resolveBrowser(home = runtimeHome()): string {
   const override = process.env[AGENT_BROWSER_BIN_ENV];
   if (override) return findExecutable(override) || override;
-  const managed = join(runtimeHome(), ".local/bin/agent-browser");
+  const managed = join(home, ".local/bin/agent-browser");
   return (
     (existsSync(managed) && findExecutable(managed)) ||
     findExecutable("agent-browser") ||
@@ -134,24 +323,31 @@ export async function runAgentBrowser(
   const selectedSession = resolveBrowserSession(session, active);
   const selectedSignal = signal ?? active.signal;
   throwIfAborted(selectedSignal);
-  if (unavailableReason === null) {
-    const reason = knownUpstreamDown();
-    if (reason) unavailableReason = `${UPSTREAM_DOWN_PREFIX}${reason}`;
+  const profile = browserProfile || active.profile;
+  const home = runtimeHome();
+  const path = healthStatePath(home);
+  const browser = resolveBrowser(home);
+  const argv = [browser, "--session", selectedSession];
+  if (profile) argv.push("--browserctl-profile", profile);
+  argv.push(...args);
+  const key = outageKey(selectedSession, profile, browser, path);
+  const now = Date.now();
+  pruneOutageCache(now);
+  let outage = outageCache.get(key) ?? null;
+  if (!outage) {
+    outage = knownUpstreamDown(path, now);
+    if (outage) setOutage(key, outage, now);
   }
-  if (unavailableReason !== null) {
+  if (outage) {
     return {
-      argv: ["agent-browser"],
+      argv,
       exitCode: 1,
       stdout: "",
-      stderr: unavailableReason,
+      stderr: outage.reason,
       timedOut: false,
       truncated: false,
     };
   }
-  const argv = [resolveBrowser(), "--session", selectedSession];
-  const profile = browserProfile || active.profile;
-  if (profile) argv.push("--browserctl-profile", profile);
-  argv.push(...args);
   let result: ProcessResult;
   try {
     result = await runProcess(argv, {
@@ -169,14 +365,19 @@ export async function runAgentBrowser(
     );
   }
   throwIfAborted(selectedSignal);
+  if (result.exitCode === 0) outageCache.delete(key);
   if (result.timedOut) {
     result.stderr = `${AGENT_BROWSER_TIMEOUT_PREFIX}${timeoutMs(timeoutOverrideMs) / 1000}s: ${argv.join(" ")}`;
   } else if (
     result.exitCode !== 0 &&
+    !isCancelledResult(result) &&
+    !isTimeoutResult(result) &&
     result.stderr.includes("failed to acquire browser from browserctl")
   ) {
-    unavailableReason = `${UPSTREAM_DOWN_PREFIX}${result.stderr.trim()}`;
-    result.stderr = unavailableReason;
+    const reason = upstreamReason(result.stderr.trim());
+    const outageNow = Date.now();
+    setOutage(key, { reason, expiresAtMs: outageNow + OUTAGE_CACHE_TTL_MS }, outageNow);
+    result.stderr = reason;
   }
   return result;
 }
