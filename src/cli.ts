@@ -755,7 +755,9 @@ async function queueCommand(
     if (parsed.positionals.length)
       throw new AgentscrapeUsageError("process-queue takes no positional arguments");
     const result = await processQueue(signal ? { signal } : {});
-    console.error(`processed=${result.processed} failed=${result.failed} frozen=${result.frozen}`);
+    console.error(
+      `processed=${result.processed} failed=${result.failed} frozen=${result.frozen} retry_scheduled=${result.retry_scheduled} retry_waiting=${result.retry_waiting} retry_exhausted=${result.retry_exhausted}`,
+    );
     return 0;
   }
   const parsed = parseArgs(

@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -289,7 +290,7 @@ describe("CLI offline smoke suite", () => {
     expect(inventory.code).toBe(0);
     expect(JSON.parse(inventory.stdout).total_records).toBe(0);
   });
-  test("queue inventory redacts malformed records and processing preserves frozen records", async () => {
+  test("queue inventory redacts malformed records and processing drains frozen records", async () => {
     const home = temp();
     const queue = join(home, ".local/share/agentscrape/queue");
     mkdirSync(queue, { recursive: true });
@@ -307,7 +308,11 @@ describe("CLI offline smoke suite", () => {
     expect(inventory.stdout).not.toContain("TOP-SECRET-MALFORMED");
     const processed = await command(["process-queue"], { home });
     expect(processed.code).toBe(0);
-    expect(existsSync(join(queue, "indexed.yaml"))).toBeTrue();
+    expect(existsSync(join(queue, "indexed.yaml"))).toBeFalse();
+    expect(readdirSync(join(home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
+    expect(processed.stderr).toContain(
+      "processed=0 failed=1 frozen=1 retry_scheduled=0 retry_waiting=0 retry_exhausted=0",
+    );
     expect(existsSync(join(home, ".local/share/agentscrape/failed/malformed.yaml"))).toBeTrue();
   });
   test("usage failures use exit 2 across an argv compatibility table", async () => {

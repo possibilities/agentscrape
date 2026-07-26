@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { resolveDataHome } from "../src/queue";
 
 const root = join(import.meta.dir, "..");
@@ -57,6 +57,44 @@ function queueRecord(queue: string, name = "indexed.yaml"): string {
     ].join("\n"),
   );
   return path;
+}
+
+function pendingGeneration(name: string, raw: Uint8Array): string {
+  return createHash("sha256")
+    .update(Buffer.concat([Buffer.from(`pending\0${name}\0`), Buffer.from(raw)]))
+    .digest("hex");
+}
+
+function publicationTemp(directory: string): string {
+  return join(directory, ".agentscrape-publish-00000000-0000-4000-8000-000000000017.tmp");
+}
+
+function writeDueRetry(
+  value: ReturnType<typeof fixture>,
+  name: string,
+  destination: string,
+): { path: string; raw: Buffer; generationId: string } {
+  const raw = Buffer.from(`url: https://example.com/${name}\ndestination: ${destination}\n`);
+  const generationId = pendingGeneration(name, raw);
+  const directory = join(value.home, ".local/share/agentscrape/retry");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+  const path = join(directory, `${generationId}--attempt-1.json`);
+  const envelope = {
+    version: 1,
+    state: "retry",
+    generationId,
+    logicalArea: "pending",
+    originalFilename: name,
+    rawByteSize: raw.byteLength,
+    rawSha256: createHash("sha256").update(raw).digest("hex"),
+    rawBase64: raw.toString("base64"),
+    completedFailures: 1,
+    nextAttemptAtMs: 0,
+    policy: { initialDelaySeconds: 1, maxDelaySeconds: 60, maxAttempts: 5 },
+  };
+  writeFileSync(path, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+  return { path, raw, generationId };
 }
 
 function acknowledgement(overrides: Record<string, unknown> = {}): string {
@@ -125,7 +163,7 @@ async function reconcile(
 }
 
 async function waitFor(path: string): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
     if (existsSync(path)) return;
     await Bun.sleep(10);
   }
@@ -177,6 +215,716 @@ describe("queue data root resolution", () => {
       );
     });
   }
+});
+
+describe("frozen and durable retry queue states", () => {
+  test("drains indexed YAML into a strict frozen envelope and reconciles its logical identity", async () => {
+    const value = fixture();
+    const source = queueRecord(value.queue, "legacy.yaml");
+    const original = readFileSync(source);
+    const processed = await finish(startProcess(value));
+    expect(processed.code, processed.stderr).toBe(0);
+    expect(processed.stderr).toContain("frozen=1");
+    expect(existsSync(source)).toBeFalse();
+
+    const frozenDirectory = join(value.home, ".local/share/agentscrape/frozen");
+    const frozenName = readdirSync(frozenDirectory)[0]!;
+    const frozenPath = join(frozenDirectory, frozenName);
+    expect(lstatSync(frozenDirectory).mode & 0o777).toBe(0o700);
+    expect(lstatSync(frozenPath).mode & 0o777).toBe(0o600);
+    const envelopeText = readFileSync(frozenPath, "utf8");
+    const envelope = JSON.parse(envelopeText);
+    expect(envelopeText).toBe(`${JSON.stringify(envelope)}\n`);
+    expect(envelope).toMatchObject({
+      version: 1,
+      state: "frozen",
+      logicalArea: "pending",
+      originalFilename: "legacy.yaml",
+      rawByteSize: original.byteLength,
+    });
+    expect(Buffer.from(envelope.rawBase64, "base64")).toEqual(original);
+
+    const applied = await reconcile(value, acknowledgement());
+    expect(applied.code, applied.stderr).toBe(0);
+    expect(existsSync(frozenPath)).toBeFalse();
+    const outcomeName = outcomeFiles(value.reconciliation)[0]!;
+    const manifest = JSON.parse(
+      readFileSync(join(value.reconciliation, "outcomes", outcomeName), "utf8"),
+    );
+    expect(manifest.legacy_record).toMatchObject({
+      area: "pending",
+      filename: "legacy.yaml",
+      sha256: envelope.rawSha256,
+      byte_size: original.byteLength,
+    });
+    expect(readFileSync(join(value.reconciliation, manifest.archive_record))).toEqual(original);
+    const stable = await finish(
+      Bun.spawn([process.execPath, "src/cli.ts", "reconcile-queue"], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home, PATH: `${value.bin}:${process.env.PATH ?? ""}` },
+      }),
+    );
+    expect(stable.code, stable.stderr).toBe(0);
+    expect(JSON.parse(stable.stdout).total_records).toBe(0);
+  });
+
+  test("schedules an immutable retry, waits without provider work, then resumes when due", async () => {
+    const value = fixture();
+    const destination = join(value.home, "retry.md");
+    writeFileSync(
+      join(value.queue, "retry.yaml"),
+      `url: https://example.com/retry\ndestination: ${destination}\n`,
+    );
+    const outageScript = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({',
+      '  fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); },',
+      "  resetBrowserUnavailableCache() {},",
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?retry-schedule-test");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 1000 })));",
+    ].join("\n");
+    const outage = await finish(
+      Bun.spawn([process.execPath, "-e", outageScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_INITIAL_DELAY_SECONDS: "0.1234",
+        },
+      }),
+    );
+    expect(outage.code, outage.stderr).toBe(0);
+    expect(JSON.parse(outage.stdout)).toMatchObject({
+      processed: 0,
+      failed: 0,
+      retry_scheduled: 1,
+      retry_waiting: 0,
+    });
+    const retryDirectory = join(value.home, ".local/share/agentscrape/retry");
+    const retryPath = join(retryDirectory, readdirSync(retryDirectory)[0]!);
+    const retry = JSON.parse(readFileSync(retryPath, "utf8"));
+    expect(retry).toMatchObject({
+      state: "retry",
+      completedFailures: 1,
+      nextAttemptAtMs: 1124,
+      policy: { initialDelaySeconds: 0.1234, maxDelaySeconds: 60, maxAttempts: 5 },
+    });
+
+    // Recreate the exact ready predecessor to model a crash after retry publication but before
+    // ready retirement. A not-due pass must still drain it so QueueDirectories can go idle.
+    writeFileSync(
+      join(value.queue, "retry.yaml"),
+      `url: https://example.com/retry\ndestination: ${destination}\n`,
+    );
+    const waitingScript = [
+      'import { mock } from "bun:test";',
+      'mock.module("./src/api.ts", () => ({',
+      '  fetchMarkdown: async () => { throw new Error("provider must not run"); },',
+      '  resetBrowserUnavailableCache() { throw new Error("cache must not reset"); },',
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?retry-wait-test");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 1123 })));",
+    ].join("\n");
+    const waiting = await finish(
+      Bun.spawn([process.execPath, "-e", waitingScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(waiting.code, waiting.stderr).toBe(0);
+    expect(JSON.parse(waiting.stdout).retry_waiting).toBe(1);
+    expect(existsSync(retryPath)).toBeTrue();
+    expect(existsSync(join(value.queue, "retry.yaml"))).toBeFalse();
+
+    const dueScript = [
+      'import { mock } from "bun:test";',
+      'import { writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({',
+      "  fetchMarkdown: async (_url, options) => { writeFileSync(options.destination, '# retry success\\n'); },",
+      "  resetBrowserUnavailableCache() {},",
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?retry-due-test");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 1124 })));",
+    ].join("\n");
+    const due = await finish(
+      Bun.spawn([process.execPath, "-e", dueScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(due.code, due.stderr).toBe(0);
+    expect(JSON.parse(due.stdout).processed).toBe(1);
+    expect(existsSync(retryPath)).toBeFalse();
+    expect(readFileSync(destination, "utf8")).toBe("# retry success\n");
+  });
+
+  test("continues ready work after a sorted outage and preserves the captured retry policy", async () => {
+    const value = fixture();
+    const laterDestination = join(value.home, "later.md");
+    writeFileSync(
+      join(value.queue, "a-outage.yaml"),
+      `url: https://example.com/outage\ndestination: ${join(value.home, "outage.md")}\n`,
+    );
+    writeFileSync(
+      join(value.queue, "b-later.yaml"),
+      `url: https://example.com/later\ndestination: ${laterDestination}\n`,
+    );
+    const firstScript = [
+      'import { mock } from "bun:test";',
+      'import { writeFileSync } from "node:fs";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({',
+      "  fetchMarkdown: async (url, options) => {",
+      '    if (url.endsWith("/outage")) throw new AgentscrapeUpstreamDownError("down");',
+      '    writeFileSync(options.destination, "# later\\n");',
+      "  },",
+      "  resetBrowserUnavailableCache() {},",
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?ready-hol");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 10 })));",
+    ].join("\n");
+    const first = await finish(
+      Bun.spawn([process.execPath, "-e", firstScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_INITIAL_DELAY_SECONDS: "0.1",
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_DELAY_SECONDS: "0.2",
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS: "3",
+        },
+      }),
+    );
+    expect(first.code, first.stderr).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({ processed: 1, retry_scheduled: 1 });
+    expect(readFileSync(laterDestination, "utf8")).toBe("# later\n");
+
+    const retryDirectory = join(value.home, ".local/share/agentscrape/retry");
+    const firstRetry = join(retryDirectory, readdirSync(retryDirectory)[0]!);
+    const secondScript = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({',
+      '  fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("still down"); },',
+      "  resetBrowserUnavailableCache() {},",
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?persisted-policy");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 110 })));",
+    ].join("\n");
+    const second = await finish(
+      Bun.spawn([process.execPath, "-e", secondScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS: "1",
+        },
+      }),
+    );
+    expect(second.code, second.stderr).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({ retry_scheduled: 1, retry_exhausted: 0 });
+    expect(existsSync(firstRetry)).toBeFalse();
+    const persisted = JSON.parse(
+      readFileSync(join(retryDirectory, readdirSync(retryDirectory)[0]!), "utf8"),
+    );
+    expect(persisted).toMatchObject({
+      completedFailures: 2,
+      nextAttemptAtMs: 310,
+      policy: { initialDelaySeconds: 0.1, maxDelaySeconds: 0.2, maxAttempts: 3 },
+    });
+  });
+
+  test("exhausts the persisted maximum into exact deterministic failed evidence", async () => {
+    const value = fixture();
+    const name = "exhaust.yaml";
+    const destination = join(value.home, "exhaust.md");
+    const raw = Buffer.from(`url: https://example.com/exhaust\ndestination: ${destination}\n`);
+    writeFileSync(join(value.queue, name), raw);
+    const script = (query: string, now: number) =>
+      [
+        'import { mock } from "bun:test";',
+        'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+        'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); }, resetBrowserUnavailableCache() {} }));',
+        `const { processQueue } = await import("./src/queue.ts?${query}");`,
+        `process.stdout.write(JSON.stringify(await processQueue({ now: () => ${now} })));`,
+      ].join("\n");
+    const first = await finish(
+      Bun.spawn([process.execPath, "-e", script("exhaust-first", 0)], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS: "2",
+        },
+      }),
+    );
+    expect(first.code, first.stderr).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({ retry_scheduled: 1, retry_exhausted: 0 });
+
+    const exhausted = await finish(
+      Bun.spawn([process.execPath, "-e", script("exhaust-final", 1000)], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          // The envelope's persisted maximum remains authoritative.
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS: "99",
+        },
+      }),
+    );
+    expect(exhausted.code, exhausted.stderr).toBe(0);
+    expect(JSON.parse(exhausted.stdout)).toMatchObject({
+      failed: 1,
+      retry_scheduled: 0,
+      retry_exhausted: 1,
+    });
+    expect(readdirSync(join(value.home, ".local/share/agentscrape/retry"))).toEqual([]);
+    const id = pendingGeneration(name, raw);
+    const terminal = join(
+      value.home,
+      ".local/share/agentscrape/failed",
+      `exhaust--failed-${id}.yaml`,
+    );
+    expect(readFileSync(terminal)).toEqual(raw);
+    expect(lstatSync(terminal).mode & 0o777).toBe(0o600);
+  });
+
+  test("rejects an explicit out-of-range retry maximum without retiring ready work", async () => {
+    const value = fixture();
+    const source = join(value.queue, "invalid-policy.yaml");
+    writeFileSync(
+      source,
+      `url: https://example.com/down\ndestination: ${join(value.home, "down.md")}\n`,
+    );
+    const script = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({',
+      '  fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); },',
+      "  resetBrowserUnavailableCache() {},",
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?invalid-max-attempts");',
+      "await processQueue();",
+    ].join("\n");
+    const processed = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS: "101",
+        },
+      }),
+    );
+    expect(processed.code).toBe(1);
+    expect(processed.stderr).toContain("must be an integer between 1 and 100");
+    expect(existsSync(source)).toBeTrue();
+  });
+
+  test("ready and retry crash duplicates share one generation claim across two workers", async () => {
+    const value = fixture();
+    const name = "duplicate.yaml";
+    const destination = join(value.home, "duplicate.md");
+    const source = join(value.queue, name);
+    const raw = Buffer.from(`url: https://example.com/duplicate\ndestination: ${destination}\n`);
+    writeFileSync(source, raw);
+    const scheduleScript = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?duplicate-schedule");',
+      "await processQueue({ now: () => 0 });",
+    ].join("\n");
+    expect(
+      (
+        await finish(
+          Bun.spawn([process.execPath, "-e", scheduleScript], {
+            cwd: root,
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, HOME: value.home },
+          }),
+        )
+      ).code,
+    ).toBe(0);
+    writeFileSync(source, raw);
+    const calls = join(value.home, "provider-calls");
+    const workerScript = [
+      'import { mock } from "bun:test";',
+      'import { appendFileSync, writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({',
+      '  fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, "call\\n"); writeFileSync(options.destination, "done\\n"); },',
+      "  resetBrowserUnavailableCache() {},",
+      "}));",
+      'const { processQueue } = await import("./src/queue.ts?duplicate-worker");',
+      "await processQueue({ now: () => 1000 });",
+    ].join("\n");
+    const workers = [0, 1].map(() =>
+      finish(
+        Bun.spawn([process.execPath, "-e", workerScript], {
+          cwd: root,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, HOME: value.home, TEST_CALLS: calls },
+        }),
+      ),
+    );
+    const completed = await Promise.all(workers);
+    expect(
+      completed.map((item) => item.code),
+      completed.map((item) => item.stderr).join("\n"),
+    ).toEqual([0, 0]);
+    expect(readFileSync(calls, "utf8")).toBe("call\n");
+    expect(existsSync(source)).toBeFalse();
+    expect(readdirSync(join(value.home, ".local/share/agentscrape/retry"))).toEqual([]);
+  });
+
+  test("a canonical higher retry removes all lower predecessors before succeeding", async () => {
+    const value = fixture();
+    const name = "chain.yaml";
+    const destination = join(value.home, "chain.md");
+    const source = join(value.queue, name);
+    const raw = Buffer.from(`url: https://example.com/chain\ndestination: ${destination}\n`);
+    writeFileSync(source, raw);
+    const scheduleScript = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?chain-schedule");',
+      "await processQueue({ now: () => 0 });",
+    ].join("\n");
+    const scheduled = await finish(
+      Bun.spawn([process.execPath, "-e", scheduleScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(scheduled.code, scheduled.stderr).toBe(0);
+    const retryDirectory = join(value.home, ".local/share/agentscrape/retry");
+    const lowerName = readdirSync(retryDirectory)[0]!;
+    const lower = JSON.parse(readFileSync(join(retryDirectory, lowerName), "utf8"));
+    const higher = { ...lower, completedFailures: 2, nextAttemptAtMs: 0 };
+    writeFileSync(
+      join(retryDirectory, `${higher.generationId}--attempt-2.json`),
+      `${JSON.stringify(higher)}\n`,
+      { mode: 0o600 },
+    );
+    const calls = join(value.home, "chain-calls");
+    const successScript = [
+      'import { mock } from "bun:test";',
+      'import { appendFileSync, writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, "call\\n"); writeFileSync(options.destination, "done\\n"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?chain-success");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 0 })));",
+    ].join("\n");
+    const success = await finish(
+      Bun.spawn([process.execPath, "-e", successScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home, TEST_CALLS: calls },
+      }),
+    );
+    expect(success.code, success.stderr).toBe(0);
+    expect(JSON.parse(success.stdout).processed).toBe(1);
+    expect(readFileSync(calls, "utf8")).toBe("call\n");
+    expect(readdirSync(retryDirectory)).toEqual([]);
+  });
+
+  test("cancellation leaves the due authoritative retry and malformed envelopes fail after ready work", async () => {
+    const value = fixture();
+    const retrySource = join(value.queue, "cancel-retry.yaml");
+    writeFileSync(
+      retrySource,
+      `url: https://example.com/cancel-retry\ndestination: ${join(value.home, "cancel-retry.md")}\n`,
+    );
+    const scheduleScript = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?cancel-schedule");',
+      "await processQueue({ now: () => 0 });",
+    ].join("\n");
+    expect(
+      (
+        await finish(
+          Bun.spawn([process.execPath, "-e", scheduleScript], {
+            cwd: root,
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, HOME: value.home },
+          }),
+        )
+      ).code,
+    ).toBe(0);
+    const retryDirectory = join(value.home, ".local/share/agentscrape/retry");
+    const retryPath = join(retryDirectory, readdirSync(retryDirectory)[0]!);
+    const cancelScript = [
+      'import { mock } from "bun:test";',
+      "const controller = new AbortController();",
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { controller.abort("cancelled"); throw new Error("cancelled"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?cancel-due-retry");',
+      "await processQueue({ signal: controller.signal, now: () => 1000 });",
+    ].join("\n");
+    const cancelled = await finish(
+      Bun.spawn([process.execPath, "-e", cancelScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(cancelled.code).toBe(1);
+    expect(existsSync(retryPath)).toBeTrue();
+
+    const destination = join(value.home, "ready-before-malformed.md");
+    writeFileSync(
+      join(value.queue, "ready-before-malformed.yaml"),
+      `url: https://example.com/ready\ndestination: ${destination}\n`,
+    );
+    writeFileSync(join(retryDirectory, "malformed.json"), "not canonical json\n", { mode: 0o600 });
+    const malformedScript = [
+      'import { mock } from "bun:test";',
+      'import { writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { writeFileSync(options.destination, "ready\\n"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?malformed-after-ready");',
+      "await processQueue({ now: () => 0 });",
+    ].join("\n");
+    const malformed = await finish(
+      Bun.spawn([process.execPath, "-e", malformedScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(malformed.code).toBe(1);
+    expect(readFileSync(destination, "utf8")).toBe("ready\n");
+    expect(existsSync(join(value.queue, "ready-before-malformed.yaml"))).toBeFalse();
+    expect(existsSync(join(retryDirectory, "malformed.json"))).toBeTrue();
+  });
+
+  test("strict terminal publication recovery retires ready without a second provider call", async () => {
+    const value = fixture();
+    const name = "terminal.yaml";
+    const source = join(value.queue, name);
+    const raw = Buffer.from(
+      `url: https://example.com/terminal\ndestination: ${join(value.home, "terminal.md")}\n`,
+    );
+    writeFileSync(source, raw);
+    const firstCalls = join(value.home, "terminal-first-calls");
+    const crashScript = [
+      'import { mock } from "bun:test";',
+      'import * as realFs from "node:fs";',
+      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
+      `const source = ${JSON.stringify(source)};`,
+      'mock.module("node:fs", () => ({ ...realFs, renameSync(from, to) { if (String(from) === source) throw new Error("crash after terminal publication"); return realFs.renameSync(from, to); } }));',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { realFs.appendFileSync(process.env.TEST_CALLS, "call\\n"); throw new AgentscrapeUpstreamDownError("down"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?terminal-publication-crash");',
+      "await processQueue();",
+    ].join("\n");
+    const crashed = await finish(
+      Bun.spawn([process.execPath, "-e", crashScript], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          HOME: value.home,
+          TEST_CALLS: firstCalls,
+          AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS: "1",
+        },
+      }),
+    );
+    expect(crashed.code).toBe(1);
+    expect(readFileSync(firstCalls, "utf8")).toBe("call\n");
+    expect(existsSync(source)).toBeTrue();
+    const id = pendingGeneration(name, raw);
+    const terminal = join(
+      value.home,
+      ".local/share/agentscrape/failed",
+      `terminal--failed-${id}.yaml`,
+    );
+    expect(readFileSync(terminal)).toEqual(raw);
+    expect(lstatSync(terminal).mode & 0o777).toBe(0o600);
+
+    const recoveryScript = [
+      'import { mock } from "bun:test";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new Error("provider must not run"); }, resetBrowserUnavailableCache() { throw new Error("provider must not reset"); } }));',
+      'const { processQueue } = await import("./src/queue.ts?terminal-recovery");',
+      "process.stdout.write(JSON.stringify(await processQueue()));",
+    ].join("\n");
+    const runRecovery = () =>
+      finish(
+        Bun.spawn([process.execPath, "-e", recoveryScript], {
+          cwd: root,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, HOME: value.home },
+        }),
+      );
+
+    // Reconciliation shares the generation claim and must not consume terminal evidence while
+    // the exact ready predecessor still needs it to finish the crash recovery transition.
+    const guarded = await reconcile(value, acknowledgement());
+    expect(guarded.code, guarded.stderr).toBe(0);
+    expect(JSON.parse(guarded.stdout)).toMatchObject({ errors: 0, selected_records: 0 });
+    expect(outcomeFiles(value.reconciliation)).toEqual([]);
+    expect(existsSync(source)).toBeTrue();
+    expect(existsSync(terminal)).toBeTrue();
+
+    const extraLink = join(value.home, "terminal-hardlink");
+    linkSync(terminal, extraLink);
+    const hardlinked = await runRecovery();
+    expect(hardlinked.code).toBe(1);
+    expect(existsSync(source)).toBeTrue();
+    rmSync(extraLink);
+    chmodSync(terminal, 0o644);
+    const permissive = await runRecovery();
+    expect(permissive.code).toBe(1);
+    expect(existsSync(source)).toBeTrue();
+    chmodSync(terminal, 0o600);
+    writeFileSync(terminal, "different terminal evidence\n");
+    const different = await runRecovery();
+    expect(different.code).toBe(1);
+    expect(existsSync(source)).toBeTrue();
+    writeFileSync(terminal, raw, { mode: 0o600 });
+
+    const recovered = await runRecovery();
+    expect(recovered.code, recovered.stderr).toBe(0);
+    expect(JSON.parse(recovered.stdout)).toMatchObject({ failed: 1, retry_exhausted: 0 });
+    expect(existsSync(source)).toBeFalse();
+  });
+
+  test("retains a strict orphan publication temp without poisoning a due retry", async () => {
+    const value = fixture();
+    const destination = join(value.home, "orphan-retry.md");
+    const retry = writeDueRetry(value, "orphan-retry.yaml", destination);
+    const directory = dirname(retry.path);
+    const temporaryPath = publicationTemp(directory);
+    writeFileSync(temporaryPath, "orphan bytes\n", { mode: 0o600 });
+    const calls = join(value.home, "orphan-retry-calls");
+    const script = [
+      'import { mock } from "bun:test";',
+      'import { appendFileSync, writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, "call\\n"); writeFileSync(options.destination, "recovered\\n"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?orphan-publication-temp");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 0 })));",
+    ].join("\n");
+    const result = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home, TEST_CALLS: calls },
+      }),
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).processed).toBe(1);
+    expect(readFileSync(calls, "utf8")).toBe("call\n");
+    expect(existsSync(retry.path)).toBeFalse();
+    expect(readFileSync(temporaryPath, "utf8")).toBe("orphan bytes\n");
+  });
+
+  test("recovers a linked retry publication temp before accepting its final envelope", async () => {
+    const value = fixture();
+    const destination = join(value.home, "linked-retry.md");
+    const retry = writeDueRetry(value, "linked-retry.yaml", destination);
+    const temporaryPath = publicationTemp(dirname(retry.path));
+    linkSync(retry.path, temporaryPath);
+    const script = [
+      'import { mock } from "bun:test";',
+      'import { writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { writeFileSync(options.destination, "linked retry\\n"); }, resetBrowserUnavailableCache() {} }));',
+      'const { processQueue } = await import("./src/queue.ts?linked-retry-publication-temp");',
+      "process.stdout.write(JSON.stringify(await processQueue({ now: () => 0 })));",
+    ].join("\n");
+    const result = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).processed).toBe(1);
+    expect(existsSync(temporaryPath)).toBeFalse();
+    expect(existsSync(retry.path)).toBeFalse();
+  });
+
+  test("recovers linked frozen and terminal publication temps in focused state flows", async () => {
+    const frozenValue = fixture();
+    queueRecord(frozenValue.queue, "linked-frozen.yaml");
+    expect((await finish(startProcess(frozenValue))).code).toBe(0);
+    const frozenDirectory = join(frozenValue.home, ".local/share/agentscrape/frozen");
+    const frozenPath = join(frozenDirectory, readdirSync(frozenDirectory)[0]!);
+    const frozenTemporary = publicationTemp(frozenDirectory);
+    linkSync(frozenPath, frozenTemporary);
+    const reconciled = await reconcile(frozenValue, acknowledgement());
+    expect(reconciled.code, reconciled.stderr).toBe(0);
+    expect(existsSync(frozenTemporary)).toBeFalse();
+    expect(existsSync(frozenPath)).toBeFalse();
+
+    const terminalValue = fixture();
+    const name = "linked-terminal.yaml";
+    const source = join(terminalValue.queue, name);
+    const raw = Buffer.from(
+      `url: https://example.com/linked-terminal\ndestination: ${join(terminalValue.home, "terminal.md")}\n`,
+    );
+    writeFileSync(source, raw);
+    const failedDirectory = join(terminalValue.home, ".local/share/agentscrape/failed");
+    mkdirSync(failedDirectory, { recursive: true, mode: 0o700 });
+    const terminalPath = join(
+      failedDirectory,
+      `linked-terminal--failed-${pendingGeneration(name, raw)}.yaml`,
+    );
+    writeFileSync(terminalPath, raw, { mode: 0o600 });
+    const terminalTemporary = publicationTemp(failedDirectory);
+    linkSync(terminalPath, terminalTemporary);
+    const terminalResult = await finish(startProcess(terminalValue));
+    expect(terminalResult.code, terminalResult.stderr).toBe(0);
+    expect(terminalResult.stderr).toContain("failed=1");
+    expect(existsSync(terminalTemporary)).toBeFalse();
+    expect(existsSync(source)).toBeFalse();
+    expect(lstatSync(terminalPath).nlink).toBe(1);
+  });
+
+  test("a malformed canonical publication temp blocks processing and preserves its source", async () => {
+    const value = fixture();
+    const source = queueRecord(value.queue, "blocked-by-temp.yaml");
+    const failedDirectory = join(value.home, ".local/share/agentscrape/failed");
+    mkdirSync(failedDirectory, { recursive: true, mode: 0o700 });
+    const temporaryPath = publicationTemp(failedDirectory);
+    writeFileSync(temporaryPath, "malformed mode\n", { mode: 0o644 });
+    const result = await finish(startProcess(value));
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("invalid publication temporary");
+    expect(existsSync(source)).toBeTrue();
+    expect(existsSync(temporaryPath)).toBeTrue();
+  });
 });
 
 describe("queue reconciliation hardening", () => {
@@ -743,6 +1491,50 @@ describe("queue reconciliation hardening", () => {
 });
 
 describe("queue processing claim publication", () => {
+  test("recovers a valid dead ASR16 pending owner before taking the generation claim", async () => {
+    const value = fixture();
+    const name = "dead-legacy.yaml";
+    const source = queueRecord(value.queue, name);
+    const claims = join(value.reconciliation, "claims");
+    const slots = join(claims, "slots");
+    const owners = join(claims, "owners");
+    mkdirSync(slots, { recursive: true, mode: 0o700 });
+    mkdirSync(owners, { mode: 0o700 });
+    mkdirSync(join(claims, "quarantine"), { mode: 0o700 });
+    const token = randomUUID();
+    const sourceInfo = lstatSync(source, { bigint: true });
+    const rootInfo = lstatSync(value.reconciliation, { bigint: true });
+    const ownerName = `${token}.json`;
+    const bytes = `${JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      token,
+      owner: ownerName,
+      operation: "process",
+      area: "pending",
+      name,
+      reconciliation_root: { dev: String(rootInfo.dev), ino: String(rootInfo.ino) },
+      source: {
+        dev: String(sourceInfo.dev),
+        ino: String(sourceInfo.ino),
+        size: String(sourceInfo.size),
+        mtimeNs: String(sourceInfo.mtimeNs),
+        ctimeNs: String(sourceInfo.ctimeNs),
+        sha256: createHash("sha256").update(readFileSync(source)).digest("hex"),
+      },
+    })}\n`;
+    const ownerPath = join(owners, ownerName);
+    writeFileSync(ownerPath, bytes, { mode: 0o600 });
+    linkSync(ownerPath, join(slots, createHash("sha256").update(`pending\0${name}`).digest("hex")));
+
+    const processed = await finish(startProcess(value));
+    expect(processed.code, processed.stderr).toBe(0);
+    expect(processed.stderr).toContain("frozen=1");
+    expect(existsSync(source)).toBeFalse();
+    expect(readdirSync(slots)).toEqual([]);
+    expect(readdirSync(owners)).toEqual([]);
+  });
+
   for (const kind of ["malformed", "symlink", "missing-owner", "uppercase UUID"] as const) {
     test(`fails closed on a ${kind} fixed claim slot`, async () => {
       const value = fixture();
@@ -857,6 +1649,7 @@ describe("queue processing claim publication", () => {
     const value = fixture();
     const name = "release-sync.yaml";
     const source = queueRecord(value.queue, name);
+    const generation = pendingGeneration(name, readFileSync(source));
     const script = [
       'import { mock } from "bun:test";',
       'import * as realFs from "node:fs";',
@@ -874,7 +1667,7 @@ describe("queue processing claim publication", () => {
       "  },",
       "  closeSync(descriptor) { descriptors.delete(descriptor); return realCloseSync(descriptor); },",
       "  fsyncSync(descriptor) {",
-      '    if (descriptors.get(descriptor)?.endsWith("/claims/slots") && ++slotSyncs === 2)',
+      '    if (descriptors.get(descriptor)?.endsWith("/claims/slots") && ++slotSyncs === 3)',
       '      throw new Error("simulated slot unlink sync failure");',
       "    return realFsyncSync(descriptor);",
       "  },",
@@ -894,7 +1687,8 @@ describe("queue processing claim publication", () => {
     expect(result.stderr).toContain(
       "claim slot for release-sync.yaml removal could not be synchronized",
     );
-    expect(existsSync(source)).toBeTrue();
+    expect(existsSync(source)).toBeFalse();
+    expect(readdirSync(join(value.home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
     const claims = join(value.reconciliation, "claims");
     const slots = join(claims, "slots");
     const owners = join(claims, "owners");
@@ -902,7 +1696,8 @@ describe("queue processing claim publication", () => {
     const ownerNames = readdirSync(owners);
     expect(ownerNames).toHaveLength(1);
     const owner = JSON.parse(readFileSync(join(owners, ownerNames[0]!), "utf8"));
-    expect(owner.name).toBe(name);
+    expect(owner.area).toBe("generation");
+    expect(owner.name).toBe(generation);
     expect(owner.owner).toBe(ownerNames[0]);
     expect(existsSync(join(owners, owner.owner))).toBeTrue();
   });
@@ -933,11 +1728,12 @@ describe("queue processing claim publication", () => {
     const result = await finish(child);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("claim slot for frozen.yaml could not be removed");
-    expect(existsSync(source)).toBeTrue();
+    expect(existsSync(source)).toBeFalse();
+    expect(readdirSync(join(value.home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
     const slots = readdirSync(join(value.reconciliation, "claims", "slots"));
     const owners = readdirSync(join(value.reconciliation, "claims", "owners"));
-    expect(slots).toHaveLength(1);
-    expect(owners).toHaveLength(1);
+    expect(slots).toHaveLength(2);
+    expect(owners).toHaveLength(2);
     expect(
       JSON.parse(readFileSync(join(value.reconciliation, "claims", "owners", owners[0]!), "utf8"))
         .pid,
@@ -983,8 +1779,8 @@ describe("queue processing claim publication", () => {
       expect(result.code).toBe(1);
       expect(result.stderr).toContain("claim slot for normal.yaml could not be removed");
       expect(readFileSync(destination, "utf8")).toContain("processed before release");
-      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toHaveLength(1);
-      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toHaveLength(1);
+      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toHaveLength(2);
+      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toHaveLength(2);
       expect(retirementFiles(value.reconciliation)).toEqual([]);
     } finally {
       server.stop(true);
@@ -1033,9 +1829,10 @@ describe("queue processing claim publication", () => {
     expect(result.code).toBe(0);
     const evidence = JSON.parse(result.stdout);
     expect(evidence.aggregate).toBeTrue();
-    expect(evidence.messages).toHaveLength(2);
+    expect(evidence.messages).toHaveLength(3);
     expect(evidence.messages[0]).toContain("agentbrain submit returned invalid JSON");
     expect(evidence.messages[1]).toContain("claim slot for indexed.yaml could not be removed");
+    expect(evidence.messages[2]).toContain("claim slot for indexed.yaml could not be removed");
     expect(existsSync(source)).toBeTrue();
   });
 
@@ -1069,6 +1866,10 @@ describe("queue processing claim publication", () => {
       );
       const owner = startProcess(value);
       await seen;
+      const heldOwners = readdirSync(join(value.reconciliation, "claims", "owners")).map((name) =>
+        JSON.parse(readFileSync(join(value.reconciliation, "claims", "owners", name), "utf8")),
+      );
+      expect(heldOwners.map((claim) => claim.area).sort()).toEqual(["generation", "pending"]);
       const peer = await finish(startProcess(value));
       expect(peer.code).toBe(0);
       releaseResponse();
@@ -1145,7 +1946,14 @@ describe("queue processing claim publication", () => {
       );
       expect(child.code, child.stderr).toBe(0);
       const evidence = JSON.parse(child.stdout);
-      expect(evidence.result).toEqual({ processed: 1, failed: 0, frozen: 0 });
+      expect(evidence.result).toEqual({
+        processed: 1,
+        failed: 0,
+        frozen: 0,
+        retry_scheduled: 0,
+        retry_waiting: 0,
+        retry_exhausted: 0,
+      });
       expect(evidence.events).toEqual([
         "destination-file-sync",
         "destination-parent-sync",
@@ -1213,7 +2021,14 @@ describe("queue processing claim publication", () => {
         }),
       );
       expect(child.code, child.stderr).toBe(0);
-      expect(JSON.parse(child.stdout)).toEqual({ processed: 0, failed: 1, frozen: 0 });
+      expect(JSON.parse(child.stdout)).toEqual({
+        processed: 0,
+        failed: 1,
+        frozen: 0,
+        retry_scheduled: 0,
+        retry_waiting: 0,
+        retry_exhausted: 0,
+      });
       expect(
         readFileSync(join(value.home, ".local/share/agentscrape/failed/unsynced.yaml")),
       ).toEqual(Buffer.from(actualQueueBytes));
@@ -1276,7 +2091,7 @@ describe("queue processing claim publication", () => {
     }
   });
 
-  test("cancellation and frozen records stay public with claims released", async () => {
+  test("cancellation stays public and frozen records drain with claims released", async () => {
     const value = fixture();
     const destination = join(value.home, "cancelled.md");
     const summaryReady = join(value.home, "summary-ready");
@@ -1320,7 +2135,8 @@ describe("queue processing claim publication", () => {
       const frozen = await finish(startProcess(value));
       expect(frozen.code).toBe(0);
       expect(frozen.stderr).toContain("frozen=1");
-      expect(existsSync(join(value.queue, "frozen.yaml"))).toBeTrue();
+      expect(existsSync(join(value.queue, "frozen.yaml"))).toBeFalse();
+      expect(readdirSync(join(value.home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
       expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toEqual([]);
       expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toEqual([]);
     } finally {

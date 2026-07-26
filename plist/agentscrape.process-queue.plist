@@ -19,6 +19,8 @@
   <array>
     <string>__AGENTSCRAPE_QUEUE__</string>
   </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>

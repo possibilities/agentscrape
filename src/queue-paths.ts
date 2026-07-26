@@ -4,6 +4,8 @@ import { isAbsolute, join, resolve } from "node:path";
 export interface QueuePaths {
   dataHome: string;
   queue: string;
+  frozen: string;
+  retry: string;
   failed: string;
   reconciliation: string;
 }
@@ -27,6 +29,8 @@ export function resolveQueuePaths(
   return {
     dataHome,
     queue: join(dataHome, "queue"),
+    frozen: join(dataHome, "frozen"),
+    retry: join(dataHome, "retry"),
     failed: join(dataHome, "failed"),
     reconciliation: join(dataHome, "reconciliation"),
   };
