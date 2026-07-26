@@ -259,6 +259,9 @@ describe("installer", () => {
     expect(text(plistPath)).toContain("agentscrape.process-queue");
     expect(text(plistPath)).toContain(expectedPath);
     expect(text(plistPath)).toContain(join(fixture.home, ".local/share/agentscrape/queue"));
+    expect(text(plistPath)).toContain("<key>StartInterval</key>\n  <integer>60</integer>");
+    expect(text(plistPath)).not.toContain("/frozen");
+    expect(text(plistPath)).not.toContain("/retry");
 
     expect(statSync(stateDir).mode & 0o777).toBe(0o700);
     expect(statSync(shareDir).mode & 0o777).toBe(0o700);

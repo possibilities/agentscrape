@@ -317,30 +317,49 @@ escape_sed_replacement() {
   printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
 }
 
-render_plist_content() {
-  local command_path="$1" service_path="$2" queue="$3" log_path="$4"
+render_plist_text_content() {
+  local template_text="$1" command_path="$2" service_path="$3" queue="$4" log_path="$5"
   local program path_value queue_value log_value rendered
   program="$(escape_sed_replacement "$(escape_xml "$command_path")")"
   path_value="$(escape_sed_replacement "$(escape_xml "$service_path")")"
   queue_value="$(escape_sed_replacement "$(escape_xml "$queue")")"
   log_value="$(escape_sed_replacement "$(escape_xml "$log_path")")"
-  rendered="$(sed \
+  rendered="$(printf '%s' "$template_text" | sed \
     -e "s|__AGENTSCRAPE_PROGRAM__|$program|g" \
     -e "s|__AGENTSCRAPE_PATH__|$path_value|g" \
     -e "s|__AGENTSCRAPE_QUEUE__|$queue_value|g" \
-    -e "s|__AGENTSCRAPE_LOG__|$log_value|g" \
-    "$TEMPLATE")"
+    -e "s|__AGENTSCRAPE_LOG__|$log_value|g")"
   [[ "$rendered" != *'__AGENTSCRAPE_'* ]] || return 1
   printf '%s' "$rendered"
 }
 
-plist_file_matches_values() {
-  local command_path="$1" service_path="$2" queue="$3" log_path="$4"
+render_plist_template_content() {
+  local template="$1"
+  [[ -f "$template" && ! -L "$template" ]] || return 1
+  render_plist_text_content "$(<"$template")" "$2" "$3" "$4" "$5"
+}
+
+render_plist_git_content() {
+  local checkout="$1" sha="$2" template_text
+  template_text="$(git -C "$checkout" show "$sha:plist/agentscrape.process-queue.plist" 2>/dev/null)" || return 1
+  render_plist_text_content "$template_text" "$3" "$4" "$5" "$6"
+}
+
+render_plist_content() {
+  render_plist_template_content "$TEMPLATE" "$1" "$2" "$3" "$4"
+}
+
+plist_file_matches_template_values() {
+  local template="$1" command_path="$2" service_path="$3" queue="$4" log_path="$5"
   [[ -f "$SERVICE_DEST" && ! -L "$SERVICE_DEST" ]] || return 1
   [[ "$(path_owner_uid "$SERVICE_DEST")" == "$OWNER_UID" ]] || return 1
   [[ "$(path_mode "$SERVICE_DEST")" == "600" ]] || return 1
   [[ "$(path_nlink "$SERVICE_DEST")" == "1" ]] || return 1
-  cmp -s "$SERVICE_DEST" <(render_plist_content "$command_path" "$service_path" "$queue" "$log_path")
+  cmp -s "$SERVICE_DEST" <(render_plist_template_content "$template" "$command_path" "$service_path" "$queue" "$log_path")
+}
+
+plist_file_matches_values() {
+  plist_file_matches_template_values "$TEMPLATE" "$1" "$2" "$3" "$4"
 }
 
 installed_service_is_expected() {
@@ -348,7 +367,16 @@ installed_service_is_expected() {
 }
 
 service_matches_loaded_receipt() {
-  plist_file_matches_values "$RECEIPT_COMMAND" "$RECEIPT_SERVICE_PATH" "$RECEIPT_QUEUE" "$RECEIPT_LOG"
+  if [[ "$RECEIPT_ROOT" == "$ROOT_DIR" ]] &&
+    plist_file_matches_values "$RECEIPT_COMMAND" "$RECEIPT_SERVICE_PATH" "$RECEIPT_QUEUE" "$RECEIPT_LOG"; then
+    return 0
+  fi
+  [[ -f "$SERVICE_DEST" && ! -L "$SERVICE_DEST" ]] || return 1
+  [[ "$(path_owner_uid "$SERVICE_DEST")" == "$OWNER_UID" ]] || return 1
+  [[ "$(path_mode "$SERVICE_DEST")" == "600" ]] || return 1
+  [[ "$(path_nlink "$SERVICE_DEST")" == "1" ]] || return 1
+  cmp -s "$SERVICE_DEST" <(render_plist_git_content "$RECEIPT_ROOT" "$RECEIPT_SHA" \
+    "$RECEIPT_COMMAND" "$RECEIPT_SERVICE_PATH" "$RECEIPT_QUEUE" "$RECEIPT_LOG")
 }
 
 render_legacy_receipt_content() {

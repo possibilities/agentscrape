@@ -20,7 +20,7 @@ The installer:
 
 - runs `bun install --frozen-lockfile`
 - creates private state under `~/.local/state/agentscrape`
-- creates private queue data under `${AGENTSCRAPE_INSTALL_SHARE_DIR:-${XDG_DATA_HOME:-~/.local/share}/agentscrape}/{queue,failed}`
+- creates private queue data under `${AGENTSCRAPE_INSTALL_SHARE_DIR:-${XDG_DATA_HOME:-~/.local/share}/agentscrape}/{queue,failed}`; workers create private `frozen` and `retry` state alongside it
 - installs an owned executable at `~/.local/bin/agentscrape`
 - renders and loads `~/Library/LaunchAgents/agentscrape.process-queue.plist`
 - exports the exact installed queue root through `AGENTSCRAPE_DATA_HOME` in the owned wrapper so interactive and LaunchAgent runs keep using the same queue path even if later shell `XDG_DATA_HOME` differs
@@ -164,9 +164,9 @@ Corpus metadata uses version `1`, declares `content`, `links`, or `nav-links` mo
 
 ## Queue
 
-Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Browser-host outages retry in place with bounded exponential backoff; malformed and permanent failures are published without clobbering existing `failed/` evidence.
+Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Legacy indexed records are drained into immutable `frozen/` envelopes for reconciliation. Browser-host outages are captured as immutable, policy-pinned `retry/` envelopes and revisited by the LaunchAgent's 60-second interval; malformed and permanent failures are published without clobbering existing `failed/` evidence.
 
-`process-queue` and `reconcile-queue --apply` share private, durable, per-name generation claims. A live owner makes peers skip while leaving the public source visible; a dead owner is recovered, and malformed, symlinked, foreign, or incomplete claim evidence fails closed. Outcomes, failed records, and archives use fsynced no-clobber publication. Retirement removes only the snapshotted inode and preserves a concurrently replaced pathname. There is a narrow conditional gap between the final identity check and the private UUID rename; a generation captured in that gap is retained in the private retirement quarantine rather than unlinked.
+`process-queue` and `reconcile-queue --apply` share private, durable, per-name generation claims. A live owner makes peers skip while leaving the public source visible; a dead owner is recovered, and malformed, symlinked, foreign, or incomplete claim evidence fails closed. Outcomes, frozen/retry envelopes, failed records, and archives use fsynced no-clobber publication. Retirement removes only the snapshotted inode and preserves a concurrently replaced pathname. There is a narrow conditional gap between the final identity check and the private UUID rename; a generation captured in that gap is retained in the private retirement quarantine rather than unlinked. Queue processing is at least once: a crash after a provider succeeds (or destination/output is published) but before source retirement can repeat that provider/output work on recovery.
 
 Reconciliation is inventory-only unless `--apply` is given and admits imports through explicit `agentbrain` argv with a bounded timeout. A valid existing outcome resumes archive publication without another submit. If an owner dies after `agentbrain` accepted a request but before its receipt was durably published, recovery can physically submit again; correctness at that boundary relies on the `agentbrain` duplicate/idempotency contract rather than an intent journal.
 
