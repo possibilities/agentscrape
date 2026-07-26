@@ -1,7 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
@@ -390,6 +400,266 @@ esac`,
       await expect(
         openPage("https://example.com/page", `incidental-${index}`),
       ).resolves.toBeUndefined();
+    }
+  });
+});
+
+describe("keyed browser outage cache", () => {
+  test("hits before the TTL, expires at equality, resets, and isolates key tuple fields", async () => {
+    const directory = temp();
+    const home = temp();
+    const calls = join(directory, "calls");
+    const browser = executable(
+      directory,
+      "agent-browser",
+      `printf 'call\\n' >> ${JSON.stringify(calls)}
+printf 'failed to acquire browser from browserctl: unavailable' >&2
+exit 1`,
+    );
+    let now = 1_700_000_000_000;
+    const originalNow = Date.now;
+    Date.now = () => now;
+    try {
+      process.env.HOME = home;
+      process.env[AGENT_BROWSER_BIN_ENV] = browser;
+      const first = await runAgentBrowser(["eval", "null"], "shared", "profile-a");
+      now += 29_999;
+      const cached = await runAgentBrowser(["eval", "other"], "shared", "profile-a");
+      expect(cached.stderr).toBe(first.stderr);
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+
+      now += 1;
+      await runAgentBrowser(["eval", "null"], "shared", "profile-a");
+      await runAgentBrowser(["eval", "null"], "shared", "profile-b");
+      process.env.HOME = temp();
+      await runAgentBrowser(["eval", "null"], "shared", "profile-a");
+      const otherBrowser = executable(
+        directory,
+        "other-agent-browser",
+        `printf 'call\\n' >> ${JSON.stringify(calls)}
+printf 'failed to acquire browser from browserctl: unavailable' >&2
+exit 1`,
+      );
+      process.env[AGENT_BROWSER_BIN_ENV] = otherBrowser;
+      await runAgentBrowser(["eval", "null"], "shared", "profile-a");
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(5);
+
+      resetBrowserUnavailableCache();
+      await runAgentBrowser(["eval", "null"], "shared", "profile-a");
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(6);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("a concurrent success clears an outage cached by the same-key failure", async () => {
+    const directory = temp();
+    const home = temp();
+    const successStarted = join(directory, "success-started");
+    const failureStarted = join(directory, "failure-started");
+    const releaseSuccess = join(directory, "release-success");
+    const afterSuccess = join(directory, "after-success");
+    const browser = executable(
+      directory,
+      "agent-browser",
+      `case "$*" in
+  *slow-success*)
+    touch ${JSON.stringify(successStarted)}
+    while [ ! -f ${JSON.stringify(releaseSuccess)} ]; do sleep 0.01; done
+    ;;
+  *acquisition-failure*)
+    touch ${JSON.stringify(failureStarted)}
+    printf 'failed to acquire browser from browserctl: unavailable' >&2
+    exit 1
+    ;;
+  *after-success*) touch ${JSON.stringify(afterSuccess)} ;;
+esac`,
+    );
+    process.env.HOME = home;
+    process.env[AGENT_BROWSER_BIN_ENV] = browser;
+
+    const successful = runAgentBrowser(["eval", "slow-success"], "shared", "profile-a");
+    await waitFor(successStarted);
+    const failing = runAgentBrowser(["eval", "acquisition-failure"], "shared", "profile-a");
+    await waitFor(failureStarted);
+    const failed = await failing;
+    expect(failed.stderr).toStartWith("upstream down: ");
+
+    writeFileSync(releaseSuccess, "release");
+    expect((await successful).exitCode).toBe(0);
+    const subsequent = await runAgentBrowser(["eval", "after-success"], "shared", "profile-a");
+    expect(subsequent.exitCode).toBe(0);
+    expect(existsSync(afterSuccess)).toBeTrue();
+  });
+
+  test("evicts the oldest entry after the bounded 64-key limit", async () => {
+    const directory = temp();
+    const calls = join(directory, "calls");
+    process.env.HOME = temp();
+    process.env[AGENT_BROWSER_BIN_ENV] = executable(
+      directory,
+      "agent-browser",
+      `printf 'call\\n' >> ${JSON.stringify(calls)}
+printf 'failed to acquire browser from browserctl: unavailable' >&2
+exit 1`,
+    );
+    const originalNow = Date.now;
+    Date.now = () => 1_700_000_000_000;
+    try {
+      for (let index = 0; index < 65; index += 1)
+        await runAgentBrowser(["eval", "null"], `bounded-${index}`);
+      await runAgentBrowser(["eval", "null"], "bounded-0");
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(66);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("redacts and UTF-8 bounds acquisition diagnostics before caching", async () => {
+    const directory = temp();
+    process.env.HOME = temp();
+    process.env[AGENT_BROWSER_BIN_ENV] = executable(
+      directory,
+      "agent-browser",
+      `printf 'failed to acquire browser from browserctl token=acquisition-secret\\n%s' '${"x".repeat(2000)}' >&2
+exit 1`,
+    );
+    const result = await runAgentBrowser(["eval", "null"], "bounded-reason");
+    expect(result.stderr).toStartWith("upstream down: ");
+    expect(result.stderr).not.toContain("acquisition-secret");
+    expect(new TextEncoder().encode(result.stderr).byteLength).toBeLessThanOrEqual(1024);
+    expect(result.stderr).not.toContain("\n");
+  });
+});
+
+describe("strict browserctl health state", () => {
+  const fixedNow = Date.UTC(2026, 0, 2, 12, 0, 0);
+
+  type HealthFixture =
+    | string
+    | Uint8Array
+    | "directory"
+    | "symlink"
+    | "unsafe-group-mode"
+    | "unsafe-world-mode"
+    | "hardlink";
+
+  async function healthResult(
+    content: HealthFixture,
+  ): Promise<{ result: Awaited<ReturnType<typeof runAgentBrowser>>; invoked: boolean }> {
+    const home = temp();
+    const directory = temp();
+    const called = join(directory, "called");
+    const browser = executable(directory, "agent-browser", `touch ${JSON.stringify(called)}`);
+    const path = join(home, ".local/state/browserctl/check-health-state.yaml");
+    mkdirSync(dirname(path), { recursive: true });
+    const downState = "is_down: true\nlast_run_at: 2026-01-02T12:00:00.000000Z\nreason: unsafe\n";
+    if (content === "directory") mkdirSync(path);
+    else if (content === "symlink") {
+      const target = join(home, "outside-health.yaml");
+      writeFileSync(target, downState);
+      symlinkSync(target, path);
+    } else if (content === "hardlink") {
+      const target = join(home, "hardlinked-health.yaml");
+      writeFileSync(target, downState, { mode: 0o600 });
+      linkSync(target, path);
+    } else if (content === "unsafe-group-mode" || content === "unsafe-world-mode") {
+      writeFileSync(path, downState, { mode: 0o600 });
+      chmodSync(path, content === "unsafe-group-mode" ? 0o620 : 0o602);
+    } else writeFileSync(path, content, { mode: 0o600 });
+    process.env.HOME = home;
+    process.env[AGENT_BROWSER_BIN_ENV] = browser;
+    const result = await runAgentBrowser(["eval", "null"], "health-test");
+    return { result, invoked: existsSync(called) };
+  }
+
+  test("accepts strict RFC3339 freshness and future-skew boundaries", async () => {
+    const originalNow = Date.now;
+    Date.now = () => fixedNow;
+    try {
+      for (const timestamp of [
+        "2026-01-02T12:00:00.123456+00:00",
+        "2026-01-02T13:00:00.000000+01:00",
+        "2026-01-02T11:45:00.000000Z",
+        "2026-01-02T12:01:00.000000Z",
+      ]) {
+        const { result, invoked } = await healthResult(
+          `is_down: true\nlast_run_at: ${timestamp}\nreason: planned outage\n`,
+        );
+        expect(invoked).toBeFalse();
+        expect(result.stderr).toContain("upstream down: browserctl: planned outage");
+      }
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("fails open for stale, over-future, malformed, and invalid-calendar timestamps", async () => {
+    const originalNow = Date.now;
+    Date.now = () => fixedNow;
+    try {
+      for (const timestamp of [
+        "2026-01-02T11:44:59.999000Z",
+        "2026-01-02T12:01:00.000001Z",
+        "2026-01-02T12:01:00.001000Z",
+        "2026-02-30T12:00:00Z",
+        "2026-01-02 12:00:00Z",
+        "2026-01-02T12:00:00",
+      ]) {
+        const { result, invoked } = await healthResult(
+          `is_down: true\nlast_run_at: ${timestamp}\nreason: invalid\n`,
+        );
+        expect(invoked).toBeTrue();
+        expect(result.exitCode).toBe(0);
+      }
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("ignores unsafe modes, hardlinks, other unsafe files, and invalid content", async () => {
+    const originalNow = Date.now;
+    Date.now = () => fixedNow;
+    try {
+      for (const content of [
+        "directory" as const,
+        "symlink" as const,
+        "unsafe-group-mode" as const,
+        "unsafe-world-mode" as const,
+        "hardlink" as const,
+        new Uint8Array([0xff, 0xfe]),
+        `is_down: true\nis_down: true\nlast_run_at: 2026-01-02T12:00:00Z\n`,
+        `is_down: true\nlast_run_at: 2026-01-02T12:00:00Z\nreason: &value down\ncopy: *value\n`,
+        `is_down: true\nlast_run_at: 2026-01-02T12:00:00Z\nreason: ${"x".repeat(17_000)}\n`,
+      ]) {
+        const { result, invoked } = await healthResult(content);
+        expect(invoked).toBeTrue();
+        expect(result.exitCode).toBe(0);
+      }
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("normalizes, redacts, and bounds health reasons with a blank fallback", async () => {
+    const originalNow = Date.now;
+    Date.now = () => fixedNow;
+    try {
+      const secret = `token=health-secret\\n${"y".repeat(2000)}\\u0000`;
+      const bounded = await healthResult(
+        `is_down: true\nlast_run_at: 2026-01-02T12:00:00.000000Z\nreason: "${secret}"\n`,
+      );
+      expect(bounded.invoked).toBeFalse();
+      expect(bounded.result.stderr).not.toContain("health-secret");
+      expect(new TextEncoder().encode(bounded.result.stderr).byteLength).toBeLessThanOrEqual(1024);
+      expect(bounded.result.stderr).not.toContain("\n");
+
+      const fallback = await healthResult(
+        "is_down: true\nlast_run_at: 2026-01-02T12:00:00Z\nreason: '   '\n",
+      );
+      expect(fallback.result.stderr).toContain("browserctl is down");
+    } finally {
+      Date.now = originalNow;
     }
   });
 });

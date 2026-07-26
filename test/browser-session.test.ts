@@ -288,4 +288,36 @@ describe("browser-free and low-level session behavior", () => {
 
     expect(events(value)).toEqual([{ session: name, command: ["close"] }]);
   });
+
+  test("nested inherited scopes share outage keys while independent implicit roots isolate", async () => {
+    const value = fixture();
+    const health = join(value.home, ".local/state/browserctl/check-health-state.yaml");
+    mkdirSync(join(value.home, ".local/state/browserctl"), { recursive: true });
+    writeFileSync(
+      health,
+      `is_down: true\nlast_run_at: ${new Date().toISOString()}\nreason: scoped outage\n`,
+    );
+    let firstName = "";
+    await withBrowserSession(undefined, async (scope) => {
+      firstName = scope.name;
+      expect((await runAgentBrowser(["eval", "first"])).exitCode).toBe(1);
+      rmSync(health);
+      await withBrowserSession(undefined, async (nested) => {
+        expect(nested).toBe(scope);
+        expect((await runAgentBrowser(["eval", "nested"])).exitCode).toBe(1);
+      });
+    });
+
+    let secondName = "";
+    await withBrowserSession(undefined, async (scope) => {
+      secondName = scope.name;
+      expect((await runAgentBrowser(["eval", "window.location.href"])).exitCode).toBe(0);
+    });
+    expect(secondName).not.toBe(firstName);
+    expect(events(value)).toEqual([
+      { session: firstName, command: ["close"] },
+      { session: secondName, command: ["eval", "window.location.href"] },
+      { session: secondName, command: ["close"] },
+    ]);
+  });
 });

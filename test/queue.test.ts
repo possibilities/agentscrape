@@ -349,7 +349,7 @@ describe("frozen and durable retry queue states", () => {
       'import { writeFileSync } from "node:fs";',
       'mock.module("./src/api.ts", () => ({',
       "  fetchMarkdown: async (_url, options) => { writeFileSync(options.destination, '# retry success\\n'); },",
-      "  resetBrowserUnavailableCache() {},",
+      '  resetBrowserUnavailableCache() { throw new Error("queue must not reset browser cache"); },',
       "}));",
       'const { processQueue } = await import("./src/queue.ts?retry-due-test");',
       "process.stdout.write(JSON.stringify(await processQueue({ now: () => 1124 })));",
