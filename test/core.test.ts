@@ -249,8 +249,8 @@ describe("GitHub URL routing", () => {
 });
 
 describe("corpus, canary, and queue contracts", () => {
-  test("the complete versioned corpus replays offline", async () => {
-    const result = await testCorpus();
+  test("the complete shipped versioned corpus replays offline", async () => {
+    const result = await testCorpus(undefined, join(import.meta.dir, "corpus"));
     expect(result.failed).toBe(0);
     expect(result.passed).toBe(27);
   });
