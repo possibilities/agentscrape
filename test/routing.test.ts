@@ -398,7 +398,9 @@ esac
         name: "AgentscrapeUsageError",
         errorClass: "usage",
       });
-      const commands = readFileSync(value.browserMarker, "utf8");
+      const commands = existsSync(value.browserMarker)
+        ? readFileSync(value.browserMarker, "utf8")
+        : "";
       if (label === "malformed") expect(commands).not.toContain(" open ");
     });
   }

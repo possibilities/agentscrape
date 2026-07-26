@@ -7,6 +7,7 @@ import {
   resetBrowserUnavailableCache,
   runAgentBrowser,
   withBrowserProfile,
+  withBrowserSession,
   withBrowserSignal,
 } from "./browser";
 import { cssSelectorProblem } from "./css-selector";
@@ -310,7 +311,7 @@ export async function fetchMarkdown(
   let browserUsed = false;
 
   try {
-    try {
+    return await withBrowserSession(options.session, async () => {
       let requested: string;
       try {
         requested = validateEnvelopeRequest(url, maxContentBytes, maxRelations);
@@ -412,9 +413,7 @@ export async function fetchMarkdown(
       }
       if (options.destination) writeArtifacts(options.destination, result);
       return result;
-    } finally {
-      if (!options.session && browserUsed) await closeSession();
-    }
+    });
   } catch (error) {
     if (envelopeMode) {
       const envelope = buildFailureEnvelope(error, {
@@ -444,35 +443,37 @@ export async function fetchLinks(
   url: string,
   options: FetchLinksOptions = {},
 ): Promise<ScrapeResult<LinkList>> {
-  if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1))
-    throw new AgentscrapeUsageError("--limit must be a positive integer");
-  if (
-    options.maxScrolls !== undefined &&
-    (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
-  )
-    throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
-  if (options.sinceId !== undefined && options.sinceId !== null && !/^\d+$/.test(options.sinceId))
-    throw new AgentscrapeUsageError("--since-id must contain only digits");
-  const timelineKeys: Array<[keyof HandlerOptions, string]> = [
-    ["limit", "--limit"],
-    ["maxScrolls", "--max-scrolls"],
-    ["sinceId", "--since-id"],
-    ["includeReplies", "--include-replies"],
-    ["includeReposts", "--include-reposts"],
-  ];
-  const supplied = timelineKeys.find(
-    ([key]) => options[key] !== undefined && options[key] !== false && options[key] !== null,
-  );
-  const hasCallerSelector = [
-    options.sectionSelector,
-    options.categorySelector,
-    options.toggleSelector,
-  ].some((selector) => selector !== undefined && selector !== null);
-  if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
-    throw new AgentscrapeUsageError("an explicit preset cannot be combined with caller selectors");
-  let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
-  let resolvedPreset: string | null = null;
-  try {
+  return withBrowserSession(options.session, async () => {
+    if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1))
+      throw new AgentscrapeUsageError("--limit must be a positive integer");
+    if (
+      options.maxScrolls !== undefined &&
+      (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
+    )
+      throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
+    if (options.sinceId !== undefined && options.sinceId !== null && !/^\d+$/.test(options.sinceId))
+      throw new AgentscrapeUsageError("--since-id must contain only digits");
+    const timelineKeys: Array<[keyof HandlerOptions, string]> = [
+      ["limit", "--limit"],
+      ["maxScrolls", "--max-scrolls"],
+      ["sinceId", "--since-id"],
+      ["includeReplies", "--include-replies"],
+      ["includeReposts", "--include-reposts"],
+    ];
+    const supplied = timelineKeys.find(
+      ([key]) => options[key] !== undefined && options[key] !== false && options[key] !== null,
+    );
+    const hasCallerSelector = [
+      options.sectionSelector,
+      options.categorySelector,
+      options.toggleSelector,
+    ].some((selector) => selector !== undefined && selector !== null);
+    if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
+      throw new AgentscrapeUsageError(
+        "an explicit preset cannot be combined with caller selectors",
+      );
+    let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
+    let resolvedPreset: string | null = null;
     const registry = loadRegistry();
     const preset = options.preset
       ? registry.byName(options.preset)
@@ -531,15 +532,13 @@ export async function fetchLinks(
         };
       }),
     );
-  } finally {
-    if (!options.session) await closeSession();
-  }
-  throwIfAborted(options.signal);
-  if (!result.links)
-    throw new AgentscrapeUsageError(
-      `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
-    );
-  return result as ScrapeResult<LinkList>;
+    throwIfAborted(options.signal);
+    if (!result.links)
+      throw new AgentscrapeUsageError(
+        `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
+      );
+    return result as ScrapeResult<LinkList>;
+  });
 }
 
 export function convertHtml(html: string): string {

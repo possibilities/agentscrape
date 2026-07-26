@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -21,17 +22,34 @@ export const AGENT_BROWSER_TIMEOUT_PREFIX = "agent-browser timed out after ";
 export const UPSTREAM_DOWN_PREFIX = "upstream down: ";
 export const CLAUDE_APP_READY_SELECTOR = "[data-testid='account-settings'], main";
 let unavailableReason: string | null = null;
+export interface BrowserSessionScope {
+  name: string;
+  owned: boolean;
+  used: boolean;
+}
 interface BrowserContext {
   profile: string | null;
   signal: AbortSignal | null;
+  session: BrowserSessionScope | null;
 }
 const browserContext = new AsyncLocalStorage<BrowserContext>();
 function context(): BrowserContext {
-  return browserContext.getStore() ?? { profile: null, signal: null };
+  return browserContext.getStore() ?? { profile: null, signal: null, session: null };
 }
 
 function defaultSession(): string {
   return `agentscrape-${process.pid}`;
+}
+function freshSession(): string {
+  return `agentscrape-${process.pid}-${randomUUID().replaceAll("-", "")}`;
+}
+function resolveBrowserSession(
+  requested: string | null | undefined,
+  active: BrowserContext,
+): string {
+  const selected = requested || active.session?.name || defaultSession();
+  if (active.session?.owned && selected === active.session.name) active.session.used = true;
+  return selected;
 }
 function timeoutMs(override?: number): number {
   if (override !== undefined) return override;
@@ -74,6 +92,27 @@ export async function withBrowserSignal<T>(
   throwIfAborted(selected);
   return browserContext.run({ ...context(), signal: selected }, fn);
 }
+export async function withBrowserSession<T>(
+  requested: string | null | undefined,
+  fn: (scope: BrowserSessionScope, owner: boolean) => Promise<T>,
+): Promise<T> {
+  const active = context();
+  if (!requested && active.session)
+    return browserContext.run({ ...active, session: active.session }, () =>
+      fn(active.session!, false),
+    );
+
+  const scope: BrowserSessionScope = requested
+    ? { name: requested, owned: false, used: false }
+    : { name: freshSession(), owned: true, used: false };
+  const owner = scope.owned;
+  const capturedName = scope.name;
+  try {
+    return await browserContext.run({ ...active, session: scope }, () => fn(scope, owner));
+  } finally {
+    if (owner && scope.used) await closeSession(capturedName);
+  }
+}
 function resolveBrowser(): string {
   const override = process.env[AGENT_BROWSER_BIN_ENV];
   if (override) return findExecutable(override) || override;
@@ -92,6 +131,7 @@ export async function runAgentBrowser(
   signal?: AbortSignal,
 ): Promise<ProcessResult> {
   const active = context();
+  const selectedSession = resolveBrowserSession(session, active);
   const selectedSignal = signal ?? active.signal;
   throwIfAborted(selectedSignal);
   if (unavailableReason === null) {
@@ -108,7 +148,7 @@ export async function runAgentBrowser(
       truncated: false,
     };
   }
-  const argv = [resolveBrowser(), "--session", session || defaultSession()];
+  const argv = [resolveBrowser(), "--session", selectedSession];
   const profile = browserProfile || active.profile;
   if (profile) argv.push("--browserctl-profile", profile);
   argv.push(...args);
