@@ -24,7 +24,6 @@ const suiteTemporary: string[] = [];
 let suiteCheckoutParent = "";
 let suiteProductionTemplate = "";
 let suitePreviousCheckout = "";
-let suiteLegacyInstallerRevision = "";
 const suiteSnapshotTemplates: Array<{ kind: "current" | "previous"; sha: string; root: string }> =
   [];
 const suiteFastSnapshotTemplates: Array<{
@@ -190,16 +189,6 @@ async function previousCheckout(persistent = false): Promise<string> {
     "https://github.com/possibilities/agentscrape.git/",
   ]);
   expect(remote.code).toBe(0);
-  // Execute predecessor installer bytes without changing the reachable fixture SHA.
-  const predecessorInstaller = await command([
-    "git",
-    "-C",
-    sourceRoot,
-    "show",
-    `${suiteLegacyInstallerRevision}:scripts/install.sh`,
-  ]);
-  expect(predecessorInstaller.code).toBe(0);
-  writeExecutable(join(checkout, "scripts/install.sh"), predecessorInstaller.stdout);
   return realpathSync(checkout);
 }
 
@@ -490,40 +479,98 @@ esac
   return { home, tools, state, bunLog, plutilLog, launchctlLog, serviceState, env };
 }
 
-beforeAll(async () => {
-  const helperIntroduction = await command([
-    "git",
-    "-C",
-    sourceRoot,
-    "log",
-    "--diff-filter=A",
-    "--format=%H",
-    "--",
-    "scripts/runtime-snapshot.ts",
-  ]);
-  expect(helperIntroduction.code, helperIntroduction.stderr).toBe(0);
-  const introduction = helperIntroduction.stdout.trim().split("\n").filter(Boolean).at(-1);
-  expect(introduction).toBeDefined();
-  suiteLegacyInstallerRevision = `${introduction}^`;
-  const legacyInstaller = await command([
-    "git",
-    "-C",
-    sourceRoot,
-    "cat-file",
-    "-e",
-    `${suiteLegacyInstallerRevision}:scripts/install.sh`,
-  ]);
-  expect(legacyInstaller.code, legacyInstaller.stderr).toBe(0);
-  const legacyHelper = await command([
-    "git",
-    "-C",
-    sourceRoot,
-    "cat-file",
-    "-e",
-    `${suiteLegacyInstallerRevision}:scripts/runtime-snapshot.ts`,
-  ]);
-  expect(legacyHelper.code).not.toBe(0);
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
+function xmlEscape(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+async function seedCheckoutInstallation(
+  fixture: ReturnType<typeof installEnv>,
+  checkout: string,
+  format: "current" | "legacy" = "current",
+): Promise<void> {
+  const shaResult = await command([
+    "git",
+    "-C",
+    checkout,
+    "rev-parse",
+    "--verify",
+    "HEAD^{commit}",
+  ]);
+  expect(shaResult.code, shaResult.stderr).toBe(0);
+  const sha = shaResult.stdout.trim();
+  const commandPath = join(fixture.home, ".local/bin/agentscrape");
+  const service = join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist");
+  const state = join(fixture.home, ".local/state/agentscrape");
+  const share = join(fixture.home, ".local/share/agentscrape");
+  for (const directory of [
+    dirname(commandPath),
+    dirname(service),
+    state,
+    share,
+    join(share, "queue"),
+  ]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    chmodSync(directory, 0o700);
+  }
+  const canonicalState = realpathSync(state);
+  const canonicalShare = realpathSync(share);
+  const source = join(checkout, "src/cli.ts");
+  const bun = join(fixture.tools, "bun");
+  const queue = join(canonicalShare, "queue");
+  const log = join(canonicalState, "process-queue.log");
+  const servicePath = `${dirname(bun)}:${dirname(commandPath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+  writeFileSync(
+    commandPath,
+    `#!/usr/bin/env bash\nset -euo pipefail\n# agentscrape-installer-owned: agentscrape.command.v1\n# label: agentscrape.process-queue\n# source-root: ${checkout}\n# source-sha: ${sha}\n# bun: ${bun}\nexport AGENTSCRAPE_DATA_HOME=${shellQuote(canonicalShare)}\nexec ${shellQuote(bun)} ${shellQuote(source)} "$@"\n`,
+  );
+  chmodSync(commandPath, 0o755);
+  const plist = text(join(checkout, "plist/agentscrape.process-queue.plist"))
+    .replace(/\n$/, "")
+    .replaceAll("__AGENTSCRAPE_PROGRAM__", xmlEscape(commandPath))
+    .replaceAll("__AGENTSCRAPE_PATH__", xmlEscape(servicePath))
+    .replaceAll("__AGENTSCRAPE_QUEUE__", xmlEscape(queue))
+    .replaceAll("__AGENTSCRAPE_LOG__", xmlEscape(log));
+  writeFileSync(service, plist);
+  chmodSync(service, 0o600);
+  const receiptLines = [
+    "marker=agentscrape-installer-owned: agentscrape.install-receipt.v1",
+    "label=agentscrape.process-queue",
+    `root=${checkout}`,
+    `source=${source}`,
+    `bun=${bun}`,
+    `command=${commandPath}`,
+    `service=${service}`,
+    ...(format === "current"
+      ? [`share=${canonicalShare}`, `queue=${queue}`, `log=${log}`, `path=${servicePath}`]
+      : []),
+    `sha=${sha}`,
+  ];
+  writeFileSync(join(canonicalState, "install-receipt"), `${receiptLines.join("\n")}\n`);
+  writeFileSync(join(canonicalState, "deployed-sha"), `${sha}\n`);
+  writeFileSync(log, "");
+  for (const path of [
+    join(canonicalState, "install-receipt"),
+    join(canonicalState, "deployed-sha"),
+    log,
+  ])
+    chmodSync(path, 0o600);
+  const loaded = await command(
+    [join(fixture.tools, "launchctl"), "bootstrap", `gui/${process.getuid?.() ?? 0}`, service],
+    { env: fixture.env },
+  );
+  expect(loaded.code, loaded.stderr).toBe(0);
+}
+
+beforeAll(async () => {
   suiteCheckoutParent = mkdtempSync(join(tmpdir(), "agentscrape-suite-checkout-"));
   const checkout = join(suiteCheckoutParent, "agentscrape");
   const cloned = await command(["git", "clone", "--quiet", "--shared", sourceRoot, checkout]);
@@ -851,11 +898,7 @@ describe("installer", () => {
   test("migrates an authorized checkout receipt", async () => {
     const fixture = installEnv({}, { preseedPreviousSnapshot: true });
     const prior = await previousCheckout();
-    const old = await command(["bash", join(prior, "scripts/install.sh")], {
-      cwd: prior,
-      env: fixture.env,
-    });
-    expect(old.code, old.stderr).toBe(0);
+    await seedCheckoutInstallation(fixture, prior);
     const migrated = await command(["bash", "scripts/install.sh"], { env: fixture.env });
     expect(migrated.code, migrated.stderr).toBe(0);
     const state = join(fixture.home, ".local/state/agentscrape");
@@ -868,11 +911,7 @@ describe("installer", () => {
   test("migration catchable failure restores normalized snapshot-backed prior state", async () => {
     const fixture = installEnv({}, { preseedPreviousSnapshot: true, fullSnapshots: true });
     const prior = await previousCheckout();
-    const old = await command(["bash", join(prior, "scripts/install.sh")], {
-      cwd: prior,
-      env: fixture.env,
-    });
-    expect(old.code, old.stderr).toBe(0);
+    await seedCheckoutInstallation(fixture, prior);
     const priorSha = text(join(fixture.home, ".local/state/agentscrape/deployed-sha")).trim();
     const failed = await command(["bash", "scripts/install.sh"], {
       env: { ...fixture.env, AGENTSCRAPE_INSTALL_TEST_FAILPOINT: "after-command" },
@@ -1015,16 +1054,9 @@ describe("installer", () => {
     for (const format of ["current", "legacy"] as const) {
       const fixture = installEnv();
       const prior = await previousCheckout();
-      const installed = await command(["bash", join(prior, "scripts/install.sh")], {
-        cwd: prior,
-        env: fixture.env,
-      });
-      expect(installed.code, installed.stderr).toBe(0);
+      await seedCheckoutInstallation(fixture, prior, format);
       const receipt = join(fixture.home, ".local/state/agentscrape/install-receipt");
-      const lines = text(receipt).trimEnd().split("\n");
-      expect(lines).toHaveLength(12);
-      if (format === "legacy")
-        writeFileSync(receipt, `${[...lines.slice(0, 7), lines[11]].join("\n")}\n`);
+      expect(text(receipt).trimEnd().split("\n")).toHaveLength(format === "current" ? 12 : 8);
 
       if (format === "current") {
         const foreign = await command(["bash", "scripts/install.sh", "--uninstall"], {
