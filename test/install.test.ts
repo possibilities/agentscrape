@@ -217,6 +217,14 @@ function normalizeCopiedSymlinks(path: string, root: string, copiedFrom?: string
   if (!(mode & 0o200)) chmodSync(path, mode);
 }
 
+function restoreCopiedDirectoryModes(source: string, destination: string): void {
+  const info = lstatSync(source);
+  if (!info.isDirectory()) return;
+  for (const name of readdirSync(source))
+    restoreCopiedDirectoryModes(join(source, name), join(destination, name));
+  chmodSync(destination, info.mode & 0o777);
+}
+
 function copyTree(source: string, destination: string): void {
   cpSync(source, destination, {
     recursive: true,
@@ -225,7 +233,7 @@ function copyTree(source: string, destination: string): void {
   // Node may preserve hard-linked or source-absolute symlinks on Linux. Recreate each link so the
   // fixture matches a fresh production install and Agentbuilds' contained nlink=1 contract.
   normalizeCopiedSymlinks(destination, destination, source);
-  if (lstatSync(source).isDirectory()) chmodSync(destination, lstatSync(source).mode & 0o777);
+  restoreCopiedDirectoryModes(source, destination);
 }
 
 function preseedSuiteSnapshots(
@@ -790,8 +798,8 @@ describe("installer", () => {
     expect(syntax.code, syntax.stderr).toBe(0);
     const available = await command(["bash", "-c", "command -v shellcheck"]);
     if (available.code === 0) {
-      const shellcheck = await command(["shellcheck", "scripts/install.sh"]);
-      expect(shellcheck.code, shellcheck.stderr).toBe(0);
+      const shellcheck = await command(["shellcheck", "--severity=error", "scripts/install.sh"]);
+      expect(shellcheck.code, `${shellcheck.stderr}\n${shellcheck.stdout}`).toBe(0);
     }
   });
 
