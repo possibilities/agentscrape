@@ -76,6 +76,14 @@ For an operator cutover from any predecessor deployment, use this generic sequen
 
 Run `agentscrape --help` or any command with `--help` for options.
 
+## Network egress policy
+
+Direct Markdown HTTP(S) is public-only by default. Agentscrape resolves every A/AAAA answer for each hop, rejects the hop if any answer is private, reserved, documentation, multicast, or unspecified, and dials one selected address while preserving the original HTTP Host and HTTPS SNI/certificate hostname. It repeats resolution, validation, and pinning after every redirect and rejects HTTPS downgrade redirects. Direct requests do not use ambient HTTP proxy settings.
+
+Browser-backed live routes are denied by default. The CDP/profile boundary cannot prove redirect or subresource destinations, so Agentscrape does not present DNS preflight as a browser egress sandbox. `--allow-private-network` on `fetch-markdown`, `fetch-links`, `capture-corpus`, or `check-presets --live` is explicit consent to unrestricted, unverifiable browser/profile egress. For direct Markdown the same option permits valid private/reserved destinations while retaining address pinning and per-redirect resolution. This option is an egress consent, not a content or provider trust guarantee. Offline injected HTML, corpus replay, GitHub/Gist `gh` routes, and `open-session`'s `about:blank` do not require it. Live feed discovery remains public-only and has no private-network opt-in.
+
+Registered TypeScript content handlers are trusted, unsandboxed process code. Agentscrape's direct network helpers enforce their stated policy, but arbitrary networking performed by a custom handler cannot be sandboxed by registration.
+
 ## Feed discovery
 
 Omit `FILE` for live discovery owned by Agentscrape:
@@ -111,7 +119,7 @@ Routing policy is resolved before any provider dispatch, network fetch, or brows
 3. Automatic preset matching for unambiguous page-kind patterns
 4. Parseable GitHub/Gist URLs use `gh` (unless preset/generic specified); each top-level operation has a 60-second deadline, a 16 MB aggregate `gh` stdout budget, and a maximum of 100 nonempty Gist files
 5. Unclaimed `.md` URLs use bounded direct HTTP
-6. Generic browser fallback for all other cases
+6. Generic browser fallback for all other cases (live navigation requires explicit network consent)
 
 Automatic matching first gates each preset by its declared `domain` and `aliases`, with case-insensitive hostname and `www` normalization; `domain: "*"` is the explicit host-agnostic option. Content presets may declare zero `url_patterns` for explicit-only use. Every published automatic pattern must visibly begin with `^` and end with `$`, and runtime matching additionally requires the regex to consume the entire canonical, fragment-free URL. These publication and runtime checks prevent substring and top-level-alternation matches; explicit name-based selection remains independent of URL eligibility.
 
@@ -154,17 +162,17 @@ For deployment readiness, `bun run x-readiness -- --once` probes the PATH-resolv
 
 X content metadata includes the additive parser-derived pair `content_kind` and `content_item_count`: a single post is `post`/`1`, a same-author sequence is `thread` with its observed post count, and an X Article is `article`/`1`. Quoted posts do not increase a thread count. Other extractors omit the pair, so generic fixtures remain unchanged. Consumers must accept the optional pair before this producer version is deployed; upgraded consumers continue to accept historical envelopes that omit it.
 
-Envelope failure classes are `invalid_request`, `authentication_required`, `upstream_unavailable`, `timeout`, `browser_error`, `provider_error`, `malformed_provider_output`, `empty_content`, `output_limit_exceeded`, `cancelled`, and `internal_error`. Authentication exits 2, cancellation exits 130, other failures exit 1, and success exits 0. Diagnostics and URL evidence are bounded and redacted.
+Envelope failure classes are `invalid_request`, `authentication_required`, `upstream_unavailable`, `timeout`, `browser_error`, `provider_error`, `malformed_provider_output`, `empty_content`, `output_limit_exceeded`, `cancelled`, and `internal_error`. Policy-denied invalid requests and authentication exit 2; other envelope invalid requests and failures exit 1, cancellation exits 130, and success exits 0. Diagnostics and URL evidence are bounded and redacted.
 
 ## Corpus and canaries
 
 Corpus metadata uses version `1`, declares `content`, `links`, or `nav-links` mode, and declares `success` or a typed `failure`. Content replay invokes the handler's offline HTML path. Navigation samples use deterministic static selector replay. Missing files, mismatched structured output/Markdown, unsupported versions, and wrong failure types fail the command.
 
-`check-presets --live` uses `config/preset-canaries.yaml`, validates the same registry and output contract as normal fetching, checks semantic invariants rather than exact mutable text, closes every browser session, and exits nonzero only for drift.
+`check-presets --live --allow-private-network` uses `config/preset-canaries.yaml`, validates the same registry and output contract as normal fetching, checks semantic invariants rather than exact mutable text, closes every browser session it was allowed to use, and exits nonzero only for drift.
 
 ## Queue
 
-Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, and optional `frontmatter`. Indexed submissions are rejected. Legacy indexed records are drained into immutable `frozen/` envelopes for reconciliation. Browser-host outages are captured as immutable, policy-pinned `retry/` envelopes and revisited by the LaunchAgent's 60-second interval; malformed and permanent failures are published without clobbering existing `failed/` evidence.
+Programmatic `submitScrapeJob()` calls and workers share the same queue root and exact precedence: `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`. New jobs contain `url`, `destination`, optional `summarize`, optional `frontmatter`, and optional strict boolean `allow_private_network`. `submitScrapeJob(..., { allowPrivateNetwork })` writes that field only when supplied; workers pass the exact true/false value into the complete scrape operation, and frozen/retry envelopes preserve the original record bytes. A network-policy denial is permanent rather than an upstream retry. Reconciliation may inventory the consent field but never executes network policy or `agentbrain` because of it. Indexed submissions are rejected. Legacy indexed records are drained into immutable `frozen/` envelopes for reconciliation. Browser-host outages are captured as immutable, policy-pinned `retry/` envelopes and revisited by the LaunchAgent's 60-second interval; malformed and permanent failures are published without clobbering existing `failed/` evidence.
 
 `process-queue` and `reconcile-queue --apply` share private, durable, per-name generation claims. A live owner makes peers skip while leaving the public source visible; a dead owner is recovered, and malformed, symlinked, foreign, or incomplete claim evidence fails closed. Outcomes, frozen/retry envelopes, failed records, and archives use fsynced no-clobber publication. Retirement removes only the snapshotted inode and preserves a concurrently replaced pathname. There is a narrow conditional gap between the final identity check and the private UUID rename; a generation captured in that gap is retained in the private retirement quarantine rather than unlinked. Queue processing is at least once: a crash after a provider succeeds (or destination/output is published) but before source retirement can repeat that provider/output work on recovery.
 

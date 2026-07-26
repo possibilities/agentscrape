@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { withBrowserSignal } from "./browser";
+import { withBrowserNetworkPolicy, withBrowserSignal } from "./browser";
 import { cssSelectorProblem } from "./css-selector";
 import { PresetConfigError, PresetOutputError, PresetSelectionError } from "./errors";
 import {
@@ -550,37 +550,39 @@ export async function scrapeWithPreset(
   preset: PresetConfig,
   options: HandlerOptions = {},
 ): Promise<ScrapeResult> {
-  return withBrowserSignal(options.signal, async () => {
-    const resolved = {
-      ...options,
-      browserProfile: options.browserProfile ?? preset.browser_profile,
-    };
-    if (preset.mode === "content") {
-      const handler = preset.handler ? HANDLERS[preset.handler] : undefined;
-      if (!handler)
-        throw new PresetConfigError(`Preset '${preset.name}' has no resolvable handler`);
-      return handler(url, resolved);
-    }
-    const { scrapeLinks, scrapeNavLinks } = await import("./links");
-    const links =
-      preset.mode === "links"
-        ? await scrapeLinks(url, preset.selector!, preset.toggle_selector, resolved)
-        : await scrapeNavLinks(
-            url,
-            preset.section_selector!,
-            preset.category_selector!,
-            preset.toggle_selector,
-            resolved,
-          );
-    const structured = new LinkList(links);
-    return {
-      full_html: "",
-      selected_html: "",
-      links,
-      structured,
-      markdown: structured.toMarkdown(),
-    };
-  });
+  return withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
+    withBrowserSignal(options.signal, async () => {
+      const resolved = {
+        ...options,
+        browserProfile: options.browserProfile ?? preset.browser_profile,
+      };
+      if (preset.mode === "content") {
+        const handler = preset.handler ? HANDLERS[preset.handler] : undefined;
+        if (!handler)
+          throw new PresetConfigError(`Preset '${preset.name}' has no resolvable handler`);
+        return handler(url, resolved);
+      }
+      const { scrapeLinks, scrapeNavLinks } = await import("./links");
+      const links =
+        preset.mode === "links"
+          ? await scrapeLinks(url, preset.selector!, preset.toggle_selector, resolved)
+          : await scrapeNavLinks(
+              url,
+              preset.section_selector!,
+              preset.category_selector!,
+              preset.toggle_selector,
+              resolved,
+            );
+      const structured = new LinkList(links);
+      return {
+        full_html: "",
+        selected_html: "",
+        links,
+        structured,
+        markdown: structured.toMarkdown(),
+      };
+    }),
+  );
 }
 
 export function schemaNames(): string[] {

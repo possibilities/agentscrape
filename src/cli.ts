@@ -49,17 +49,15 @@ const COMMANDS: Array<[string, string]> = [
   ["reconcile-queue", "Inventory or reconcile frozen queue records"],
 ];
 const COMMAND_HELP: Record<string, string> = {
-  "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: auto main/article/body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
-  "fetch-links": `Usage: agentscrape fetch-links URL [OPTIONS]\n\nOptions:\n  --preset NAME                  Select a links preset\n  --section-selector CSS         Section/navigation selector\n  --category-selector CSS        Category selector for two-level navigation\n  --toggle-selector CSS          Toggle/tab selector\n  --limit INTEGER                Positive X timeline item limit\n  --max-scrolls INTEGER          Positive X timeline scroll limit\n  --since-id ID                  Numeric X status cursor\n  --include-replies              Include X replies\n  --include-reposts              Include X reposts\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --json | --yaml | --markdown   Select output (default: yaml)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
+  "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: auto main/article/body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --allow-private-network        Allow private direct and unrestricted browser egress\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
+  "fetch-links": `Usage: agentscrape fetch-links URL [OPTIONS]\n\nOptions:\n  --preset NAME                  Select a links preset\n  --section-selector CSS         Section/navigation selector\n  --category-selector CSS        Category selector for two-level navigation\n  --toggle-selector CSS          Toggle/tab selector\n  --limit INTEGER                Positive X timeline item limit\n  --max-scrolls INTEGER          Positive X timeline scroll limit\n  --since-id ID                  Numeric X status cursor\n  --include-replies              Include X replies\n  --include-reposts              Include X reposts\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --allow-private-network        Allow unrestricted browser/private network egress\n  --json | --yaml | --markdown   Select output (default: yaml)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
   "discover-feed": `Usage: agentscrape discover-feed [FILE] --source-url URL [OPTIONS]\n\nWith no FILE, Agentscrape fetches the source and pagination pages directly. One FILE preserves network-free recorded-response parsing.\n\nOptions:\n  --source-url URL               Requested feed, homepage, or archive URL (required)\n  --source-kind KIND             Source interpretation: auto, feed, or archive (default: auto)\n  --page URL FILE                Recorded pagination page; requires FILE (repeatable)\n  --etag VALUE                   Conditional ETag, or recorded initial-page validator\n  --last-modified VALUE          Conditional Last-Modified, or recorded validator\n  --validator-url URL            Exact live response URL bound to validators\n  --since DATE                   Retain entries at or after DATE\n  --max-response-bytes INTEGER   1..20000000 per response (default: 2000000)\n  --max-pages INTEGER            Recorded 1..100; live 1..10 (default: 10)\n  --max-items INTEGER            1..10000 entries (default: 1000)\n  --timeout-seconds FLOAT        0.001..300 overall seconds (default: 10)\n  --archive-start-url URL        Optional configured archive start URL\n  --archive-entry-selector CSS   Required for archive discovery\n  --archive-link-selector CSS    Archive entry link selector\n  --archive-date-selector CSS    Archive publication date selector\n  --archive-date-attribute NAME  Archive date attribute\n  --archive-updated-selector CSS Archive update date selector\n  --archive-next-selector CSS    Archive pagination selector\n  --archive-id-attribute NAME    Archive stable ID attribute\n  --archive-title-selector CSS   Archive title selector\n  --archive-tombstone-selector CSS Archive tombstone selector\n  --format FORMAT                Output format: json or yaml (default: json)\n  -h, --help                     Show help`,
   "list-presets": "Usage: agentscrape list-presets [--format json|yaml|human]",
   "show-preset": "Usage: agentscrape show-preset NAME [--format json|yaml|human]",
   "validate-preset": "Usage: agentscrape validate-preset NAME_OR_PATH [--format json|yaml|human]",
-  "capture-corpus":
-    "Usage: agentscrape capture-corpus URL [--preset NAME] [--expect-failure TYPE] [--format json|yaml|human]",
+  "capture-corpus": `Usage: agentscrape capture-corpus URL [OPTIONS]\n\nOptions:\n  --preset NAME                  Select a content preset\n  --expect-failure TYPE         Capture an expected typed failure\n  --allow-private-network       Allow unrestricted browser/private network egress\n  --format json|yaml|human      Compatibility option (no-op)\n  -h, --help                    Show help`,
   "test-corpus": "Usage: agentscrape test-corpus [--preset NAME] [--format json|yaml|human]",
-  "check-presets":
-    "Usage: agentscrape check-presets --live [--preset NAME]... [--format json|yaml]",
+  "check-presets": `Usage: agentscrape check-presets --live [OPTIONS]\n\nOptions:\n  --live                         Acknowledge live canary execution (required)\n  --preset NAME                  Select a preset (repeatable)\n  --allow-private-network        Allow unrestricted browser/private network egress\n  --format json|yaml             Select output (default: json)\n  -h, --help                     Show help`,
   "convert-html":
     "Usage: agentscrape convert-html [FILE] [--dir DIRECTORY] [--format json|yaml|human]",
   "open-session": "Usage: agentscrape open-session NAME [--format json|yaml|human]",
@@ -68,7 +66,7 @@ const COMMAND_HELP: Record<string, string> = {
   "reconcile-queue":
     "Usage: agentscrape reconcile-queue [--apply] [--limit INTEGER] [--format json|yaml]\n\n--limit must be an integer from 1 through 5000 (default: 500).",
 };
-const AGENT_HELP = `Agentscrape fetches Markdown, navigation links, live or recorded feeds, and strict preset output.\n\nUse fetch-markdown URL [DEST] for documents, fetch-links URL with a preset or selectors for navigation, and discover-feed [FILE] --source-url URL for bounded live discovery or network-free recorded parsing. Browser-backed commands accept --media and --session. X timeline collection accepts --limit, --max-scrolls, --since-id, --include-replies, and --include-reposts. Envelope output is schema version 1 and emits a classified failure instead of diagnostics on stdout.`;
+const AGENT_HELP = `Agentscrape fetches Markdown, navigation links, live or recorded feeds, and strict preset output.\n\nUse fetch-markdown URL [DEST] for documents, fetch-links URL with a preset or selectors for navigation, and discover-feed [FILE] --source-url URL for bounded live discovery or network-free recorded parsing. Browser-backed commands accept --media and --session, and require --allow-private-network for live navigation. X timeline collection accepts --limit, --max-scrolls, --since-id, --include-replies, and --include-reposts. Envelope output is schema version 1 and emits a classified failure instead of diagnostics on stdout.`;
 const SCHEMA_FIELDS: Record<string, string[]> = {
   AnthropicBilling: [
     "organization: str (default='')",
@@ -160,12 +158,17 @@ function helpJson(command?: string): string {
   const usageTokens = usage.split(/\s+/).filter(Boolean);
   const documentedOptions = [
     ...commandText.matchAll(/^ {2}(--[a-z][a-z-]*)(?:\s+([^\s|]+))?\s+(.*)$/gm),
-  ].map((match) => ({
-    name: match[1],
-    type: match[2] ? "text" : "flag",
-    required: usageTokens.includes(match[1] ?? ""),
-    description: match[3]?.trim() ?? "",
-  }));
+  ].map((match) => {
+    const manualFlag = match[1] === "--allow-private-network";
+    return {
+      name: match[1],
+      type: manualFlag || !match[2] ? "flag" : "text",
+      required: usageTokens.includes(match[1] ?? ""),
+      description: manualFlag
+        ? `${match[2] ?? ""} ${match[3] ?? ""}`.trim()
+        : (match[3]?.trim() ?? ""),
+    };
+  });
   const firstOption = usageTokens.findIndex((token) => token.includes("--"));
   const positionals = usageTokens
     .slice(0, firstOption < 0 ? undefined : firstOption)
@@ -332,7 +335,15 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
       "--max-relations",
     ]),
     {},
-    new Set(["--help", "--generic", "--json", "--yaml", "--markdown", "--envelope"]),
+    new Set([
+      "--help",
+      "--generic",
+      "--allow-private-network",
+      "--json",
+      "--yaml",
+      "--markdown",
+      "--envelope",
+    ]),
   );
   const helpCode = commandHelp(parsed, "fetch-markdown");
   if (helpCode !== null) return helpCode;
@@ -350,6 +361,7 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
     session: one(parsed, "--session"),
     preset: one(parsed, "--preset"),
     generic: parsed.flags.has("--generic"),
+    allowPrivateNetwork: parsed.flags.has("--allow-private-network") || undefined,
     envelope,
     maxContentBytes: numberOption(parsed, "--max-content-bytes", 1_000_000, {
       integer: true,
@@ -384,7 +396,15 @@ async function fetchLinksCommand(args: string[], signal?: AbortSignal): Promise<
       "--session",
     ]),
     {},
-    new Set(["--help", "--include-replies", "--include-reposts", "--json", "--yaml", "--markdown"]),
+    new Set([
+      "--help",
+      "--allow-private-network",
+      "--include-replies",
+      "--include-reposts",
+      "--json",
+      "--yaml",
+      "--markdown",
+    ]),
   );
   const helpCode = commandHelp(parsed, "fetch-links");
   if (helpCode !== null) return helpCode;
@@ -407,6 +427,7 @@ async function fetchLinksCommand(args: string[], signal?: AbortSignal): Promise<
     includeReposts: parsed.flags.has("--include-reposts") || undefined,
     media,
     session: one(parsed, "--session"),
+    allowPrivateNetwork: parsed.flags.has("--allow-private-network") || undefined,
     signal,
   });
   output(resultOutput(result, selectedOutput));
@@ -672,7 +693,7 @@ async function corpusCommand(
     args,
     new Set(["--preset", "--expect-failure"]),
     {},
-    new Set(["--help"]),
+    new Set(["--help", ...(command === "capture-corpus" ? ["--allow-private-network"] : [])]),
   );
   const helpCode = commandHelp(parsed, command);
   if (helpCode !== null) return helpCode;
@@ -682,6 +703,7 @@ async function corpusCommand(
     const path = await captureCorpus(parsed.positionals[0]!, {
       preset: one(parsed, "--preset"),
       expectFailure: one(parsed, "--expect-failure"),
+      allowPrivateNetwork: parsed.flags.has("--allow-private-network") || undefined,
       signal,
     });
     console.error(`Captured corpus sample: ${path}`);
@@ -700,7 +722,7 @@ async function canaryCommand(args: string[], signal?: AbortSignal): Promise<numb
     args,
     new Set(["--preset", "--format"]),
     {},
-    new Set(["--help", "--live"]),
+    new Set(["--help", "--live", "--allow-private-network"]),
   );
   const helpCode = commandHelp(parsed, "check-presets");
   if (helpCode !== null) return helpCode;
@@ -713,6 +735,7 @@ async function canaryCommand(args: string[], signal?: AbortSignal): Promise<numb
     throw new AgentscrapeUsageError("check-presets requires --live (no non-live mode is defined)");
   const result = await checkPresets({
     presets: all(parsed, "--preset"),
+    allowPrivateNetwork: parsed.flags.has("--allow-private-network") || undefined,
     ...(signal ? { signal } : {}),
   });
   output(outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result, null, 2));

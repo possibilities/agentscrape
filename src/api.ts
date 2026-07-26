@@ -3,9 +3,11 @@ import { basename, dirname, extname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
   closeSession,
+  currentBrowserNetworkPolicy,
   requireAgentBrowserSuccess,
   resetBrowserUnavailableCache,
   runAgentBrowser,
+  withBrowserNetworkPolicy,
   withBrowserProfile,
   withBrowserSession,
   withBrowserSignal,
@@ -26,6 +28,7 @@ import {
   AgentscrapeCancelledError,
   AgentscrapeError,
   AgentscrapeHttpError,
+  AgentscrapeNetworkPolicyError,
   AgentscrapeProviderError,
   AgentscrapeRuntimeError,
   AgentscrapeTimeoutError,
@@ -45,6 +48,18 @@ import type { HandlerOptions, ScrapeResult } from "./handlers/types";
 import { captureXStatusPage, scrapeCapturedXStatus } from "./handlers/x";
 import { convertHtml as convertHtmlImpl } from "./html";
 import { scrapeLinks, scrapeNavLinks } from "./links";
+import {
+  NetworkPolicyFault,
+  NetworkResolutionFault,
+  type ResolvedAddress,
+  resolveNetworkAddress,
+} from "./network-policy";
+import {
+  PinnedHttpFault,
+  type PinnedHttpResponse,
+  pinnedHeader,
+  requestPinnedHttp,
+} from "./pinned-http";
 import {
   loadRegistry,
   matchPreset,
@@ -74,6 +89,7 @@ export {
   AgentscrapeCancelledError,
   AgentscrapeError,
   AgentscrapeHttpError,
+  AgentscrapeNetworkPolicyError,
   AgentscrapeProviderError,
   AgentscrapeRuntimeError,
   AgentscrapeTimeoutError,
@@ -88,6 +104,8 @@ export {
   parseGithubUrl,
   resetBrowserUnavailableCache,
 };
+
+const networkPolicyFailureEnvelopes = new WeakSet<ExtractionEnvelope>();
 
 export interface FetchMarkdownOptions extends HandlerOptions {
   preset?: string | null | undefined;
@@ -116,133 +134,131 @@ async function directMarkdown(
   const signal = options.signal
     ? AbortSignal.any([options.signal, timeoutController.signal])
     : timeoutController.signal;
-  let cancelActiveReader: (() => Promise<void>) | null = null;
-  const onAbort = () => {
-    void cancelActiveReader?.();
-  };
-  signal.addEventListener("abort", onAbort, { once: true });
   try {
     let current = requested;
-    let response: Response | null = null;
-    for (let redirects = 0; redirects <= 10; redirects += 1) {
+    for (let redirects = 0; ; redirects += 1) {
       throwIfAborted(options.signal);
-      response = await fetch(current, {
-        headers: { "user-agent": "agentscrape/1.0" },
-        redirect: "manual",
-        signal,
-      });
+      const currentUrl = new URL(current);
+      let address: ResolvedAddress;
+      try {
+        address = await resolveNetworkAddress(currentUrl, {
+          allowPrivateNetwork: currentBrowserNetworkPolicy(),
+          signal,
+        });
+      } catch (error) {
+        if (error instanceof NetworkPolicyFault)
+          throw new AgentscrapeNetworkPolicyError("private_destination");
+        if (error instanceof NetworkResolutionFault)
+          throw new AgentscrapeProviderError(
+            "direct Markdown destination could not be resolved",
+            true,
+          );
+        throw error;
+      }
+      let response: PinnedHttpResponse;
+      try {
+        response = await requestPinnedHttp({
+          url: currentUrl,
+          address,
+          method: "GET",
+          headers: {
+            "accept-encoding": "identity",
+            connection: "close",
+            "user-agent": "agentscrape/1.0",
+          },
+          maxResponseBytes: limit,
+          signal,
+        });
+      } catch (error) {
+        if (error instanceof PinnedHttpFault) {
+          if (error.reason === "response_limit_exceeded")
+            throw new EnvelopeBuildError(
+              "output_limit_exceeded",
+              `content exceeds the ${limit}-byte limit`,
+            );
+          throw new AgentscrapeProviderError("direct Markdown request failed", true);
+        }
+        throw error;
+      }
       throwIfAborted(options.signal);
       if (timeoutController.signal.aborted)
         throw new AgentscrapeTimeoutError("direct Markdown fetch timed out");
-      if (![301, 302, 303, 307, 308].includes(response.status)) break;
-      const location = response.headers.get("location");
-      await response.body?.cancel().catch(() => undefined);
-      if (!location)
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = pinnedHeader(response.headers, "location");
+        if (!location)
+          throw new AgentscrapeHttpError(
+            `direct Markdown redirect has no Location header (HTTP ${response.status})`,
+            response.status,
+          );
+        if (redirects >= 10)
+          throw new AgentscrapeProviderError("direct Markdown redirect limit exceeded", false);
+        let next: string;
+        try {
+          next = new URL(location, current).href;
+        } catch {
+          throw new EnvelopeBuildError(
+            "malformed_provider_output",
+            "direct Markdown redirect URL is invalid",
+          );
+        }
+        const validated = validateProviderFinalUrl(next) ?? next;
+        if (currentUrl.protocol === "https:" && new URL(validated).protocol !== "https:")
+          throw new AgentscrapeProviderError(
+            "direct Markdown redirect to HTTP is not allowed",
+            false,
+          );
+        current = validated;
+        continue;
+      }
+      if (response.status < 200 || response.status >= 300) {
+        if ([401, 403].includes(response.status))
+          throw new AgentscrapeAuthError(
+            `direct Markdown source requires authentication (HTTP ${response.status})`,
+          );
+        const retryable =
+          response.status === 408 || response.status === 429 || response.status >= 500;
         throw new AgentscrapeHttpError(
-          `direct Markdown redirect has no Location header (HTTP ${response.status})`,
+          `direct Markdown fetch failed (HTTP ${response.status})`,
           response.status,
+          retryable,
         );
-      if (redirects === 10)
-        throw new AgentscrapeProviderError("direct Markdown redirect limit exceeded", false);
-      let next: string;
+      }
+      const contentEncoding = pinnedHeader(response.headers, "content-encoding");
+      if (contentEncoding && contentEncoding.trim().toLowerCase() !== "identity")
+        throw new AgentscrapeProviderError(
+          "direct Markdown response used an unsupported content encoding",
+          false,
+        );
+      const finalUrl = validateProviderFinalUrl(current) ?? current;
+      let markdown: string;
       try {
-        next = new URL(location, current).href;
+        markdown = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
       } catch {
         throw new EnvelopeBuildError(
           "malformed_provider_output",
-          "direct Markdown redirect URL is invalid",
+          "direct Markdown response is not valid UTF-8",
         );
       }
-      current = validateProviderFinalUrl(next) ?? next;
-    }
-    if (!response) throw new AgentscrapeProviderError("direct Markdown fetch returned no response");
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      if ([401, 403].includes(response.status))
-        throw new AgentscrapeAuthError(
-          `direct Markdown source requires authentication (HTTP ${response.status})`,
-        );
-      const retryable =
-        response.status === 408 || response.status === 429 || response.status >= 500;
-      throw new AgentscrapeHttpError(
-        `direct Markdown fetch failed (HTTP ${response.status})`,
-        response.status,
-        retryable,
-      );
-    }
-    const finalUrl = validateProviderFinalUrl(response.url || current) ?? current;
-    const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > limit) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new EnvelopeBuildError(
-        "output_limit_exceeded",
-        `content exceeds the ${limit}-byte limit`,
-      );
-    }
-
-    const chunks: Uint8Array[] = [];
-    let length = 0;
-    if (response.body) {
-      const activeReader = response.body.getReader();
-      cancelActiveReader = async () => {
-        await activeReader.cancel(signal.reason).catch(() => undefined);
+      const structured = new GenericPage(finalUrl, markdown);
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown,
+        structured,
+        final_url: finalUrl,
       };
-      while (true) {
-        const { done, value } = await activeReader.read();
-        if (done) break;
-        if (!value?.byteLength) continue;
-        if (value.byteLength > limit - length) {
-          await activeReader.cancel("content limit exceeded").catch(() => undefined);
-          throw new EnvelopeBuildError(
-            "output_limit_exceeded",
-            `content exceeds the ${limit}-byte limit`,
-          );
-        }
-        chunks.push(value.slice());
-        length += value.byteLength;
-      }
-      activeReader.releaseLock();
-      cancelActiveReader = null;
     }
-    throwIfAborted(options.signal);
-    if (timeoutController.signal.aborted)
-      throw new AgentscrapeTimeoutError("direct Markdown fetch timed out");
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    let markdown: string;
-    try {
-      markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      throw new EnvelopeBuildError(
-        "malformed_provider_output",
-        "direct Markdown response is not valid UTF-8",
-      );
-    }
-    const structured = new GenericPage(finalUrl, markdown);
-    return {
-      full_html: "",
-      selected_html: "",
-      markdown,
-      structured,
-      final_url: finalUrl,
-    };
   } catch (error) {
     if (options.signal?.aborted) throw cancellationError(options.signal);
     if (timeoutController.signal.aborted)
       throw new AgentscrapeTimeoutError("direct Markdown fetch timed out");
     if (error instanceof AgentscrapeError || error instanceof EnvelopeBuildError) throw error;
     throw new AgentscrapeProviderError(
-      `direct Markdown fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+      "direct Markdown fetch failed at the network boundary",
       true,
     );
   } finally {
     clearTimeout(timer);
-    signal.removeEventListener("abort", onAbort);
-    await cancelActiveReader?.();
   }
 }
 
@@ -311,109 +327,111 @@ export async function fetchMarkdown(
   let browserUsed = false;
 
   try {
-    return await withBrowserSession(options.session, async () => {
-      let requested: string;
-      try {
-        requested = validateEnvelopeRequest(url, maxContentBytes, maxRelations);
-      } catch (error) {
-        if (
-          !envelopeMode &&
-          error instanceof EnvelopeBuildError &&
-          error.failureClass === "invalid_request"
-        )
-          throw new AgentscrapeUsageError(error.message);
-        throw error;
-      }
-      const registry = loadRegistry();
-      const selected = selectPreset(requested, registry, {
-        preset: options.preset,
-        generic: options.generic,
-      });
-      const route = markdownRoute(requested, selected, options.generic ?? false);
-
-      throwIfAborted(options.signal);
-
-      let result: ScrapeResult | null;
-      if (route.kind === "preset") {
-        const preset = route.preset;
-        hint = preset.name;
-        browserUsed = options.html === undefined || options.html === null;
-        result = await withBrowserSignal(options.signal, () =>
-          withBrowserProfile(options.browserProfile ?? preset.browser_profile, async () => {
-            const autoRouteXStatus =
-              !options.preset &&
-              preset.source === "official" &&
-              preset.name === "x-tweet" &&
-              preset.mode === "content" &&
-              preset.handler === "x.scrape_tweet" &&
-              preset.schema === "TweetThread";
-
-            if (autoRouteXStatus) {
-              const captured = await captureXStatusPage(requested, options);
-              let effectivePreset = preset;
-              if (captured.kind === "article") {
-                const articlePreset = registry.byName("x-article");
-                if (
-                  articlePreset?.source !== "official" ||
-                  articlePreset.mode !== "content" ||
-                  articlePreset.handler !== "x.scrape_article" ||
-                  articlePreset.schema !== "XArticle"
-                )
-                  throw new PresetConfigError(
-                    "automatic X status article routing requires the official x-article preset",
-                  );
-                effectivePreset = articlePreset;
-              }
-              hint = effectivePreset.name;
-              const value = await scrapeCapturedXStatus(requested, captured, options);
-              validateContentResult(value, effectivePreset);
-              return value;
-            }
-
-            const value = await scrapeWithPreset(requested, preset, options);
-            if (preset.mode === "content") validateContentResult(value, preset);
-            return value;
-          }),
-        );
-      } else if (route.kind === "generic") {
-        hint = "generic-page";
-        browserUsed = true;
-        result = await withBrowserSignal(options.signal, () =>
-          withBrowserProfile(options.browserProfile, async () =>
-            scrapePage(requested, options.selector, options),
-          ),
-        );
-      } else if (route.kind === "github") {
-        hint = "github";
-        result = await fetchGithubIfApplicable(requested, options.signal);
-      } else {
-        hint = "direct-markdown";
-        result = await directMarkdown(requested, options);
-      }
-
-      if (!result) throw new AgentscrapeRuntimeError("selected route returned no result");
-      throwIfAborted(options.signal);
-      finalUrl =
-        validateProviderFinalUrl(result.final_url) ??
-        (browserUsed && envelopeMode
-          ? await browserFinalUrl(options.session, options.signal)
-          : requested);
-
-      if (envelopeMode) {
-        const envelope = buildSuccessEnvelope(result, {
-          requestedUrl: requested,
-          finalUrl,
-          implementationHint: hint,
-          maxContentBytes,
-          maxRelations,
+    return await withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
+      withBrowserSession(options.session, async () => {
+        let requested: string;
+        try {
+          requested = validateEnvelopeRequest(url, maxContentBytes, maxRelations);
+        } catch (error) {
+          if (
+            !envelopeMode &&
+            error instanceof EnvelopeBuildError &&
+            error.failureClass === "invalid_request"
+          )
+            throw new AgentscrapeUsageError(error.message);
+          throw error;
+        }
+        const registry = loadRegistry();
+        const selected = selectPreset(requested, registry, {
+          preset: options.preset,
+          generic: options.generic,
         });
-        if (options.destination)
-          writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
-        return envelope;
-      }
-      if (options.destination) writeArtifacts(options.destination, result);
-      return result;
-    });
+        const route = markdownRoute(requested, selected, options.generic ?? false);
+
+        throwIfAborted(options.signal);
+
+        let result: ScrapeResult | null;
+        if (route.kind === "preset") {
+          const preset = route.preset;
+          hint = preset.name;
+          browserUsed = options.html === undefined || options.html === null;
+          result = await withBrowserSignal(options.signal, () =>
+            withBrowserProfile(options.browserProfile ?? preset.browser_profile, async () => {
+              const autoRouteXStatus =
+                !options.preset &&
+                preset.source === "official" &&
+                preset.name === "x-tweet" &&
+                preset.mode === "content" &&
+                preset.handler === "x.scrape_tweet" &&
+                preset.schema === "TweetThread";
+
+              if (autoRouteXStatus) {
+                const captured = await captureXStatusPage(requested, options);
+                let effectivePreset = preset;
+                if (captured.kind === "article") {
+                  const articlePreset = registry.byName("x-article");
+                  if (
+                    articlePreset?.source !== "official" ||
+                    articlePreset.mode !== "content" ||
+                    articlePreset.handler !== "x.scrape_article" ||
+                    articlePreset.schema !== "XArticle"
+                  )
+                    throw new PresetConfigError(
+                      "automatic X status article routing requires the official x-article preset",
+                    );
+                  effectivePreset = articlePreset;
+                }
+                hint = effectivePreset.name;
+                const value = await scrapeCapturedXStatus(requested, captured, options);
+                validateContentResult(value, effectivePreset);
+                return value;
+              }
+
+              const value = await scrapeWithPreset(requested, preset, options);
+              if (preset.mode === "content") validateContentResult(value, preset);
+              return value;
+            }),
+          );
+        } else if (route.kind === "generic") {
+          hint = "generic-page";
+          browserUsed = true;
+          result = await withBrowserSignal(options.signal, () =>
+            withBrowserProfile(options.browserProfile, async () =>
+              scrapePage(requested, options.selector, options),
+            ),
+          );
+        } else if (route.kind === "github") {
+          hint = "github";
+          result = await fetchGithubIfApplicable(requested, options.signal);
+        } else {
+          hint = "direct-markdown";
+          result = await directMarkdown(requested, options);
+        }
+
+        if (!result) throw new AgentscrapeRuntimeError("selected route returned no result");
+        throwIfAborted(options.signal);
+        finalUrl =
+          validateProviderFinalUrl(result.final_url) ??
+          (browserUsed && envelopeMode
+            ? await browserFinalUrl(options.session, options.signal)
+            : requested);
+
+        if (envelopeMode) {
+          const envelope = buildSuccessEnvelope(result, {
+            requestedUrl: requested,
+            finalUrl,
+            implementationHint: hint,
+            maxContentBytes,
+            maxRelations,
+          });
+          if (options.destination)
+            writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
+          return envelope;
+        }
+        if (options.destination) writeArtifacts(options.destination, result);
+        return result;
+      }),
+    );
   } catch (error) {
     if (envelopeMode) {
       const envelope = buildFailureEnvelope(error, {
@@ -421,6 +439,8 @@ export async function fetchMarkdown(
         finalUrl,
         implementation: hint,
       });
+      if (error instanceof AgentscrapeNetworkPolicyError)
+        networkPolicyFailureEnvelopes.add(envelope);
       if (options.destination)
         writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
       return envelope;
@@ -443,102 +463,108 @@ export async function fetchLinks(
   url: string,
   options: FetchLinksOptions = {},
 ): Promise<ScrapeResult<LinkList>> {
-  return withBrowserSession(options.session, async () => {
-    if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1))
-      throw new AgentscrapeUsageError("--limit must be a positive integer");
-    if (
-      options.maxScrolls !== undefined &&
-      (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
-    )
-      throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
-    if (options.sinceId !== undefined && options.sinceId !== null && !/^\d+$/.test(options.sinceId))
-      throw new AgentscrapeUsageError("--since-id must contain only digits");
-    const timelineKeys: Array<[keyof HandlerOptions, string]> = [
-      ["limit", "--limit"],
-      ["maxScrolls", "--max-scrolls"],
-      ["sinceId", "--since-id"],
-      ["includeReplies", "--include-replies"],
-      ["includeReposts", "--include-reposts"],
-    ];
-    const supplied = timelineKeys.find(
-      ([key]) => options[key] !== undefined && options[key] !== false && options[key] !== null,
-    );
-    const hasCallerSelector = [
-      options.sectionSelector,
-      options.categorySelector,
-      options.toggleSelector,
-    ].some((selector) => selector !== undefined && selector !== null);
-    if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
-      throw new AgentscrapeUsageError(
-        "an explicit preset cannot be combined with caller selectors",
+  return withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
+    withBrowserSession(options.session, async () => {
+      if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1))
+        throw new AgentscrapeUsageError("--limit must be a positive integer");
+      if (
+        options.maxScrolls !== undefined &&
+        (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
+      )
+        throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
+      if (
+        options.sinceId !== undefined &&
+        options.sinceId !== null &&
+        !/^\d+$/.test(options.sinceId)
+      )
+        throw new AgentscrapeUsageError("--since-id must contain only digits");
+      const timelineKeys: Array<[keyof HandlerOptions, string]> = [
+        ["limit", "--limit"],
+        ["maxScrolls", "--max-scrolls"],
+        ["sinceId", "--since-id"],
+        ["includeReplies", "--include-replies"],
+        ["includeReposts", "--include-reposts"],
+      ];
+      const supplied = timelineKeys.find(
+        ([key]) => options[key] !== undefined && options[key] !== false && options[key] !== null,
       );
-    let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
-    let resolvedPreset: string | null = null;
-    const registry = loadRegistry();
-    const preset = options.preset
-      ? registry.byName(options.preset)
-      : !hasCallerSelector
-        ? matchPreset(url, registry.presets)
-        : null;
-    if (options.preset && !preset)
-      throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
-    resolvedPreset = preset?.name ?? null;
-    if (supplied && resolvedPreset !== "x-timeline")
-      throw new AgentscrapeUsageError(`${supplied[1]} is only valid with the x-timeline preset`);
-    for (const [label, selector] of [
-      ["section selector", options.sectionSelector],
-      ["category selector", options.categorySelector],
-      ["toggle selector", options.toggleSelector],
-    ] as const) {
-      if (selector === undefined || selector === null) continue;
-      const problem = cssSelectorProblem(selector);
-      if (problem) throw new AgentscrapeUsageError(`Invalid ${label} '${selector}': ${problem}`);
-    }
-    result = await withBrowserSignal(options.signal, () =>
-      withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
-        if (preset) return scrapeWithPreset(url, preset, options);
-        let links: LinkItem[];
-        try {
-          if (options.sectionSelector && options.categorySelector)
-            links = await scrapeNavLinks(
-              url,
-              options.sectionSelector,
-              options.categorySelector,
-              options.toggleSelector ?? undefined,
-              options,
-            );
-          else if (options.sectionSelector || options.categorySelector)
-            links = await scrapeLinks(
-              url,
-              options.sectionSelector ?? options.categorySelector!,
-              options.toggleSelector ?? undefined,
-              options,
-            );
-          else
-            throw new AgentscrapeUsageError(
-              "provide --preset or at least one selector (--section-selector / --category-selector)",
-            );
-        } catch (error) {
-          if (error instanceof PresetDriftError) throw new AgentscrapeUsageError(error.message);
-          throw error;
-        }
-        const structured = new LinkList(links);
-        return {
-          full_html: "",
-          selected_html: "",
-          links,
-          markdown: structured.toMarkdown(),
-          structured,
-        };
-      }),
-    );
-    throwIfAborted(options.signal);
-    if (!result.links)
-      throw new AgentscrapeUsageError(
-        `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
+      const hasCallerSelector = [
+        options.sectionSelector,
+        options.categorySelector,
+        options.toggleSelector,
+      ].some((selector) => selector !== undefined && selector !== null);
+      if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
+        throw new AgentscrapeUsageError(
+          "an explicit preset cannot be combined with caller selectors",
+        );
+      let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
+      let resolvedPreset: string | null = null;
+      const registry = loadRegistry();
+      const preset = options.preset
+        ? registry.byName(options.preset)
+        : !hasCallerSelector
+          ? matchPreset(url, registry.presets)
+          : null;
+      if (options.preset && !preset)
+        throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
+      resolvedPreset = preset?.name ?? null;
+      if (supplied && resolvedPreset !== "x-timeline")
+        throw new AgentscrapeUsageError(`${supplied[1]} is only valid with the x-timeline preset`);
+      for (const [label, selector] of [
+        ["section selector", options.sectionSelector],
+        ["category selector", options.categorySelector],
+        ["toggle selector", options.toggleSelector],
+      ] as const) {
+        if (selector === undefined || selector === null) continue;
+        const problem = cssSelectorProblem(selector);
+        if (problem) throw new AgentscrapeUsageError(`Invalid ${label} '${selector}': ${problem}`);
+      }
+      result = await withBrowserSignal(options.signal, () =>
+        withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
+          if (preset) return scrapeWithPreset(url, preset, options);
+          let links: LinkItem[];
+          try {
+            if (options.sectionSelector && options.categorySelector)
+              links = await scrapeNavLinks(
+                url,
+                options.sectionSelector,
+                options.categorySelector,
+                options.toggleSelector ?? undefined,
+                options,
+              );
+            else if (options.sectionSelector || options.categorySelector)
+              links = await scrapeLinks(
+                url,
+                options.sectionSelector ?? options.categorySelector!,
+                options.toggleSelector ?? undefined,
+                options,
+              );
+            else
+              throw new AgentscrapeUsageError(
+                "provide --preset or at least one selector (--section-selector / --category-selector)",
+              );
+          } catch (error) {
+            if (error instanceof PresetDriftError) throw new AgentscrapeUsageError(error.message);
+            throw error;
+          }
+          const structured = new LinkList(links);
+          return {
+            full_html: "",
+            selected_html: "",
+            links,
+            markdown: structured.toMarkdown(),
+            structured,
+          };
+        }),
       );
-    return result as ScrapeResult<LinkList>;
-  });
+      throwIfAborted(options.signal);
+      if (!result.links)
+        throw new AgentscrapeUsageError(
+          `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
+        );
+      return result as ScrapeResult<LinkList>;
+    }),
+  );
 }
 
 export function convertHtml(html: string): string {
@@ -558,12 +584,15 @@ export function submitScrapeJob(
     frontmatter?: Record<string, unknown>;
     indexer?: string;
     source?: string;
+    allowPrivateNetwork?: boolean;
   } = {},
 ): string {
   if (options.indexer !== undefined || options.source !== undefined)
     throw new Error(
       "indexed scrape queue submissions are frozen; use the dedicated ingestion command",
     );
+  if (options.allowPrivateNetwork !== undefined && typeof options.allowPrivateNetwork !== "boolean")
+    throw new AgentscrapeUsageError("allowPrivateNetwork must be a boolean when provided");
   const queue = resolveQueuePaths().queue;
   mkdirSync(queue, { recursive: true, mode: 0o700 });
   const name = `${Date.now()}-${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}.yaml`;
@@ -574,6 +603,9 @@ export function submitScrapeJob(
     destination,
     ...(options.summarize ? { summarize: true } : {}),
     ...(options.frontmatter ? { frontmatter: options.frontmatter } : {}),
+    ...(options.allowPrivateNetwork !== undefined
+      ? { allow_private_network: options.allowPrivateNetwork }
+      : {}),
   };
   writeFileSync(temporary, stringifyYaml(job), { flag: "wx", mode: 0o600 });
   const fileDescriptor = openSync(temporary, "r");
@@ -593,6 +625,7 @@ export function submitScrapeJob(
 }
 
 export function envelopeExitCode(envelope: ExtractionEnvelope): number {
+  if (networkPolicyFailureEnvelopes.has(envelope)) return 2;
   return envelope.status === "failure" ? failureExitCode(envelope.failure!.failure_class) : 0;
 }
 export function structuredJson(result: ScrapeResult): unknown {

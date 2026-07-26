@@ -217,10 +217,80 @@ describe("queue data root resolution", () => {
   }
 });
 
+describe("durable network consent", () => {
+  test("accepts only strict booleans and forwards exact true and false values", async () => {
+    const value = fixture();
+    const calls = join(value.home, "consent-calls.jsonl");
+    for (const [name, consent] of [
+      ["a-true", "true"],
+      ["b-false", "false"],
+    ])
+      writeFileSync(
+        join(value.queue, `${name}.yaml`),
+        `url: https://example.com/${name}\ndestination: ${join(value.home, `${name}.md`)}\nallow_private_network: ${consent}\n`,
+      );
+    writeFileSync(
+      join(value.queue, "c-invalid.yaml"),
+      `url: https://example.com/invalid\ndestination: ${join(value.home, "invalid.md")}\nallow_private_network: "true"\n`,
+    );
+    const script = [
+      'import { mock } from "bun:test";',
+      'import { appendFileSync, writeFileSync } from "node:fs";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, JSON.stringify(options.allowPrivateNetwork) + "\\n"); writeFileSync(options.destination, "done\\n"); } }));',
+      'const { processQueue } = await import("./src/queue.ts?network-consent-forwarding");',
+      "process.stdout.write(JSON.stringify(await processQueue()));",
+    ].join("\n");
+    const child = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home, TEST_CALLS: calls },
+      }),
+    );
+    expect(child.code, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ processed: 2, failed: 1 });
+    expect(
+      readFileSync(calls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual([true, false]);
+  });
+
+  test("classifies a network-policy denial as permanent without retry state", async () => {
+    const value = fixture();
+    writeFileSync(
+      join(value.queue, "denied.yaml"),
+      `url: https://example.com/denied\ndestination: ${join(value.home, "denied.md")}\n`,
+    );
+    const script = [
+      'import { mock } from "bun:test";',
+      'import { AgentscrapeNetworkPolicyError } from "./src/errors.ts";',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new AgentscrapeNetworkPolicyError("browser_egress_unverifiable"); } }));',
+      'const { processQueue } = await import("./src/queue.ts?network-consent-permanent");',
+      "process.stdout.write(JSON.stringify(await processQueue()));",
+    ].join("\n");
+    const child = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(child.code, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ failed: 1, retry_scheduled: 0 });
+    const retry = join(value.home, ".local/share/agentscrape/retry");
+    expect(existsSync(retry) ? readdirSync(retry) : []).toEqual([]);
+  });
+});
+
 describe("frozen and durable retry queue states", () => {
   test("drains indexed YAML into a strict frozen envelope and reconciles its logical identity", async () => {
     const value = fixture();
     const source = queueRecord(value.queue, "legacy.yaml");
+    writeFileSync(source, `${readFileSync(source, "utf8")}allow_private_network: false\n`);
     const original = readFileSync(source);
     const processed = await finish(startProcess(value));
     expect(processed.code, processed.stderr).toBe(0);
@@ -273,10 +343,8 @@ describe("frozen and durable retry queue states", () => {
   test("schedules an immutable retry, waits without provider work, then resumes when due", async () => {
     const value = fixture();
     const destination = join(value.home, "retry.md");
-    writeFileSync(
-      join(value.queue, "retry.yaml"),
-      `url: https://example.com/retry\ndestination: ${destination}\n`,
-    );
+    const raw = `url: https://example.com/retry\ndestination: ${destination}\nallow_private_network: true\n`;
+    writeFileSync(join(value.queue, "retry.yaml"), raw);
     const outageScript = [
       'import { mock } from "bun:test";',
       'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
@@ -315,13 +383,11 @@ describe("frozen and durable retry queue states", () => {
       nextAttemptAtMs: 1124,
       policy: { initialDelaySeconds: 0.1234, maxDelaySeconds: 60, maxAttempts: 5 },
     });
+    expect(Buffer.from(retry.rawBase64, "base64").toString("utf8")).toBe(raw);
 
     // Recreate the exact ready predecessor to model a crash after retry publication but before
     // ready retirement. A not-due pass must still drain it so QueueDirectories can go idle.
-    writeFileSync(
-      join(value.queue, "retry.yaml"),
-      `url: https://example.com/retry\ndestination: ${destination}\n`,
-    );
+    writeFileSync(join(value.queue, "retry.yaml"), raw);
     const waitingScript = [
       'import { mock } from "bun:test";',
       'mock.module("./src/api.ts", () => ({',
@@ -348,7 +414,7 @@ describe("frozen and durable retry queue states", () => {
       'import { mock } from "bun:test";',
       'import { writeFileSync } from "node:fs";',
       'mock.module("./src/api.ts", () => ({',
-      "  fetchMarkdown: async (_url, options) => { writeFileSync(options.destination, '# retry success\\n'); },",
+      "  fetchMarkdown: async (_url, options) => { if (options.allowPrivateNetwork !== true) throw new Error('consent not preserved'); writeFileSync(options.destination, '# retry success\\n'); },",
       '  resetBrowserUnavailableCache() { throw new Error("queue must not reset browser cache"); },',
       "}));",
       'const { processQueue } = await import("./src/queue.ts?retry-due-test");',
@@ -1753,7 +1819,7 @@ describe("queue processing claim publication", () => {
     try {
       writeFileSync(
         join(value.queue, "normal.yaml"),
-        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\n`,
+        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nallow_private_network: true\n`,
       );
       const script = [
         'import { mock } from "bun:test";',
@@ -1862,7 +1928,7 @@ describe("queue processing claim publication", () => {
     try {
       writeFileSync(
         join(value.queue, "job.yaml"),
-        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\n`,
+        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nallow_private_network: true\n`,
       );
       const owner = startProcess(value);
       await seen;
@@ -1900,7 +1966,7 @@ describe("queue processing claim publication", () => {
     try {
       writeFileSync(
         source,
-        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\n`,
+        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nallow_private_network: true\n`,
       );
       const script = [
         'import { mock } from "bun:test";',
@@ -1969,7 +2035,7 @@ describe("queue processing claim publication", () => {
     const value = fixture();
     const destination = join(value.home, "unsynced.md");
     const source = join(value.queue, "unsynced.yaml");
-    const queueBytes = `url: https://placeholder.invalid/document.md\ndestination: ${destination}\n`;
+    const queueBytes = `url: https://placeholder.invalid/document.md\ndestination: ${destination}\nallow_private_network: true\n`;
     const server = Bun.serve({
       port: 0,
       fetch: () =>
@@ -2068,7 +2134,7 @@ describe("queue processing claim publication", () => {
     try {
       writeFileSync(
         source,
-        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nsummarize: true\n`,
+        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nsummarize: true\nallow_private_network: true\n`,
       );
       const worker = startProcess(value, {
         SUMMARY_READY: summaryReady,
@@ -2119,7 +2185,7 @@ describe("queue processing claim publication", () => {
     try {
       writeFileSync(
         source,
-        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nsummarize: true\n`,
+        `url: ${new URL("document.md", server.url).href}\ndestination: ${destination}\nsummarize: true\nallow_private_network: true\n`,
       );
       const worker = startProcess(value, { SUMMARY_READY: summaryReady });
       await waitFor(summaryReady);

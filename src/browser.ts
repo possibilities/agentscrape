@@ -17,6 +17,7 @@ import {
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
+  AgentscrapeNetworkPolicyError,
   AgentscrapeTimeoutError,
   AgentscrapeUpstreamDownError,
   AgentscrapeUsageError,
@@ -47,10 +48,18 @@ interface BrowserContext {
   profile: string | null;
   signal: AbortSignal | null;
   session: BrowserSessionScope | null;
+  allowPrivateNetwork: boolean;
 }
 const browserContext = new AsyncLocalStorage<BrowserContext>();
 function context(): BrowserContext {
-  return browserContext.getStore() ?? { profile: null, signal: null, session: null };
+  return (
+    browserContext.getStore() ?? {
+      profile: null,
+      signal: null,
+      session: null,
+      allowPrivateNetwork: false,
+    }
+  );
 }
 
 function defaultSession(): string {
@@ -281,6 +290,25 @@ export async function withBrowserSignal<T>(
   throwIfAborted(selected);
   return browserContext.run({ ...context(), signal: selected }, fn);
 }
+export function currentBrowserNetworkPolicy(): boolean {
+  return context().allowPrivateNetwork;
+}
+export async function withBrowserNetworkPolicy<T>(
+  allowPrivateNetwork: boolean | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (allowPrivateNetwork !== undefined && typeof allowPrivateNetwork !== "boolean")
+    throw new AgentscrapeUsageError("allowPrivateNetwork must be a boolean when provided");
+  const active = context();
+  return browserContext.run(
+    {
+      ...active,
+      allowPrivateNetwork:
+        allowPrivateNetwork === undefined ? active.allowPrivateNetwork : allowPrivateNetwork,
+    },
+    fn,
+  );
+}
 export async function withBrowserSession<T>(
   requested: string | null | undefined,
   fn: (scope: BrowserSessionScope, owner: boolean) => Promise<T>,
@@ -312,6 +340,10 @@ function resolveBrowser(home = runtimeHome()): string {
     "agent-browser"
   );
 }
+function isNetworkFreeBrowserCommand(args: string[]): boolean {
+  return args.length === 2 && args[0] === "open" && args[1] === "about:blank";
+}
+
 export async function runAgentBrowser(
   args: string[],
   session?: string | null,
@@ -320,9 +352,11 @@ export async function runAgentBrowser(
   signal?: AbortSignal,
 ): Promise<ProcessResult> {
   const active = context();
-  const selectedSession = resolveBrowserSession(session, active);
   const selectedSignal = signal ?? active.signal;
   throwIfAborted(selectedSignal);
+  if (!active.allowPrivateNetwork && !isNetworkFreeBrowserCommand(args))
+    throw new AgentscrapeNetworkPolicyError("browser_egress_unverifiable");
+  const selectedSession = resolveBrowserSession(session, active);
   const profile = browserProfile || active.profile;
   const home = runtimeHome();
   const path = healthStatePath(home);
@@ -479,6 +513,10 @@ export async function openPage(
   media?: string | null,
   contentSelector?: string | null,
 ): Promise<void> {
+  const active = context();
+  throwIfAborted(active.signal);
+  if (!active.allowPrivateNetwork)
+    throw new AgentscrapeNetworkPolicyError("browser_egress_unverifiable");
   await setMediaMode(media, session);
   const before = await currentUrl(session);
   const opened = await runAgentBrowser(["open", url], session);

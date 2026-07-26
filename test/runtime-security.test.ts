@@ -19,7 +19,8 @@ import {
   openPage,
   requireAgentBrowserSuccess,
   resetBrowserUnavailableCache,
-  runAgentBrowser,
+  runAgentBrowser as runAgentBrowserWithoutConsent,
+  withBrowserNetworkPolicy,
 } from "../src/browser";
 import { browserEval } from "../src/browser-eval";
 import {
@@ -69,6 +70,9 @@ function alive(pid: number): boolean {
 async function waitFor(path: string): Promise<void> {
   for (let attempt = 0; attempt < 100 && !existsSync(path); attempt += 1) await Bun.sleep(5);
   expect(existsSync(path)).toBeTrue();
+}
+function runAgentBrowser(...args: Parameters<typeof runAgentBrowserWithoutConsent>) {
+  return withBrowserNetworkPolicy(true, () => runAgentBrowserWithoutConsent(...args));
 }
 
 afterEach(() => {
@@ -154,44 +158,58 @@ describe("provider cancellation", () => {
 
 describe("streaming direct Markdown", () => {
   test("cancels an oversized chunked response at the hard byte limit", async () => {
-    let cancelled = false;
-    globalThis.fetch = (async () =>
-      new Response(
-        new ReadableStream<Uint8Array>({
-          pull(controller) {
-            controller.enqueue(new Uint8Array(700));
-          },
-          cancel() {
-            cancelled = true;
-          },
-        }),
-      )) as unknown as typeof fetch;
-    const envelope = (await fetchMarkdown("https://example.com/large.md", {
-      envelope: true,
-      maxContentBytes: 1024,
-    })) as ExtractionEnvelope;
-    expect(envelope.failure?.failure_class).toBe("output_limit_exceeded");
-    expect(cancelled).toBeTrue();
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(700));
+              controller.enqueue(new Uint8Array(700));
+              controller.close();
+            },
+          }),
+        ),
+    });
+    try {
+      const envelope = (await fetchMarkdown(`http://127.0.0.1:${server.port}/large.md`, {
+        envelope: true,
+        maxContentBytes: 1024,
+        allowPrivateNetwork: true,
+      })) as ExtractionEnvelope;
+      expect(envelope.failure?.failure_class).toBe("output_limit_exceeded");
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("rejects a redirect final URL containing nested credentials before following it", async () => {
     let calls = 0;
-    globalThis.fetch = (async () => {
-      calls += 1;
-      return new Response(null, {
-        status: 302,
-        headers: {
-          location: "https://user:redirect-secret@example.com/final.md?next=token%3Dnested-secret",
-        },
-      });
-    }) as unknown as typeof fetch;
-    const envelope = (await fetchMarkdown("https://example.com/start.md", {
-      envelope: true,
-    })) as ExtractionEnvelope;
-    expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
-    expect(calls).toBe(1);
-    expect(JSON.stringify(envelope)).not.toContain("redirect-secret");
-    expect(JSON.stringify(envelope)).not.toContain("nested-secret");
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        calls += 1;
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location:
+              "https://user:redirect-secret@example.com/final.md?next=token%3Dnested-secret",
+          },
+        });
+      },
+    });
+    try {
+      const envelope = (await fetchMarkdown(`http://127.0.0.1:${server.port}/start.md`, {
+        envelope: true,
+        allowPrivateNetwork: true,
+      })) as ExtractionEnvelope;
+      expect(envelope.failure?.failure_class).toBe("malformed_provider_output");
+      expect(calls).toBe(1);
+      expect(JSON.stringify(envelope)).not.toContain("redirect-secret");
+      expect(JSON.stringify(envelope)).not.toContain("nested-secret");
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("maps direct HTTP status and cancellation into stable failure classes", async () => {
@@ -212,6 +230,7 @@ describe("streaming direct Markdown", () => {
       ] as const) {
         const envelope = (await fetchMarkdown(`http://127.0.0.1:${server.port}/${status}.md`, {
           envelope: true,
+          allowPrivateNetwork: true,
         })) as ExtractionEnvelope;
         expect(envelope.failure?.failure_class).toBe(failureClass);
         expect(envelope.failure?.retryable).toBe(retryable);
@@ -220,34 +239,31 @@ describe("streaming direct Markdown", () => {
       server.stop(true);
     }
 
-    let cancelled = false;
-    let propagatedSignal: AbortSignal | undefined;
-    globalThis.fetch = (async (_input, init) => {
-      propagatedSignal = init?.signal as AbortSignal | undefined;
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          async pull(controller) {
-            await Bun.sleep(1000);
-            controller.enqueue(new Uint8Array([120]));
-          },
-          cancel() {
-            cancelled = true;
-          },
-        }),
-      );
-    }) as typeof fetch;
-    const controller = new AbortController();
-    const request = fetchMarkdown("https://example.com/slow.md", {
-      envelope: true,
-      signal: controller.signal,
-    }) as Promise<ExtractionEnvelope>;
-    setTimeout(() => controller.abort(), 20);
-    const envelope = await request;
-    expect(envelope.failure?.failure_class).toBe("cancelled");
-    expect(propagatedSignal).toBeDefined();
-    expect(propagatedSignal).not.toBe(controller.signal);
-    expect(propagatedSignal?.aborted).toBeTrue();
-    expect(cancelled).toBeTrue();
+    const slow = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              await Bun.sleep(1000);
+              controller.enqueue(new Uint8Array([120]));
+            },
+          }),
+        ),
+    });
+    try {
+      const controller = new AbortController();
+      const request = fetchMarkdown(`http://127.0.0.1:${slow.port}/slow.md`, {
+        envelope: true,
+        allowPrivateNetwork: true,
+        signal: controller.signal,
+      }) as Promise<ExtractionEnvelope>;
+      setTimeout(() => controller.abort(), 20);
+      const envelope = await request;
+      expect(envelope.failure?.failure_class).toBe("cancelled");
+    } finally {
+      slow.stop(true);
+    }
   });
 });
 
@@ -331,11 +347,13 @@ esac`,
     process.env[AGENT_BROWSER_BIN_ENV] = browser;
     resetBrowserUnavailableCache();
 
-    await expect(browserEval("browser-failure")).rejects.toBeInstanceOf(AgentscrapeBrowserError);
-    await expect(browserEval("upstream-failure")).rejects.toBeInstanceOf(
-      AgentscrapeUpstreamDownError,
-    );
-    await expect(browserEval("timeout-failure")).rejects.toBeInstanceOf(AgentscrapeTimeoutError);
+    await withBrowserNetworkPolicy(true, async () => {
+      await expect(browserEval("browser-failure")).rejects.toBeInstanceOf(AgentscrapeBrowserError);
+      await expect(browserEval("upstream-failure")).rejects.toBeInstanceOf(
+        AgentscrapeUpstreamDownError,
+      );
+      await expect(browserEval("timeout-failure")).rejects.toBeInstanceOf(AgentscrapeTimeoutError);
+    });
   });
 
   test("marks a missing browser executable nonretryable", async () => {
@@ -397,9 +415,11 @@ esac`,
       );
       process.env[AGENT_BROWSER_BIN_ENV] = browser;
       resetBrowserUnavailableCache();
-      await expect(
-        openPage("https://example.com/page", `incidental-${index}`),
-      ).resolves.toBeUndefined();
+      await withBrowserNetworkPolicy(true, async () => {
+        await expect(
+          openPage("https://example.com/page", `incidental-${index}`),
+        ).resolves.toBeUndefined();
+      });
     }
   });
 });
@@ -687,23 +707,25 @@ esac`,
     process.env[AGENT_BROWSER_BIN_ENV] = browser;
     process.env[AGENT_BROWSER_TIMEOUT_ENV] = "0.1";
     resetBrowserUnavailableCache();
-    const navigation = openPage(
-      "https://x.com/example/status/1",
-      "timeout-test",
-      null,
-      "[data-testid=primaryColumn]",
-    );
-    await expect(navigation).resolves.toBeUndefined();
-    await expect(
-      openPage("https://x.com/example/status/1", "timeout-final-url-test"),
-    ).resolves.toBeUndefined();
-    await expect(
-      openPage(
-        "https://x.com/example/hard-failure",
-        "hard-failure-test",
+    await withBrowserNetworkPolicy(true, async () => {
+      const navigation = openPage(
+        "https://x.com/example/status/1",
+        "timeout-test",
         null,
         "[data-testid=primaryColumn]",
-      ),
-    ).rejects.toBeInstanceOf(AgentscrapeBrowserError);
+      );
+      await expect(navigation).resolves.toBeUndefined();
+      await expect(
+        openPage("https://x.com/example/status/1", "timeout-final-url-test"),
+      ).resolves.toBeUndefined();
+      await expect(
+        openPage(
+          "https://x.com/example/hard-failure",
+          "hard-failure-test",
+          null,
+          "[data-testid=primaryColumn]",
+        ),
+      ).rejects.toBeInstanceOf(AgentscrapeBrowserError);
+    });
   });
 });

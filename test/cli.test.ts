@@ -257,7 +257,7 @@ describe("CLI offline smoke suite", () => {
     );
     expect(`${malformedPage.stdout}${malformedPage.stderr}`).not.toContain("broken");
   });
-  test("envelope mode handles invalid and claimed-domain requests without a browser", async () => {
+  test("unrelated envelope invalid requests retain operational exit behavior", async () => {
     const invalid = await command(["fetch-markdown", "not-a-url", "--envelope"]);
     expect(invalid.code).toBe(1);
     const invalidEnvelope = JSON.parse(invalid.stdout);
@@ -271,15 +271,56 @@ describe("CLI offline smoke suite", () => {
     expect(claimed.code).toBe(1);
     expect(JSON.parse(claimed.stdout).failure.failure_class).toBe("invalid_request");
   });
+  test("forwards explicit direct-network consent without making it global", async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1;
+        return new Response("# CLI direct");
+      },
+    });
+    try {
+      const url = `http://127.0.0.1:${server.port}/page.md`;
+      const denied = await command(["fetch-markdown", url, "--envelope"]);
+      expect(denied.code).toBe(2);
+      expect(JSON.parse(denied.stdout).failure.failure_class).toBe("invalid_request");
+      expect(requests).toBe(0);
+      const allowed = await command([
+        "fetch-markdown",
+        url,
+        "--envelope",
+        "--allow-private-network",
+      ]);
+      expect(allowed.code).toBe(0);
+      expect(JSON.parse(allowed.stdout).status).toBe("success");
+      expect(requests).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("corpus filter smoke passes", async () => {
     const result = await command(["test-corpus", "--preset", "deepwiki-wiki-page"]);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("2 passed, 0 failed");
   });
-  test("canary command requires an explicit live acknowledgement", async () => {
-    const result = await command(["check-presets"]);
-    expect(result.code).toBe(2);
-    expect(result.stderr).toContain("requires --live");
+  test("canary command requires live acknowledgement and browser network consent", async () => {
+    const withoutLive = await command(["check-presets"]);
+    expect(withoutLive.code).toBe(2);
+    expect(withoutLive.stderr).toContain("requires --live");
+
+    const withoutConsent = await command([
+      "check-presets",
+      "--live",
+      "--preset",
+      "deepwiki-wiki-page",
+    ]);
+    expect(withoutConsent.code).toBe(2);
+    expect(withoutConsent.stdout).toBe("");
+    expect(withoutConsent.stderr).toContain(
+      "Browser-backed live navigation requires explicit unrestricted network consent",
+    );
   });
   test("empty queue and reconciliation commands are safe in an isolated home", async () => {
     const home = temp();
@@ -414,8 +455,17 @@ describe("CLI offline smoke suite", () => {
       "--generic",
       "--max-content-bytes",
       "--max-relations",
+      "--allow-private-network",
     ])
       expect(markdownHelp).toContain(option);
+    const captureHelp = (await command(["capture-corpus", "--help"])).stdout;
+    const canaryHelp = (await command(["check-presets", "--help"])).stdout;
+    expect(captureHelp).toContain("--allow-private-network");
+    expect(canaryHelp).toContain("--allow-private-network");
+    const captureJson = JSON.parse((await command(["capture-corpus", "--help-json"])).stdout);
+    expect(
+      captureJson.arguments.find((argument: any) => argument.name === "--allow-private-network"),
+    ).toMatchObject({ type: "flag", required: false });
     const linksHelp = (await command(["fetch-links", "--help"])).stdout;
     for (const option of [
       "--section-selector",
@@ -428,6 +478,7 @@ describe("CLI offline smoke suite", () => {
       "--include-reposts",
       "--media",
       "--session",
+      "--allow-private-network",
     ])
       expect(linksHelp).toContain(option);
   });
@@ -490,6 +541,7 @@ describe("CLI offline smoke suite", () => {
           "src/cli.ts",
           "fetch-markdown",
           `http://127.0.0.1:${server.port}/slow.md`,
+          "--allow-private-network",
           ...(envelope ? ["--envelope"] : []),
         ],
         { cwd: root, stdout: "pipe", stderr: "pipe" },

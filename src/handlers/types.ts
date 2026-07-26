@@ -13,6 +13,7 @@ export interface HandlerOptions {
   html?: string | null | undefined;
   media?: string | null | undefined;
   browserProfile?: string | null | undefined;
+  allowPrivateNetwork?: boolean | undefined;
   limit?: number | undefined;
   maxScrolls?: number | undefined;
   sinceId?: string | null | undefined;
