@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { currentBrowserProfile, withBrowserProfile } from "../src/browser";
 import { checkInvariants } from "../src/canary";
-import { loadMeta, runSample, testCorpus } from "../src/corpus";
+import {
+  atomicSample,
+  CORPUS_AGGREGATE_MAX_BYTES,
+  CORPUS_ARTIFACT_MAX_BYTES,
+  loadMeta,
+  runSample,
+  testCorpus,
+} from "../src/corpus";
 import { isGithubUrl, parseGithubUrl } from "../src/github";
 import { convertHtml, fencedCodeBlock, renderRichMarkdown, safeLink } from "../src/html";
 import { loadRegistry } from "../src/presets";
 import { retryDelay } from "../src/queue";
-import { isSensitiveName, redactDiagnostic } from "../src/redaction";
+import { isSensitiveName, redactDiagnostic, sanitizeErrorInPlace } from "../src/redaction";
 import { DeepWikiSearchConversation, DeepWikiWikiPage } from "../src/schemas";
 import { runProcess } from "../src/subprocess";
 
@@ -89,6 +96,26 @@ describe("shared redaction", () => {
       new TextEncoder().encode(redactDiagnostic("λ".repeat(2000))).byteLength,
     ).toBeLessThanOrEqual(1024);
   });
+  test("rebuilds public stacks without recursively changing aggregate causes", () => {
+    const child = new Error("child remains unchanged");
+    const cause = new Error("cause remains unchanged");
+    const error = new AggregateError([child], "public message\napi_key=message-secret", {
+      cause,
+    });
+    error.name = "unsafe\nidentity";
+    error.stack =
+      "unsafe identity: public message\nraw custom api_key=stack-secret\n/Users/private/source.ts";
+
+    expect(sanitizeErrorInPlace(error)).toBe(error);
+    expect(error.message).toBe("public message api_key=[REDACTED]");
+    expect(error.stack).toBe("Error: public message api_key=[REDACTED]");
+    expect(error.stack).not.toContain("stack-secret");
+    expect(error.stack).not.toContain("/Users/private");
+    expect(error.cause).toBe(cause);
+    expect(error.errors).toEqual([child]);
+    expect(cause.message).toBe("cause remains unchanged");
+    expect(child.message).toBe("child remains unchanged");
+  });
 });
 
 describe("browser request context", () => {
@@ -159,6 +186,36 @@ describe("corpus, canary, and queue contracts", () => {
     expect(result.failed).toBe(0);
     expect(result.passed).toBe(27);
   });
+  test("corpus samples use private modes and preflight per-file and aggregate byte caps", () => {
+    const root = _temp();
+    const directory = join(root, "private-sample");
+    const exact = "x".repeat(CORPUS_ARTIFACT_MAX_BYTES);
+    const sample = atomicSample(directory, { "meta.yaml": "version: 1\n", "page.html": exact });
+    expect(lstatSync(sample).mode & 0o077).toBe(0);
+    for (const name of readdirSync(sample))
+      expect(lstatSync(join(sample, name)).mode & 0o077).toBe(0);
+
+    const oversizedDirectory = join(root, "oversized");
+    expect(() =>
+      atomicSample(oversizedDirectory, {
+        "meta.yaml": "version: 1\n",
+        "page.html": `${exact}x`,
+      }),
+    ).toThrow(`${CORPUS_ARTIFACT_MAX_BYTES}-byte limit`);
+    expect(existsSync(oversizedDirectory)).toBeFalse();
+
+    const aggregateDirectory = join(root, "aggregate");
+    expect(() =>
+      atomicSample(aggregateDirectory, {
+        "meta.yaml": "m",
+        "page.html": exact,
+        "selected.html": exact,
+        "expected.md": exact,
+      }),
+    ).toThrow(`${CORPUS_AGGREGATE_MAX_BYTES}-byte aggregate limit`);
+    expect(existsSync(aggregateDirectory)).toBeFalse();
+  });
+
   test("historical negative names reject the wrong dedicated failure category", async () => {
     const registry = loadRegistry();
     const tweetDirectory = join(import.meta.dir, "corpus/x-tweet/sample-002");

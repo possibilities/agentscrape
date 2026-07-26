@@ -3,8 +3,10 @@ import {
   chmodSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -20,6 +22,7 @@ import {
   requireAgentBrowserSuccess,
   resetBrowserUnavailableCache,
   runAgentBrowser as runAgentBrowserWithoutConsent,
+  withBrowserArtifactRetention,
   withBrowserNetworkPolicy,
 } from "../src/browser";
 import { browserEval } from "../src/browser-eval";
@@ -73,6 +76,62 @@ async function waitFor(path: string): Promise<void> {
 }
 function runAgentBrowser(...args: Parameters<typeof runAgentBrowserWithoutConsent>) {
   return withBrowserNetworkPolicy(true, () => runAgentBrowserWithoutConsent(...args));
+}
+function artifactBrowser(directory: string): { browser: string; events: string; outside: string } {
+  const browser = join(directory, "artifact-browser");
+  const events = join(directory, "events.jsonl");
+  const outside = join(directory, "outside.png");
+  writeFileSync(outside, "outside evidence");
+  writeFileSync(
+    browser,
+    `#!/usr/bin/env bun
+import { appendFileSync, symlinkSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const session = args[1] || "";
+const command = args.slice(2);
+appendFileSync(${JSON.stringify(events)}, JSON.stringify({ session, command }) + "\\n");
+if (command[0] === "open" || command[0] === "close" || (command[0] === "wait" && command[1] === "--load")) process.exit(0);
+if (command[0] === "wait") {
+  console.error("page text PRIVATE-PAGE-TEXT token=WAIT-SECRET eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signaturevalue");
+  process.exit(7);
+}
+if (command[0] === "eval" && command[1] === "window.location.href") {
+  console.log(JSON.stringify("https://example.com/private?token=URL-SECRET#fragment-secret"));
+  process.exit(0);
+}
+if (command[0] === "screenshot") {
+  const path = command[1];
+  if (session === "oversize") writeFileSync(path, Buffer.alloc(10_000_001));
+  else if (session === "unsafe") symlinkSync(${JSON.stringify(outside)}, path);
+  else if (session === "failure") process.exit(8);
+  else if (session === "cancel") { console.error("cancelled screenshot token=CANCEL-SECRET"); process.exit(130); }
+  else writeFileSync(path, "private screenshot");
+  process.exit(0);
+}
+process.exit(0);
+`,
+  );
+  chmodSync(browser, 0o755);
+  return { browser, events, outside };
+}
+function artifactDirectories(): Set<string> {
+  return new Set(
+    readdirSync(tmpdir())
+      .filter((name) => name.startsWith("agentscrape-artifacts-"))
+      .map((name) => join(tmpdir(), name)),
+  );
+}
+async function selectorFailure(session: string, retainArtifacts: boolean): Promise<Error> {
+  try {
+    await withBrowserArtifactRetention(retainArtifacts, () =>
+      withBrowserNetworkPolicy(true, () =>
+        openPage("https://example.com/request?token=REQUEST-SECRET", session, null, "main"),
+      ),
+    );
+    throw new Error("selector failure unexpectedly succeeded");
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 afterEach(() => {
@@ -396,6 +455,24 @@ esac`,
         truncated: false,
       }),
     ).toThrow(AgentscrapeCancelledError);
+    try {
+      requireAgentBrowserSuccess({
+        argv: ["agent-browser", "eval", "token=ARGV-SECRET"],
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "timeout exceeded while eval token=TIMEOUT-SECRET https://example.com/page?token=URL-SECRET",
+        timedOut: false,
+        truncated: false,
+      });
+    } catch (error) {
+      expect(error).toBeInstanceOf(AgentscrapeTimeoutError);
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toBe("agent-browser operation timed out");
+      expect(message).not.toContain("eval");
+      expect(message).not.toContain("example.com");
+      expect(message).not.toContain("SECRET");
+    }
   });
 
   test("best-effort browser probes ignore incidental stderr on successful commands", async () => {
@@ -421,6 +498,89 @@ esac`,
         ).resolves.toBeUndefined();
       });
     }
+  });
+});
+
+describe("selector diagnostic artifact retention", () => {
+  test("default selector exhaustion evaluates only href and creates no screenshot or temp directory", async () => {
+    const directory = temp();
+    const fake = artifactBrowser(directory);
+    process.env.HOME = temp();
+    process.env[AGENT_BROWSER_BIN_ENV] = fake.browser;
+    const before = artifactDirectories();
+    const error = await selectorFailure("default", false);
+    expect(error).toBeInstanceOf(AgentscrapeBrowserError);
+    expect((error as AgentscrapeBrowserError).artifactDirectory).toBeUndefined();
+    expect(artifactDirectories()).toEqual(before);
+    const recorded = readFileSync(fake.events, "utf8");
+    expect(recorded).not.toContain("screenshot");
+    expect(recorded).not.toContain("document.title");
+    expect(recorded).not.toContain("document.body");
+    expect(recorded).toContain("window.location.href");
+  });
+
+  test("explicit retention keeps concurrent screenshots in unique private directories", async () => {
+    const directory = temp();
+    const fake = artifactBrowser(directory);
+    process.env.HOME = temp();
+    process.env[AGENT_BROWSER_BIN_ENV] = fake.browser;
+    const errors = await Promise.all([
+      selectorFailure("normal-a", true),
+      selectorFailure("normal-b", true),
+    ]);
+    const paths = errors.map((error) => {
+      expect(error).toBeInstanceOf(AgentscrapeBrowserError);
+      const browserError = error as AgentscrapeBrowserError;
+      expect(browserError.artifactDirectory).toBeString();
+      expect(browserError.message).not.toContain(browserError.artifactDirectory!);
+      expect(browserError.message).not.toContain("URL-SECRET");
+      expect(browserError.message).not.toContain("WAIT-SECRET");
+      expect(browserError.message).not.toContain("PRIVATE-PAGE-TEXT");
+      expect(browserError.message).not.toContain("signaturevalue");
+      expect(new TextEncoder().encode(browserError.message).byteLength).toBeLessThanOrEqual(1024);
+      return browserError.artifactDirectory!;
+    });
+    expect(new Set(paths).size).toBe(2);
+    for (const path of paths) {
+      temporary.push(path);
+      expect(lstatSync(path).mode & 0o077).toBe(0);
+      const files = readdirSync(path);
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^[0-9a-f-]{36}\.png$/);
+      expect(lstatSync(join(path, files[0]!)).mode & 0o077).toBe(0);
+      expect(readFileSync(join(path, files[0]!), "utf8")).toBe("private screenshot");
+    }
+    const screenshotEvents = readFileSync(fake.events, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { command: string[] })
+      .filter((event) => event.command[0] === "screenshot");
+    expect(screenshotEvents).toHaveLength(2);
+    for (const event of screenshotEvents) {
+      expect(event.command[1]).not.toContain(String(process.pid));
+      expect(event.command[1]).not.toContain("SECRET");
+    }
+  });
+
+  test("oversize, unsafe, and failed captures clean owned directories without replacing the primary", async () => {
+    const directory = temp();
+    const fake = artifactBrowser(directory);
+    process.env.HOME = temp();
+    process.env[AGENT_BROWSER_BIN_ENV] = fake.browser;
+    const before = artifactDirectories();
+    for (const session of ["oversize", "unsafe", "failure"]) {
+      const error = await selectorFailure(session, true);
+      expect(error).toBeInstanceOf(AgentscrapeBrowserError);
+      expect(error.message).toStartWith("Content not found for the requested selector.");
+      expect((error as AgentscrapeBrowserError).artifactDirectory).toBeUndefined();
+      expect(artifactDirectories()).toEqual(before);
+    }
+    expect(readFileSync(fake.outside, "utf8")).toBe("outside evidence");
+
+    const cancelled = await selectorFailure("cancel", true);
+    expect(cancelled).toBeInstanceOf(AgentscrapeCancelledError);
+    expect(cancelled.message).not.toContain("CANCEL-SECRET");
+    expect(artifactDirectories()).toEqual(before);
   });
 });
 

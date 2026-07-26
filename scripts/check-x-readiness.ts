@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { AgentscrapeCancelledError } from "../src/errors";
+import { redactDiagnostic } from "../src/redaction";
 import { findExecutable, runProcess } from "../src/subprocess";
 
 const PRESETS = ["x-timeline", "x-article"] as const;
@@ -107,7 +108,9 @@ if (import.meta.main) {
   } catch (error) {
     if (error instanceof HelpRequested) process.exitCode = 0;
     else {
-      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        redactDiagnostic(`Error: ${error instanceof Error ? error.message : String(error)}`),
+      );
       process.exitCode = 2;
     }
   }

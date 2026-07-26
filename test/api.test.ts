@@ -1,9 +1,21 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  AgentscrapeArtifactError,
+  AgentscrapeUsageError,
   convertHtml,
   envelopeExitCode,
   extractStatusId,
@@ -12,6 +24,12 @@ import {
   type ScrapeResult,
   ScrapeSchema,
 } from "../src/api";
+import {
+  __atomicReplaceForTest,
+  preflightTextArtifacts,
+  RETAINED_TEXT_ARTIFACT_AGGREGATE_MAX_BYTES,
+  RETAINED_TEXT_ARTIFACT_MAX_BYTES,
+} from "../src/artifacts";
 import type { ExtractionEnvelope } from "../src/schemas";
 
 const temporary: string[] = [];
@@ -72,6 +90,162 @@ describe("public TypeScript API", () => {
       server.stop(true);
     }
   });
+  test("retained text artifacts enforce exact UTF-8 per-file and aggregate limits", () => {
+    const exact = "x".repeat(RETAINED_TEXT_ARTIFACT_MAX_BYTES);
+    expect(preflightTextArtifacts([{ path: "one", content: exact }])[0]?.bytes.byteLength).toBe(
+      RETAINED_TEXT_ARTIFACT_MAX_BYTES,
+    );
+    expect(() => preflightTextArtifacts([{ path: "one", content: `${exact}x` }])).toThrow(
+      AgentscrapeArtifactError,
+    );
+    expect(() =>
+      preflightTextArtifacts([
+        { path: "one", content: exact },
+        { path: "two", content: exact },
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      preflightTextArtifacts([
+        { path: "one", content: exact },
+        { path: "two", content: exact },
+        { path: "three", content: "x" },
+      ]),
+    ).toThrow(
+      `text artifacts exceed the ${RETAINED_TEXT_ARTIFACT_AGGREGATE_MAX_BYTES}-byte aggregate limit`,
+    );
+    expect(() =>
+      preflightTextArtifacts([
+        { path: "one", content: "é".repeat(RETAINED_TEXT_ARTIFACT_MAX_BYTES / 2) },
+      ]),
+    ).not.toThrow();
+  });
+
+  test("API destinations omit sidecars by default and retain private sidecars only on exact true", async () => {
+    const directory = temp();
+    const html = readFileSync(
+      join(import.meta.dir, "corpus/x-tweet/sample-001/selected.html"),
+      "utf8",
+    );
+    const defaultDestination = join(directory, "default.md");
+    const retainedDestination = join(directory, "retained.md");
+    await fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+      html,
+      destination: defaultDestination,
+    });
+    expect(existsSync(join(directory, "default.raw.html"))).toBeFalse();
+    expect(existsSync(join(directory, "default.selected.html"))).toBeFalse();
+
+    const retained = (await fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+      html,
+      destination: retainedDestination,
+      retainArtifacts: true,
+    })) as ScrapeResult;
+    const selected = join(directory, "retained.selected.html");
+    expect(readFileSync(selected, "utf8")).toBe(retained.selected_html);
+    expect(lstatSync(selected).mode & 0o077).toBe(0);
+    expect(existsSync(join(directory, "retained.raw.html"))).toBeFalse();
+  });
+
+  test("sidecar preflight precedes destination writes and atomic replacement never follows a symlink", async () => {
+    const directory = temp();
+    const fixture = readFileSync(
+      join(import.meta.dir, "corpus/x-tweet/sample-001/selected.html"),
+      "utf8",
+    );
+    const oversized = `${fixture}<!--${"x".repeat(RETAINED_TEXT_ARTIFACT_MAX_BYTES)}-->`;
+    const destination = join(directory, "bounded.md");
+    writeFileSync(destination, "caller destination remains");
+    await expect(
+      fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+        html: oversized,
+        destination,
+        retainArtifacts: true,
+      }),
+    ).rejects.toBeInstanceOf(AgentscrapeArtifactError);
+    expect(readFileSync(destination, "utf8")).toBe("caller destination remains");
+    expect(existsSync(join(directory, "bounded.selected.html"))).toBeFalse();
+
+    const outside = join(directory, "outside.html");
+    const sidecar = join(directory, "bounded.selected.html");
+    writeFileSync(outside, "outside target");
+    symlinkSync(outside, sidecar);
+    const retained = (await fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+      html: fixture,
+      destination,
+      retainArtifacts: true,
+    })) as ScrapeResult;
+    expect(readFileSync(outside, "utf8")).toBe("outside target");
+    expect(lstatSync(sidecar).isSymbolicLink()).toBeFalse();
+    expect(readFileSync(sidecar, "utf8")).toBe(retained.selected_html);
+    expect(lstatSync(sidecar).mode & 0o077).toBe(0);
+  });
+
+  test("atomic sidecar publication rejects a replaced staging pathname without unlinking it", () => {
+    const directory = temp();
+    const destination = join(directory, "result.selected.html");
+    const foreign = join(directory, "foreign.html");
+    const bytes = Buffer.from("private selected HTML", "utf8");
+    writeFileSync(foreign, "foreign target");
+    let staging = "";
+    let displaced = "";
+
+    expect(() =>
+      __atomicReplaceForTest({ path: destination, bytes }, (temporaryPath) => {
+        staging = temporaryPath;
+        displaced = `${temporaryPath}.displaced`;
+        renameSync(temporaryPath, displaced);
+        symlinkSync(foreign, temporaryPath);
+      }),
+    ).toThrow("failed to retain a text artifact");
+
+    expect(existsSync(destination)).toBeFalse();
+    expect(lstatSync(staging).isSymbolicLink()).toBeTrue();
+    expect(readFileSync(foreign, "utf8")).toBe("foreign target");
+    expect(readFileSync(displaced, "utf8")).toBe("private selected HTML");
+  });
+
+  test("artifact retention validates before envelope routing or destination writes", async () => {
+    const directory = temp();
+    const destination = join(directory, "must-not-exist.json");
+    await expect(
+      fetchMarkdown("not-a-url", {
+        envelope: true,
+        retainArtifacts: true,
+        destination,
+      }),
+    ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    expect(existsSync(destination)).toBeFalse();
+    await expect(
+      fetchMarkdown("not-a-url", { retainArtifacts: "yes" as unknown as boolean }),
+    ).rejects.toThrow("retainArtifacts must be a boolean");
+  });
+
+  test("artifact publication failures expose only a fixed typed diagnostic", async () => {
+    const directory = temp();
+    const destination = join(directory, "publication.md");
+    const blockedSidecar = join(directory, "publication.selected.html");
+    mkdirSync(blockedSidecar);
+    let failure: unknown;
+    try {
+      await fetchMarkdown("https://x.com/i/status/2013334888515088526", {
+        html: readFileSync(
+          join(import.meta.dir, "corpus/x-tweet/sample-001/selected.html"),
+          "utf8",
+        ),
+        destination,
+        retainArtifacts: true,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AgentscrapeArtifactError);
+    const artifactError = failure as AgentscrapeArtifactError;
+    expect(artifactError.message).toBe("failed to retain a text artifact");
+    expect("cause" in artifactError).toBeFalse();
+    expect(artifactError.stack).toBe("AgentscrapeArtifactError: failed to retain a text artifact");
+    expect(artifactError.stack).not.toContain(directory);
+  });
+
   test("only immediate network-policy envelopes receive usage exit behavior", async () => {
     const invalid = (await fetchMarkdown("not-a-url", {
       envelope: true,

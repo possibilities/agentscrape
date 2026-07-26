@@ -2,15 +2,19 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import {
+  chmodSync,
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
   lstatSync,
+  mkdtempSync,
   openSync,
   readSync,
+  rmSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMap, parseDocument } from "yaml";
 import {
@@ -24,7 +28,7 @@ import {
   asError,
   throwIfAborted,
 } from "./errors";
-import { boundUtf8, redactDiagnostic } from "./redaction";
+import { boundUtf8, redactDiagnostic, redactUrl } from "./redaction";
 import { findExecutable, type ProcessResult, runProcess } from "./subprocess";
 
 export const AGENT_BROWSER_BIN_ENV = "AGENTSCRAPE_AGENT_BROWSER_BIN";
@@ -38,6 +42,8 @@ const HEALTH_FRESHNESS_MS = 15 * 60_000;
 const HEALTH_FUTURE_SKEW_MS = 60_000;
 const HEALTH_MAX_BYTES = 16 * 1024;
 const UPSTREAM_REASON_MAX_BYTES = 1024;
+const SCREENSHOT_MAX_BYTES = 10_000_000n;
+const SCREENSHOT_DIRECTORY_PREFIX = "agentscrape-artifacts-";
 const outageCache = new Map<string, { reason: string; expiresAtMs: number }>();
 export interface BrowserSessionScope {
   name: string;
@@ -49,6 +55,7 @@ interface BrowserContext {
   signal: AbortSignal | null;
   session: BrowserSessionScope | null;
   allowPrivateNetwork: boolean;
+  retainArtifacts: boolean;
 }
 const browserContext = new AsyncLocalStorage<BrowserContext>();
 function context(): BrowserContext {
@@ -58,6 +65,7 @@ function context(): BrowserContext {
       signal: null,
       session: null,
       allowPrivateNetwork: false,
+      retainArtifacts: false,
     }
   );
 }
@@ -290,6 +298,25 @@ export async function withBrowserSignal<T>(
   throwIfAborted(selected);
   return browserContext.run({ ...context(), signal: selected }, fn);
 }
+export function currentBrowserArtifactRetention(): boolean {
+  return context().retainArtifacts;
+}
+export async function withBrowserArtifactRetention<T>(
+  retainArtifacts: boolean | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (retainArtifacts !== undefined && typeof retainArtifacts !== "boolean")
+    throw new AgentscrapeUsageError("retainArtifacts must be a boolean when provided");
+  const active = context();
+  return browserContext.run(
+    {
+      ...active,
+      retainArtifacts:
+        retainArtifacts === undefined ? active.retainArtifacts : retainArtifacts === true,
+    },
+    fn,
+  );
+}
 export function currentBrowserNetworkPolicy(): boolean {
   return context().allowPrivateNetwork;
 }
@@ -401,7 +428,7 @@ export async function runAgentBrowser(
   throwIfAborted(selectedSignal);
   if (result.exitCode === 0) outageCache.delete(key);
   if (result.timedOut) {
-    result.stderr = `${AGENT_BROWSER_TIMEOUT_PREFIX}${timeoutMs(timeoutOverrideMs) / 1000}s: ${argv.join(" ")}`;
+    result.stderr = `${AGENT_BROWSER_TIMEOUT_PREFIX}${timeoutMs(timeoutOverrideMs) / 1000}s`;
   } else if (
     result.exitCode !== 0 &&
     !isCancelledResult(result) &&
@@ -444,7 +471,8 @@ export function requireAgentBrowserSuccess(
   if (isCancelledResult(result)) throw new AgentscrapeCancelledError(detail);
   if (result.stderr.startsWith(UPSTREAM_DOWN_PREFIX))
     throw new AgentscrapeUpstreamDownError(result.stderr);
-  if (isTimeoutResult(result)) throw new AgentscrapeTimeoutError(detail);
+  if (isTimeoutResult(result))
+    throw new AgentscrapeTimeoutError("agent-browser operation timed out");
   throw new AgentscrapeBrowserError(`${command}: ${detail}`, retryable);
 }
 export async function setMediaMode(
@@ -471,23 +499,131 @@ async function currentUrl(session?: string | null): Promise<string | null> {
   // Navigation evidence is a best-effort probe; its absence is handled by the primary command.
   return result.exitCode === 0 ? result.stdout.trim().replace(/^"|"$/g, "") : null;
 }
-async function diagnostics(session?: string | null): Promise<Record<string, string>> {
-  const evalValue = async (expression: string) => {
-    const result = await runAgentBrowser(["eval", expression], session);
-    throwUpstream(result);
-    // Diagnostics never replace the primary browser failure.
-    return result.exitCode === 0 ? result.stdout.trim().replace(/^"|"$/g, "") : "";
-  };
-  const screenshot = `/tmp/agentscrape-debug-${process.pid}.png`;
-  const [url, title, hint] = await Promise.all([
-    evalValue("window.location.href"),
-    evalValue("document.title"),
-    evalValue("document.body?.innerText?.substring(0, 200) || ''"),
-  ]);
-  const captured = await runAgentBrowser(["screenshot", screenshot], session);
-  throwUpstream(captured);
-  // Screenshot capture is also diagnostic-only and may fail without changing classification.
-  return { url, title, hint, screenshot };
+async function diagnosticUrl(session?: string | null): Promise<string | null> {
+  const active = context();
+  try {
+    const result = await runAgentBrowser(["eval", "window.location.href"], session);
+    if (result.exitCode !== 0) {
+      if (isCancelledResult(result))
+        throw new AgentscrapeCancelledError(
+          result.stderr.trim() || "browser diagnostic was cancelled",
+        );
+      throwIfAborted(active.signal);
+      return null;
+    }
+    let value: unknown = result.stdout.trim();
+    try {
+      value = JSON.parse(value as string);
+    } catch {
+      // Browser wrappers may return a bare URL.
+    }
+    return typeof value === "string" && value ? redactUrl(value, 768) : null;
+  } catch (error) {
+    throwIfAborted(active.signal);
+    if (error instanceof AgentscrapeCancelledError) throw error;
+    return null;
+  }
+}
+function currentUid(): bigint | null {
+  return process.getuid ? BigInt(process.getuid()) : null;
+}
+function secureScreenshotStat(value: HealthStat): boolean {
+  const uid = currentUid();
+  return (
+    uid !== null &&
+    value.isFile() &&
+    value.uid === uid &&
+    value.nlink === 1n &&
+    value.size <= SCREENSHOT_MAX_BYTES &&
+    (value.mode & 0o177n) === 0n
+  );
+}
+interface DirectoryIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+function ownedScreenshotDirectory(path: string, expected?: DirectoryIdentity): boolean {
+  const uid = currentUid();
+  const value = lstatSync(path, { bigint: true });
+  return (
+    uid !== null &&
+    value.isDirectory() &&
+    !value.isSymbolicLink() &&
+    value.uid === uid &&
+    (!expected || (value.dev === expected.dev && value.ino === expected.ino))
+  );
+}
+function secureScreenshotDirectory(path: string, expected?: DirectoryIdentity): boolean {
+  return (
+    ownedScreenshotDirectory(path, expected) &&
+    (lstatSync(path, { bigint: true }).mode & 0o077n) === 0n
+  );
+}
+async function retainScreenshot(session?: string | null): Promise<string | undefined> {
+  const active = context();
+  if (!active.retainArtifacts) return undefined;
+  const directory = mkdtempSync(join(tmpdir(), SCREENSHOT_DIRECTORY_PREFIX));
+  let retained = false;
+  let directoryIdentity: DirectoryIdentity | null = null;
+  try {
+    const created = lstatSync(directory, { bigint: true });
+    directoryIdentity = { dev: created.dev, ino: created.ino };
+    chmodSync(directory, 0o700);
+    if (!secureScreenshotDirectory(directory, directoryIdentity))
+      throw new Error("unsafe screenshot directory");
+    const screenshot = join(directory, `${randomUUID()}.png`);
+    const captured = await runAgentBrowser(["screenshot", screenshot], session);
+    if (captured.exitCode !== 0) {
+      if (isCancelledResult(captured))
+        throw new AgentscrapeCancelledError(
+          captured.stderr.trim() || "browser screenshot was cancelled",
+        );
+      throw new Error("screenshot capture failed");
+    }
+    const descriptor = openSync(screenshot, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = fstatSync(descriptor, { bigint: true });
+      if (
+        !before.isFile() ||
+        before.uid !== currentUid() ||
+        before.nlink !== 1n ||
+        before.size > SCREENSHOT_MAX_BYTES
+      )
+        throw new Error("unsafe screenshot artifact");
+      fchmodSync(descriptor, 0o600);
+      const secured = fstatSync(descriptor, { bigint: true });
+      const named = lstatSync(screenshot, { bigint: true });
+      if (
+        !secureScreenshotStat(secured) ||
+        !secureScreenshotStat(named) ||
+        named.isSymbolicLink() ||
+        secured.dev !== named.dev ||
+        secured.ino !== named.ino ||
+        !sameHealthStat(secured, fstatSync(descriptor, { bigint: true })) ||
+        !sameHealthStat(named, lstatSync(screenshot, { bigint: true }))
+      )
+        throw new Error("unstable screenshot artifact");
+    } finally {
+      closeSync(descriptor);
+    }
+    if (!secureScreenshotDirectory(directory, directoryIdentity))
+      throw new Error("unsafe screenshot directory");
+    retained = true;
+    return directory;
+  } catch (error) {
+    throwIfAborted(active.signal);
+    if (error instanceof AgentscrapeCancelledError) throw error;
+    return undefined;
+  } finally {
+    if (!retained && directoryIdentity) {
+      try {
+        if (ownedScreenshotDirectory(directory, directoryIdentity))
+          rmSync(directory, { recursive: true, force: true });
+      } catch {
+        // Cleanup is best-effort and limited to the exact random directory inode we created.
+      }
+    }
+  }
 }
 function reachedNavigationTarget(
   current: string | null,
@@ -544,9 +680,14 @@ export async function openPage(
       throwUpstream(result);
       if (result.exitCode === 0) return;
     }
-    const info = await diagnostics(session);
+    const url = await diagnosticUrl(session);
+    const artifactDirectory = await retainScreenshot(session);
     throw new AgentscrapeBrowserError(
-      `Content not found (selector: ${contentSelector})\n  URL:        ${info.url}\n  Title:      ${info.title}\n  Body hint:  ${info.hint}\n  Screenshot: ${info.screenshot}`,
+      url
+        ? `Content not found for the requested selector. Current URL: ${url}`
+        : "Content not found for the requested selector.",
+      true,
+      artifactDirectory,
     );
   }
 
@@ -554,9 +695,7 @@ export async function openPage(
   const after = await currentUrl(session);
   if (reachedNavigationTarget(after, url, before)) return;
   if (navigationTimedOut)
-    throw new AgentscrapeTimeoutError(
-      opened.stderr || `Navigation to ${url} timed out without final URL evidence`,
-    );
+    throw new AgentscrapeTimeoutError("browser navigation timed out without final URL evidence");
   throw new AgentscrapeBrowserError(
     `Failed to open URL: ${opened.stderr.trim() || "browser navigation failed"}`,
   );

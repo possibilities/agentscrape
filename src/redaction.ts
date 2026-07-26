@@ -1,3 +1,5 @@
+export const PUBLIC_DIAGNOSTIC_MAX_BYTES = 1024;
+
 export const SENSITIVE_QUERY_TOKENS = new Set([
   "assertion",
   "authorization",
@@ -248,7 +250,7 @@ function redactSensitiveAssignments(value: string): string {
   return text;
 }
 
-export function redactDiagnostic(value: unknown, maxBytes = 1024): string {
+export function redactDiagnostic(value: unknown, maxBytes = PUBLIC_DIAGNOSTIC_MAX_BYTES): string {
   const raw = String(value || "no additional diagnostic");
   const normalizedMax = Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : 0;
   const processingLimit = Math.max(4096, normalizedMax * 8);
@@ -270,4 +272,26 @@ export function redactDiagnostic(value: unknown, maxBytes = 1024): string {
   text = redactSensitiveAssignments(redactPlain(text));
   text = replaceControlCharacters(text).replace(/\s+/g, " ").trim();
   return boundUtf8(text || "no additional diagnostic", maxBytes);
+}
+
+export function sanitizeErrorInPlace(error: unknown): Error {
+  const value = error instanceof Error ? error : new Error(String(error));
+  const message = redactDiagnostic(value.message, PUBLIC_DIAGNOSTIC_MAX_BYTES);
+  const identity = /^[A-Za-z][A-Za-z0-9.$_-]{0,127}$/.test(value.name) ? value.name : "Error";
+  const stack = redactDiagnostic(`${identity}: ${message}`, PUBLIC_DIAGNOSTIC_MAX_BYTES);
+  try {
+    value.message = message;
+  } catch {
+    Object.defineProperty(value, "message", { configurable: true, value: message, writable: true });
+  }
+  try {
+    value.stack = stack;
+  } catch {
+    Object.defineProperty(value, "stack", {
+      configurable: true,
+      value: stack,
+      writable: true,
+    });
+  }
+  return value;
 }

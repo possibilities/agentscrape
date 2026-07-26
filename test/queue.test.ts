@@ -236,7 +236,7 @@ describe("durable network consent", () => {
     const script = [
       'import { mock } from "bun:test";',
       'import { appendFileSync, writeFileSync } from "node:fs";',
-      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, JSON.stringify(options.allowPrivateNetwork) + "\\n"); writeFileSync(options.destination, "done\\n"); } }));',
+      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, JSON.stringify({ allow: options.allowPrivateNetwork, retain: options.retainArtifacts }) + "\\n"); writeFileSync(options.destination, "done\\n"); } }));',
       'const { processQueue } = await import("./src/queue.ts?network-consent-forwarding");',
       "process.stdout.write(JSON.stringify(await processQueue()));",
     ].join("\n");
@@ -255,7 +255,14 @@ describe("durable network consent", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line)),
-    ).toEqual([true, false]);
+    ).toEqual([
+      { allow: true, retain: false },
+      { allow: false, retain: false },
+    ]);
+    for (const name of ["a-true", "b-false"]) {
+      expect(existsSync(join(value.home, `${name}.raw.html`))).toBeFalse();
+      expect(existsSync(join(value.home, `${name}.selected.html`))).toBeFalse();
+    }
   });
 
   test("classifies a network-policy denial as permanent without retry state", async () => {
@@ -1152,7 +1159,7 @@ describe("queue reconciliation hardening", () => {
     const script = [
       'import { mock } from "bun:test";',
       'import * as realFs from "node:fs";',
-      'mock.module("node:fs", () => ({ ...realFs, fsyncSync() { throw new Error("simulated fsync failure"); } }));',
+      `mock.module("node:fs", () => ({ ...realFs, fsyncSync() { throw new Error("simulated fsync failure token=RECONCILE-SECRET ${"x".repeat(2000)}"); } }));`,
       'const { reconcileQueue } = await import("./src/queue.ts?fsync-failure");',
       "const result = await reconcileQueue({ apply: true });",
       "process.stdout.write(JSON.stringify(result));",
@@ -1174,7 +1181,12 @@ describe("queue reconciliation hardening", () => {
       new Response(child.stderr).text(),
     ]);
     expect(code).toBe(0);
-    expect(JSON.parse(stdout).errors).toBe(1);
+    const result = JSON.parse(stdout);
+    expect(result.errors).toBe(1);
+    const diagnostic = result.records.find((record: any) => record.error)?.error;
+    expect(diagnostic).toBeString();
+    expect(diagnostic).not.toContain("RECONCILE-SECRET");
+    expect(new TextEncoder().encode(diagnostic).byteLength).toBeLessThanOrEqual(1024);
     expect(existsSync(source)).toBeTrue();
     expect(outcomeFiles(value.reconciliation)).toEqual([]);
   });
