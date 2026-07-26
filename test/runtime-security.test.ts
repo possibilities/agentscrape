@@ -74,6 +74,128 @@ async function waitFor(path: string): Promise<void> {
   for (let attempt = 0; attempt < 100 && !existsSync(path); attempt += 1) await Bun.sleep(5);
   expect(existsSync(path)).toBeTrue();
 }
+async function withWatchdog<T>(promise: Promise<T>, timeoutMs = 1000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`subprocess exceeded ${timeoutMs}ms watchdog`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([promise, watchdog]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+type EscapedMode = "timeout" | "cancel" | "overflow";
+interface EscapedFixture {
+  argv: string[];
+  escapedPidFile: string;
+  parentPidFile: string;
+  leaseFile: string;
+  readyFile: string;
+  releaseFile: string;
+}
+function escapedFixture(directory: string, mode: EscapedMode): EscapedFixture {
+  const descendant = join(directory, "escaped-descendant.ts");
+  const parentSource = join(directory, "escaped-parent.ts");
+  const parent = join(directory, "escaped-parent");
+  const escapedPidFile = join(directory, "escaped.pid");
+  const parentPidFile = join(directory, "parent.pid");
+  const leaseFile = join(directory, "escaped.lease");
+  const readyFile = join(directory, "ready");
+  const releaseFile = join(directory, "release");
+  writeFileSync(
+    descendant,
+    `import { readFileSync } from "node:fs";
+const leaseFile = process.argv[2]!;
+let expiresAt = Date.now();
+try { expiresAt = Number(readFileSync(leaseFile, "utf8")); } catch {}
+const remaining = Math.max(0, Math.min(5000, expiresAt - Date.now()));
+setTimeout(() => process.exit(0), remaining);
+`,
+  );
+  writeFileSync(
+    parentSource,
+    `import { existsSync, writeFileSync } from "node:fs";
+const [bunExecutable, descendant, escapedPidFile, parentPidFile, leaseFile, readyFile, releaseFile, mode] = process.argv.slice(2);
+writeFileSync(parentPidFile!, String(process.pid), { mode: 0o600 });
+const escaped = Bun.spawn([bunExecutable!, descendant!, leaseFile!], {
+  detached: true,
+  stdin: "ignore",
+  stdout: "inherit",
+  stderr: "inherit",
+});
+writeFileSync(escapedPidFile!, String(escaped.pid), { mode: 0o600 });
+escaped.unref();
+if (mode === "overflow") process.stderr.write("overflow-err");
+else {
+  process.stdout.write(mode + "-out");
+  process.stderr.write(mode + "-err");
+}
+await Bun.sleep(50);
+writeFileSync(readyFile!, "ready", { mode: 0o600 });
+if (mode === "overflow") {
+  while (!existsSync(releaseFile!)) await Bun.sleep(2);
+  process.stdout.write("0123456789abcdef".repeat(8));
+}
+setInterval(() => {}, 1000);
+`,
+  );
+  const compiled = Bun.spawnSync(
+    [process.execPath, "build", "--compile", parentSource, "--outfile", parent],
+    { cwd: directory, stdout: "pipe", stderr: "pipe" },
+  );
+  if (compiled.exitCode !== 0) throw new Error(new TextDecoder().decode(compiled.stderr));
+  writeFileSync(leaseFile, String(Date.now() + 4000), { mode: 0o600 });
+  return {
+    argv: [
+      parent,
+      process.execPath,
+      descendant,
+      escapedPidFile,
+      parentPidFile,
+      leaseFile,
+      readyFile,
+      releaseFile,
+      mode,
+    ],
+    escapedPidFile,
+    parentPidFile,
+    leaseFile,
+    readyFile,
+    releaseFile,
+  };
+}
+function pidFrom(path: string): number | null {
+  if (!existsSync(path)) return null;
+  const pid = Number(readFileSync(path, "utf8"));
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+async function waitForPid(path: string): Promise<number> {
+  let pid: number | null = null;
+  for (let attempt = 0; attempt < 300 && pid === null; attempt += 1) {
+    pid = pidFrom(path);
+    if (pid === null) await Bun.sleep(5);
+  }
+  expect(pid).not.toBeNull();
+  return pid!;
+}
+async function cleanupExactPid(path: string): Promise<void> {
+  const pid = pidFrom(path);
+  if (pid === null) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
+  for (let attempt = 0; attempt < 100 && alive(pid); attempt += 1) await Bun.sleep(10);
+  expect(alive(pid)).toBeFalse();
+}
+function expectPrivateFile(path: string): void {
+  expect(lstatSync(path).mode & 0o077).toBe(0);
+}
 function runAgentBrowser(...args: Parameters<typeof runAgentBrowserWithoutConsent>) {
   return withBrowserNetworkPolicy(true, () => runAgentBrowserWithoutConsent(...args));
 }
@@ -148,6 +270,87 @@ afterEach(() => {
 });
 
 describe("bounded subprocess runtime", () => {
+  test("settles timeout despite an escaped descendant retaining both output pipes", async () => {
+    const fixture = escapedFixture(temp(), "timeout");
+    const timeoutMs = 1000;
+    const hardBoundMs = timeoutMs + 100 + 1000;
+    let escapedPid: number | null = null;
+    const started = performance.now();
+    try {
+      const request = runProcess(fixture.argv, { timeoutMs, maxOutputBytes: 64 });
+      escapedPid = await waitForPid(fixture.escapedPidFile);
+      const result = await withWatchdog(request, hardBoundMs);
+      expect(performance.now() - started).toBeLessThan(hardBoundMs);
+      expect(result.exitCode).toBe(124);
+      expect(result.timedOut).toBeTrue();
+      expect(result.truncated).toBeFalse();
+      expect(result.stdout).toBe("timeout-out");
+      expect(result.stderr).toBe("timeout-err");
+      expect(escapedPid).not.toBeNull();
+      expect(alive(escapedPid!)).toBeTrue();
+      expectPrivateFile(fixture.escapedPidFile);
+      expectPrivateFile(fixture.parentPidFile);
+      expectPrivateFile(fixture.leaseFile);
+    } finally {
+      await cleanupExactPid(fixture.escapedPidFile);
+      await cleanupExactPid(fixture.parentPidFile);
+    }
+  });
+
+  test("settles cancellation despite an escaped descendant retaining both output pipes", async () => {
+    const fixture = escapedFixture(temp(), "cancel");
+    const controller = new AbortController();
+    let escapedPid: number | null = null;
+    try {
+      const request = runProcess(fixture.argv, {
+        timeoutMs: 5000,
+        maxOutputBytes: 64,
+        signal: controller.signal,
+      });
+      escapedPid = await waitForPid(fixture.escapedPidFile);
+      await waitFor(fixture.readyFile);
+      const terminal = performance.now();
+      controller.abort();
+      const result = await withWatchdog(request);
+      expect(performance.now() - terminal).toBeLessThan(1000);
+      expect(result.exitCode).toBe(130);
+      expect(result.timedOut).toBeFalse();
+      expect(result.truncated).toBeFalse();
+      expect(result.stdout).toBe("cancel-out");
+      expect(result.stderr).toBe("operation cancelled");
+      expect(escapedPid).not.toBeNull();
+      expect(alive(escapedPid!)).toBeTrue();
+    } finally {
+      await cleanupExactPid(fixture.escapedPidFile);
+      await cleanupExactPid(fixture.parentPidFile);
+    }
+  });
+
+  test("settles exact output overflow despite an escaped descendant retaining both pipes", async () => {
+    const fixture = escapedFixture(temp(), "overflow");
+    let escapedPid: number | null = null;
+    try {
+      const request = runProcess(fixture.argv, { timeoutMs: 5000, maxOutputBytes: 32 });
+      escapedPid = await waitForPid(fixture.escapedPidFile);
+      await waitFor(fixture.readyFile);
+      const terminal = performance.now();
+      writeFileSync(fixture.releaseFile, "release", { mode: 0o600 });
+      const result = await withWatchdog(request);
+      expect(performance.now() - terminal).toBeLessThan(1000);
+      expect(result.exitCode).toBe(1);
+      expect(result.timedOut).toBeFalse();
+      expect(result.truncated).toBeTrue();
+      expect(result.stdout).toBe("0123456789abcdef".repeat(2));
+      expect(new TextEncoder().encode(result.stdout).byteLength).toBe(32);
+      expect(result.stderr).toBe("overflow-err");
+      expect(escapedPid).not.toBeNull();
+      expect(alive(escapedPid!)).toBeTrue();
+    } finally {
+      await cleanupExactPid(fixture.escapedPidFile);
+      await cleanupExactPid(fixture.parentPidFile);
+    }
+  });
+
   test("kills an infinite writer as soon as either output ceiling is crossed", async () => {
     const directory = temp();
     const writer = executable(
