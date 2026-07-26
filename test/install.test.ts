@@ -24,6 +24,7 @@ const suiteTemporary: string[] = [];
 let suiteCheckoutParent = "";
 let suiteProductionTemplate = "";
 let suitePreviousCheckout = "";
+let suiteLegacyInstallerRevision = "";
 const suiteSnapshotTemplates: Array<{ kind: "current" | "previous"; sha: string; root: string }> =
   [];
 const suiteFastSnapshotTemplates: Array<{
@@ -195,7 +196,7 @@ async function previousCheckout(persistent = false): Promise<string> {
     "-C",
     sourceRoot,
     "show",
-    "HEAD:scripts/install.sh",
+    `${suiteLegacyInstallerRevision}:scripts/install.sh`,
   ]);
   expect(predecessorInstaller.code).toBe(0);
   writeExecutable(join(checkout, "scripts/install.sh"), predecessorInstaller.stdout);
@@ -490,6 +491,39 @@ esac
 }
 
 beforeAll(async () => {
+  const helperIntroduction = await command([
+    "git",
+    "-C",
+    sourceRoot,
+    "log",
+    "--diff-filter=A",
+    "--format=%H",
+    "--",
+    "scripts/runtime-snapshot.ts",
+  ]);
+  expect(helperIntroduction.code, helperIntroduction.stderr).toBe(0);
+  const introduction = helperIntroduction.stdout.trim().split("\n").filter(Boolean).at(-1);
+  expect(introduction).toBeDefined();
+  suiteLegacyInstallerRevision = `${introduction}^`;
+  const legacyInstaller = await command([
+    "git",
+    "-C",
+    sourceRoot,
+    "cat-file",
+    "-e",
+    `${suiteLegacyInstallerRevision}:scripts/install.sh`,
+  ]);
+  expect(legacyInstaller.code, legacyInstaller.stderr).toBe(0);
+  const legacyHelper = await command([
+    "git",
+    "-C",
+    sourceRoot,
+    "cat-file",
+    "-e",
+    `${suiteLegacyInstallerRevision}:scripts/runtime-snapshot.ts`,
+  ]);
+  expect(legacyHelper.code).not.toBe(0);
+
   suiteCheckoutParent = mkdtempSync(join(tmpdir(), "agentscrape-suite-checkout-"));
   const checkout = join(suiteCheckoutParent, "agentscrape");
   const cloned = await command(["git", "clone", "--quiet", "--shared", sourceRoot, checkout]);
@@ -525,6 +559,7 @@ beforeAll(async () => {
       "user.email=agentscrape-test@example.invalid",
       "commit",
       "--quiet",
+      "--allow-empty",
       "-m",
       "land installer phase fixture",
     ],
