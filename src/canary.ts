@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { closeSession, currentBrowserNetworkPolicy, withBrowserNetworkPolicy } from "./browser";
+import {
+  closeSessionBestEffort,
+  currentBrowserNetworkPolicy,
+  withBrowserNetworkPolicy,
+} from "./browser";
 import { classifyFailure } from "./envelope";
 import { AgentscrapeNetworkPolicyError, cancellationError, throwIfAborted } from "./errors";
 import { loadRegistry, scrapeWithPreset, validateContentResult } from "./presets";
@@ -122,7 +126,7 @@ export async function checkPresets(
           detail: `${failureClass}: ${redactDiagnostic(evidence)}`,
         });
       } finally {
-        if (currentBrowserNetworkPolicy()) await closeSession(session);
+        if (currentBrowserNetworkPolicy()) await closeSessionBestEffort(session);
       }
     }
     return { checked_at: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"), results };

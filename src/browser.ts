@@ -354,7 +354,7 @@ export async function withBrowserSession<T>(
   try {
     return await browserContext.run({ ...active, session: scope }, () => fn(scope, owner));
   } finally {
-    if (owner && scope.used) await closeSession(capturedName);
+    if (owner && scope.used) await closeSessionBestEffort(capturedName);
   }
 }
 function resolveBrowser(home = runtimeHome()): string {
@@ -722,10 +722,31 @@ export async function warmClaudeSession(
   throw new AgentscrapeBrowserError("Claude session did not reach the signed-in app");
 }
 export async function closeSession(session?: string | null, signal?: AbortSignal): Promise<void> {
-  // Session close is cleanup-only: a completed nonzero command is intentionally best-effort.
-  await runProcess([resolveBrowser(), "--session", session || defaultSession(), "close"], {
-    timeoutMs: 30_000,
-    maxOutputBytes: 64_000,
-    ...(signal ? { signal } : {}),
-  });
+  throwIfAborted(signal);
+  let result: ProcessResult;
+  try {
+    result = await runProcess(
+      [resolveBrowser(), "--session", session || defaultSession(), "close"],
+      {
+        timeoutMs: 30_000,
+        maxOutputBytes: 64_000,
+        ...(signal ? { signal } : {}),
+      },
+    );
+  } catch (error) {
+    throwIfAborted(signal);
+    const missingExecutable = /not found on PATH|ENOENT|no such file/i.test(asError(error).message);
+    throw new AgentscrapeBrowserError("Failed to close browser session", !missingExecutable);
+  }
+  throwIfAborted(signal);
+  requireAgentBrowserSuccess(result, "Failed to close browser session");
+}
+
+/** Internal cleanup path; explicit session closes must use closeSession instead. */
+export async function closeSessionBestEffort(session: string): Promise<void> {
+  try {
+    await closeSession(session);
+  } catch {
+    // Automatic cleanup must not replace the operation's value or failure.
+  }
 }

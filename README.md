@@ -74,7 +74,7 @@ For an operator cutover from any predecessor deployment, use this generic sequen
 | `process-queue` | Process durable standalone scrape-artifact jobs | Mutates queue, failed-job, destination, and log state |
 | `reconcile-queue` | Inventory or apply reconciliation for frozen indexed records | `--apply` mutates archived reconciliation state; inventory mode does not |
 
-Run `agentscrape --help` or any command with `--help` for options.
+Run `agentscrape --help` or any command with `--help` for options. Explicit CLI/API session closes report failures; automatic owned-session cleanup is silent and best-effort.
 
 ## Network egress policy
 

@@ -16,7 +16,7 @@ import { isDeepStrictEqual } from "node:util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { preflightTextArtifacts, writePreparedTextArtifacts } from "./artifacts";
 import {
-  closeSession,
+  closeSessionBestEffort,
   currentBrowserNetworkPolicy,
   runAgentBrowser,
   withBrowserNetworkPolicy,
@@ -347,7 +347,7 @@ export async function captureCorpus(
         } catch {
           /* best effort */
         }
-        await closeSession(session);
+        await closeSessionBestEffort(session);
       }
     }
     if (options.signal?.aborted) throw cancellationError(options.signal);

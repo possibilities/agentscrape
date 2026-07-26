@@ -57,7 +57,14 @@ import { appendFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const command = args.slice(2);
 appendFileSync(${JSON.stringify(events)}, JSON.stringify(command) + "\\n");
-if (command[0] === "close" || command[0] === "open" || (command[0] === "wait" && command[1] === "--load")) process.exit(0);
+if (command[0] === "close") {
+  if (process.env.AGENTSCRAPE_TEST_CLOSE_STDERR) {
+    console.error(process.env.AGENTSCRAPE_TEST_CLOSE_STDERR);
+  }
+  const selectedExit = Number(process.env.AGENTSCRAPE_TEST_CLOSE_EXIT ?? "0");
+  process.exit(Number.isInteger(selectedExit) && selectedExit >= 0 && selectedExit <= 255 ? selectedExit : 94);
+}
+if (command[0] === "open" || (command[0] === "wait" && command[1] === "--load")) process.exit(0);
 if (command[0] === "wait") { console.error("selector missing token=CLI-WAIT-SECRET"); process.exit(7); }
 if (command[0] === "screenshot") { writeFileSync(command[1], "cli screenshot"); process.exit(0); }
 if (command[0] === "eval") {
@@ -105,6 +112,43 @@ describe("CLI offline smoke suite", () => {
     expect((await command(["list-presets"])).stdout).toContain("deepwiki-wiki-page");
     expect((await command(["show-preset", "x-tweet"])).stdout).toContain("Schema: TweetThread");
     expect((await command(["validate-preset", "deepwiki-wiki-page"])).stdout).toContain("OK:");
+  });
+  test("close-session keeps success quiet and reports a redacted normal failure", async () => {
+    const directory = temp();
+    const home = join(directory, "home");
+    mkdirSync(home);
+    const browser = cliBrowser(directory);
+    const commonEnv = { AGENTSCRAPE_AGENT_BROWSER_BIN: browser.path };
+
+    const succeeded = await command(["close-session", "cli-success"], {
+      home,
+      env: {
+        ...commonEnv,
+        AGENTSCRAPE_TEST_CLOSE_EXIT: "0",
+        AGENTSCRAPE_TEST_CLOSE_STDERR: "incidental close warning",
+      },
+    });
+    expect(succeeded).toEqual({ code: 0, stdout: "", stderr: "" });
+
+    const failed = await command(["close-session", "cli-failure"], {
+      home,
+      env: {
+        ...commonEnv,
+        AGENTSCRAPE_TEST_CLOSE_EXIT: "7",
+        AGENTSCRAPE_TEST_CLOSE_STDERR: `token=CLI-CLOSE-SECRET ${"diagnostic ".repeat(600)}`,
+      },
+    });
+    expect(failed.code).toBe(1);
+    expect(failed.stdout).toBe("");
+    expect(failed.stderr).toStartWith("Error: Failed to close browser session");
+    expect(failed.stderr).not.toContain("CLI-CLOSE-SECRET");
+    expect(new TextEncoder().encode(failed.stderr).byteLength).toBeLessThanOrEqual(1025);
+    expect(
+      readFileSync(browser.events, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual([["close"], ["close"]]);
   });
   test("HTML conversion supports stdin and recursive directory mode", async () => {
     const stdin = await command(["convert-html"], { stdin: "<h1>Hello</h1><p>World</p>" });
