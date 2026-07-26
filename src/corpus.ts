@@ -1,16 +1,20 @@
 import {
+  chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { preflightTextArtifacts, writePreparedTextArtifacts } from "./artifacts";
 import {
   closeSession,
   currentBrowserNetworkPolicy,
@@ -34,9 +38,12 @@ import {
 import type { ScrapeResult } from "./handlers/types";
 import { offlineExtractLinks } from "./links";
 import { loadRegistry, matchPreset, type PresetConfig, scrapeWithPreset } from "./presets";
+import { redactDiagnostic, redactUrl } from "./redaction";
 import { type LinkItem, LinkList } from "./schemas";
 
 export const CORPUS_VERSION = 1;
+export const CORPUS_ARTIFACT_MAX_BYTES = 8_000_000;
+export const CORPUS_AGGREGATE_MAX_BYTES = 24_000_000;
 const ROOT = join(import.meta.dir, "../test/corpus");
 const FAILURE_TYPES: Record<string, abstract new (...args: never[]) => Error> = {
   AgentscrapeAuthError,
@@ -234,7 +241,11 @@ export async function testCorpus(
         lines.push(`  PASS: ${label}`);
       } catch (error) {
         failed += 1;
-        lines.push(`  FAIL: ${label}: ${error instanceof Error ? error.message : String(error)}`);
+        lines.push(
+          redactDiagnostic(
+            `  FAIL: ${label}: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
       }
     }
   }
@@ -246,14 +257,37 @@ function nextSample(directory: string): string {
     : 0;
   return join(directory, `sample-${String(count + 1).padStart(3, "0")}`);
 }
-function atomicSample(directory: string, files: Record<string, string>): string {
+function fsyncDirectory(path: string): void {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+export function atomicSample(directory: string, files: Record<string, string>): string {
+  const entries = Object.entries(files);
+  const prepared = preflightTextArtifacts(
+    entries.map(([name, content]) => ({ path: name, content })),
+    {
+      perArtifactBytes: CORPUS_ARTIFACT_MAX_BYTES,
+      aggregateBytes: CORPUS_AGGREGATE_MAX_BYTES,
+    },
+  );
   mkdirSync(directory, { recursive: true });
   const temporary = mkdtempSync(join(directory, ".capture-tmp-"));
   try {
-    for (const [name, content] of Object.entries(files))
-      writeFileSync(join(temporary, name), content);
+    chmodSync(temporary, 0o700);
+    writePreparedTextArtifacts(
+      prepared.map((artifact) => ({
+        path: join(temporary, artifact.path),
+        bytes: artifact.bytes,
+      })),
+    );
+    fsyncDirectory(temporary);
     const final = nextSample(directory);
     renameSync(temporary, final);
+    fsyncDirectory(directory);
     return final;
   } catch (error) {
     rmSync(temporary, { recursive: true, force: true });
@@ -309,7 +343,7 @@ export async function captureCorpus(
             undefined,
             options.signal,
           );
-          if (html.exitCode === 0) rendered = html.stdout;
+          if (html.exitCode === 0 && !html.truncated) rendered = html.stdout;
         } catch {
           /* best effort */
         }
@@ -324,11 +358,13 @@ export async function captureCorpus(
         version: 1,
         preset: preset.name,
         mode: preset.mode,
-        url,
+        url: redactUrl(url),
         expect: "failure",
         failure: {
           type: options.expectFailure,
-          message_captured: outcome instanceof Error ? outcome.message : String(outcome),
+          message_captured: redactDiagnostic(
+            outcome instanceof Error ? outcome.message : String(outcome),
+          ),
         },
       };
       verifyFailure(meta, outcome);
@@ -344,7 +380,7 @@ export async function captureCorpus(
       version: 1,
       preset: preset.name,
       mode: preset.mode,
-      url,
+      url: redactUrl(url),
       expect: "success",
       structured: plain(result.structured),
     };

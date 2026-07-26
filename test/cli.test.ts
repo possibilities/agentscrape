@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -26,14 +27,18 @@ function temp(): string {
 }
 async function command(
   args: string[],
-  options: { stdin?: string; home?: string } = {},
+  options: { stdin?: string; home?: string; env?: Record<string, string> } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = Bun.spawn([process.execPath, "src/cli.ts", ...args], {
     cwd: root,
     stdin: options.stdin === undefined ? "ignore" : new Blob([options.stdin]),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...(options.home ? { HOME: options.home } : {}) },
+    env: {
+      ...process.env,
+      ...(options.home ? { HOME: options.home } : {}),
+      ...options.env,
+    },
   });
   const [code, stdout, stderr] = await Promise.all([
     child.exited,
@@ -41,6 +46,34 @@ async function command(
     new Response(child.stderr).text(),
   ]);
   return { code, stdout, stderr };
+}
+function cliBrowser(directory: string): { path: string; events: string } {
+  const path = join(directory, "agent-browser");
+  const events = join(directory, "events.jsonl");
+  writeFileSync(
+    path,
+    `#!/usr/bin/env bun
+import { appendFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const command = args.slice(2);
+appendFileSync(${JSON.stringify(events)}, JSON.stringify(command) + "\\n");
+if (command[0] === "close" || command[0] === "open" || (command[0] === "wait" && command[1] === "--load")) process.exit(0);
+if (command[0] === "wait") { console.error("selector missing token=CLI-WAIT-SECRET"); process.exit(7); }
+if (command[0] === "screenshot") { writeFileSync(command[1], "cli screenshot"); process.exit(0); }
+if (command[0] === "eval") {
+  const expression = command[1] || "";
+  if (expression === "window.location.href") console.log(JSON.stringify("https://example.com/page?token=CLI-URL-SECRET"));
+  else if (expression === "document.documentElement.outerHTML") console.log(JSON.stringify("<html><body><main>CLI body</main></body></html>"));
+  else if (expression.includes("hasText")) console.log(JSON.stringify("body"));
+  else if (expression.includes("return {html:")) console.log(JSON.stringify({ html: "<main>CLI body</main>" }));
+  else console.log("false");
+  process.exit(0);
+}
+process.exit(0);
+`,
+  );
+  chmodSync(path, 0o755);
+  return { path, events };
 }
 
 describe("CLI offline smoke suite", () => {
@@ -300,6 +333,133 @@ describe("CLI offline smoke suite", () => {
     }
   });
 
+  test("fetch-markdown CLI retains private HTML sidecars only with its explicit flag", async () => {
+    const directory = temp();
+    const home = join(directory, "home");
+    mkdirSync(home);
+    const browser = cliBrowser(directory);
+    const env = { AGENTSCRAPE_AGENT_BROWSER_BIN: browser.path };
+    const defaultDestination = join(directory, "default.md");
+    const retainedDestination = join(directory, "retained.md");
+    const common = ["--generic", "--allow-private-network"];
+
+    const defaults = await command(
+      ["fetch-markdown", "https://example.com/default", defaultDestination, ...common],
+      { home, env },
+    );
+    expect(defaults.code, defaults.stderr).toBe(0);
+    expect(existsSync(join(directory, "default.raw.html"))).toBeFalse();
+    expect(existsSync(join(directory, "default.selected.html"))).toBeFalse();
+
+    const retained = await command(
+      [
+        "fetch-markdown",
+        "https://example.com/retained",
+        retainedDestination,
+        ...common,
+        "--retain-artifacts",
+      ],
+      { home, env },
+    );
+    expect(retained.code, retained.stderr).toBe(0);
+    expect(readFileSync(join(directory, "retained.raw.html"), "utf8")).toBe(
+      "<html><body><main>CLI body</main></body></html>",
+    );
+    expect(readFileSync(join(directory, "retained.selected.html"), "utf8")).toBe(
+      "<main>CLI body</main>",
+    );
+    expect(statSync(join(directory, "retained.raw.html")).mode & 0o077).toBe(0);
+    expect(statSync(join(directory, "retained.selected.html")).mode & 0o077).toBe(0);
+  });
+
+  test("structured CLI destinations retain browser evidence policy without HTML sidecars", async () => {
+    const directory = temp();
+    const home = join(directory, "home");
+    mkdirSync(home);
+    const browser = cliBrowser(directory);
+    const env = { AGENTSCRAPE_AGENT_BROWSER_BIN: browser.path };
+
+    for (const selected of ["json", "yaml"] as const) {
+      const destination = join(directory, `retained.${selected}`);
+      const result = await command(
+        [
+          "fetch-markdown",
+          `https://example.com/${selected}`,
+          destination,
+          `--${selected}`,
+          "--generic",
+          "--allow-private-network",
+          "--retain-artifacts",
+        ],
+        { home, env },
+      );
+      expect(result.code, result.stderr).toBe(0);
+      const persisted = readFileSync(destination, "utf8");
+      if (selected === "json") expect(persisted.trimStart().startsWith("{")).toBeTrue();
+      else {
+        expect(persisted.trimStart().startsWith("{")).toBeFalse();
+        expect(persisted).toContain("content: CLI body");
+      }
+      const parsed = selected === "json" ? JSON.parse(persisted) : parseYaml(persisted);
+      expect(parsed).toMatchObject({ content: "CLI body" });
+      expect(existsSync(join(directory, "retained.raw.html"))).toBeFalse();
+      expect(existsSync(join(directory, "retained.selected.html"))).toBeFalse();
+    }
+  });
+
+  test("CLI forbids envelope retention before browser/files and prints a separate artifact notice", async () => {
+    const directory = temp();
+    const home = join(directory, "home");
+    mkdirSync(home);
+    const browser = cliBrowser(directory);
+    const env = { AGENTSCRAPE_AGENT_BROWSER_BIN: browser.path };
+    const forbidden = join(directory, "forbidden.json");
+    const rejected = await command(
+      [
+        "fetch-markdown",
+        "https://example.com/page",
+        forbidden,
+        "--generic",
+        "--allow-private-network",
+        "--envelope",
+        "--retain-artifacts",
+      ],
+      { home, env },
+    );
+    expect(rejected.code).toBe(2);
+    expect(rejected.stdout).toBe("");
+    expect(rejected.stderr).toContain("cannot be combined");
+    expect(existsSync(forbidden)).toBeFalse();
+    expect(existsSync(browser.events)).toBeFalse();
+
+    const failed = await command(
+      [
+        "fetch-markdown",
+        "https://x.com/example/status/1",
+        "--preset",
+        "x-tweet",
+        "--allow-private-network",
+        "--retain-artifacts",
+      ],
+      { home, env },
+    );
+    expect(failed.code).toBe(1);
+    expect(failed.stdout).toBe("");
+    const lines = failed.stderr.trim().split("\n");
+    const notice = lines.find((line) => line.startsWith("Artifacts retained: "));
+    const diagnostic = lines.find((line) => line.startsWith("Error: "));
+    expect(notice).toBeString();
+    expect(diagnostic).toBeString();
+    const artifactDirectory = notice!.slice("Artifacts retained: ".length);
+    temporary.push(artifactDirectory);
+    expect(diagnostic).not.toContain(artifactDirectory);
+    expect(failed.stderr).not.toContain("CLI-WAIT-SECRET");
+    expect(failed.stderr).not.toContain("CLI-URL-SECRET");
+    expect(statSync(artifactDirectory).mode & 0o077).toBe(0);
+    const screenshot = readdirSync(artifactDirectory)[0]!;
+    expect(statSync(join(artifactDirectory, screenshot)).mode & 0o077).toBe(0);
+  });
+
   test("corpus filter smoke passes", async () => {
     const result = await command(["test-corpus", "--preset", "deepwiki-wiki-page"]);
     expect(result.code).toBe(0);
@@ -453,11 +613,16 @@ describe("CLI offline smoke suite", () => {
       "--session",
       "--preset",
       "--generic",
+      "--retain-artifacts",
       "--max-content-bytes",
       "--max-relations",
       "--allow-private-network",
     ])
       expect(markdownHelp).toContain(option);
+    const markdownJson = JSON.parse((await command(["fetch-markdown", "--help-json"])).stdout);
+    expect(
+      markdownJson.arguments.find((argument: any) => argument.name === "--retain-artifacts"),
+    ).toMatchObject({ type: "flag", required: false });
     const captureHelp = (await command(["capture-corpus", "--help"])).stdout;
     const canaryHelp = (await command(["check-presets", "--help"])).stdout;
     expect(captureHelp).toContain("--allow-private-network");

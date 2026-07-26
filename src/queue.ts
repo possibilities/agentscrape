@@ -25,7 +25,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { fetchMarkdown } from "./api";
 import { AgentscrapeUpstreamDownError, cancellationError, throwIfAborted } from "./errors";
 import { resolveQueuePaths } from "./queue-paths";
-import { isSensitiveName, JWT_RE } from "./redaction";
+import { isSensitiveName, JWT_RE, redactDiagnostic } from "./redaction";
 import { runProcess } from "./subprocess";
 
 export { resolveDataHome } from "./queue-paths";
@@ -1420,6 +1420,7 @@ async function executeJob(
   const destination = expandHome(String(job.destination));
   await fetchMarkdown(String(job.url), {
     destination,
+    retainArtifacts: false,
     signal,
     ...(typeof job.allow_private_network === "boolean"
       ? { allowPrivateNetwork: job.allow_private_network }
@@ -2534,7 +2535,7 @@ export async function reconcileQueue(
       results.push({
         area: candidate.area,
         filename: candidate.filename,
-        error: error instanceof Error ? error.message : String(error),
+        error: redactDiagnostic(error instanceof Error ? error.message : String(error)),
       });
       continue;
     }
@@ -2648,7 +2649,7 @@ export async function reconcileQueue(
           ...(record
             ? publicRecord(record)
             : { area: candidate.area, filename: candidate.filename }),
-          error: errorMessage(error),
+          error: redactDiagnostic(errorMessage(error)),
         });
       }
     } finally {

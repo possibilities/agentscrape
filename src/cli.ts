@@ -4,6 +4,7 @@ import { basename, extname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
   AgentscrapeAuthError,
+  AgentscrapeBrowserError,
   AgentscrapeCancelledError,
   closeBrowserSession,
   envelopeExitCode,
@@ -12,6 +13,11 @@ import {
   type ScrapeResult,
   structuredJson,
 } from "./api";
+import {
+  type PreparedTextArtifact,
+  prepareHtmlSidecars,
+  writePreparedTextArtifacts,
+} from "./artifacts";
 import { requireAgentBrowserSuccess, runAgentBrowser, setMediaMode } from "./browser";
 import { checkPresets } from "./canary";
 import { captureCorpus, testCorpus } from "./corpus";
@@ -29,6 +35,7 @@ import { convertHtml } from "./html";
 import { convertHtmlDirectory, readRegularFileNoFollow } from "./html-files";
 import { loadRegistry, validatePresetFile } from "./presets";
 import { processQueue, reconcileQueue } from "./queue";
+import { redactDiagnostic, sanitizeErrorInPlace } from "./redaction";
 import type { ExtractionEnvelope } from "./schemas";
 
 const DESCRIPTION = "Fetch and extract web content through an agent-friendly Bun CLI";
@@ -49,7 +56,7 @@ const COMMANDS: Array<[string, string]> = [
   ["reconcile-queue", "Inventory or reconcile frozen queue records"],
 ];
 const COMMAND_HELP: Record<string, string> = {
-  "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: auto main/article/body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --allow-private-network        Allow private direct and unrestricted browser egress\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
+  "fetch-markdown": `Usage: agentscrape fetch-markdown URL [DEST] [OPTIONS]\n\nOptions:\n  --selector CSS                 CSS selector (default: auto main/article/body)\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --allow-private-network        Allow private direct and unrestricted browser egress\n  --preset NAME                  Select a content preset\n  --generic                      Force generic extraction on a claimed domain\n  --retain-artifacts             Retain sensitive HTML/screenshot diagnostics (Markdown DEST only for HTML)\n  --json | --yaml | --markdown   Select structured/Markdown output\n  --envelope                     Emit a schema-v1 extraction envelope (incompatible with retention)\n  --max-content-bytes INTEGER    Envelope content limit (integer >= 1; default: 1000000)\n  --max-relations INTEGER        Envelope relation limit (integer >= 0; default: 256)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
   "fetch-links": `Usage: agentscrape fetch-links URL [OPTIONS]\n\nOptions:\n  --preset NAME                  Select a links preset\n  --section-selector CSS         Section/navigation selector\n  --category-selector CSS        Category selector for two-level navigation\n  --toggle-selector CSS          Toggle/tab selector\n  --limit INTEGER                Positive X timeline item limit\n  --max-scrolls INTEGER          Positive X timeline scroll limit\n  --since-id ID                  Numeric X status cursor\n  --include-replies              Include X replies\n  --include-reposts              Include X reposts\n  --media light|dark             Emulated color scheme\n  --session NAME                 Reuse a named browser session\n  --allow-private-network        Allow unrestricted browser/private network egress\n  --json | --yaml | --markdown   Select output (default: yaml)\n  --format json|yaml|human       Compatibility option (no-op)\n  -h, --help                     Show help`,
   "discover-feed": `Usage: agentscrape discover-feed [FILE] --source-url URL [OPTIONS]\n\nWith no FILE, Agentscrape fetches the source and pagination pages directly. One FILE preserves network-free recorded-response parsing.\n\nOptions:\n  --source-url URL               Requested feed, homepage, or archive URL (required)\n  --source-kind KIND             Source interpretation: auto, feed, or archive (default: auto)\n  --page URL FILE                Recorded pagination page; requires FILE (repeatable)\n  --etag VALUE                   Conditional ETag, or recorded initial-page validator\n  --last-modified VALUE          Conditional Last-Modified, or recorded validator\n  --validator-url URL            Exact live response URL bound to validators\n  --since DATE                   Retain entries at or after DATE\n  --max-response-bytes INTEGER   1..20000000 per response (default: 2000000)\n  --max-pages INTEGER            Recorded 1..100; live 1..10 (default: 10)\n  --max-items INTEGER            1..10000 entries (default: 1000)\n  --timeout-seconds FLOAT        0.001..300 overall seconds (default: 10)\n  --archive-start-url URL        Optional configured archive start URL\n  --archive-entry-selector CSS   Required for archive discovery\n  --archive-link-selector CSS    Archive entry link selector\n  --archive-date-selector CSS    Archive publication date selector\n  --archive-date-attribute NAME  Archive date attribute\n  --archive-updated-selector CSS Archive update date selector\n  --archive-next-selector CSS    Archive pagination selector\n  --archive-id-attribute NAME    Archive stable ID attribute\n  --archive-title-selector CSS   Archive title selector\n  --archive-tombstone-selector CSS Archive tombstone selector\n  --format FORMAT                Output format: json or yaml (default: json)\n  -h, --help                     Show help`,
   "list-presets": "Usage: agentscrape list-presets [--format json|yaml|human]",
@@ -159,7 +166,7 @@ function helpJson(command?: string): string {
   const documentedOptions = [
     ...commandText.matchAll(/^ {2}(--[a-z][a-z-]*)(?:\s+([^\s|]+))?\s+(.*)$/gm),
   ].map((match) => {
-    const manualFlag = match[1] === "--allow-private-network";
+    const manualFlag = ["--allow-private-network", "--retain-artifacts"].includes(match[1]!);
     return {
       name: match[1],
       type: manualFlag || !match[2] ? "flag" : "text",
@@ -311,17 +318,9 @@ function commandHelp(parsed: Parsed, command: string): number | null {
   }
   return null;
 }
-function writeHtmlArtifacts(destination: string, result: ScrapeResult): void {
-  if (result.links) return;
-  const stem = destination.slice(0, destination.length - extname(destination).length);
-  if (result.full_html) {
-    writeFileSync(`${stem}.raw.html`, result.full_html);
-    console.error(`Saved to ${stem}.raw.html`);
-  }
-  if (result.selected_html) {
-    writeFileSync(`${stem}.selected.html`, result.selected_html);
-    console.error(`Saved to ${stem}.selected.html`);
-  }
+function writeHtmlArtifacts(artifacts: readonly PreparedTextArtifact[]): void {
+  writePreparedTextArtifacts(artifacts);
+  for (const artifact of artifacts) console.error(`Saved to ${artifact.path}`);
 }
 async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promise<number> {
   const parsed = parseArgs(
@@ -338,6 +337,7 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
     new Set([
       "--help",
       "--generic",
+      "--retain-artifacts",
       "--allow-private-network",
       "--json",
       "--yaml",
@@ -355,6 +355,9 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
   if (media && !["light", "dark"].includes(media))
     throw new AgentscrapeUsageError("--media must be light or dark");
   const envelope = selected === "envelope";
+  const retainArtifacts = parsed.flags.has("--retain-artifacts");
+  // Intentionally withhold destination: the CLI owns format-aware persistence and only emits
+  // HTML sidecars for actual Markdown output; retention still enables browser failure evidence.
   const result = await fetchMarkdown(url, {
     selector: one(parsed, "--selector"),
     media,
@@ -363,6 +366,7 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
     generic: parsed.flags.has("--generic"),
     allowPrivateNetwork: parsed.flags.has("--allow-private-network") || undefined,
     envelope,
+    retainArtifacts,
     maxContentBytes: numberOption(parsed, "--max-content-bytes", 1_000_000, {
       integer: true,
       min: 1,
@@ -377,8 +381,12 @@ async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promi
   }
   const scrape = result as ScrapeResult;
   const actual = selected ?? (scrape.links ? "yaml" : "markdown");
+  const artifacts =
+    destination && actual === "markdown" && retainArtifacts
+      ? prepareHtmlSidecars(destination, scrape)
+      : [];
   output(resultOutput(scrape, actual), destination);
-  if (destination && actual === "markdown") writeHtmlArtifacts(destination, scrape);
+  writeHtmlArtifacts(artifacts);
   return 0;
 }
 async function fetchLinksCommand(args: string[], signal?: AbortSignal): Promise<number> {
@@ -619,7 +627,9 @@ async function presetsCommand(command: string, args: string[]): Promise<number> 
     const errors = validatePresetFile(path);
     if (errors.length) {
       console.error(
-        `Validation failed for ${basename(path)}:\n${errors.map((item) => `  - ${item}`).join("\n")}`,
+        redactDiagnostic(
+          `Validation failed for ${basename(path)}:\n${errors.map((item) => `  - ${item}`).join("\n")}`,
+        ),
       );
       return 1;
     }
@@ -895,11 +905,13 @@ if (import.meta.main) {
   try {
     process.exitCode = await main(process.argv.slice(2), { signal: controller.signal });
   } catch (error) {
-    const value = error instanceof Error ? error : new Error(String(error));
+    const value = sanitizeErrorInPlace(error);
     if (error instanceof AgentscrapeCancelledError || controller.signal.aborted) {
       process.exitCode = receivedSignal === "SIGTERM" ? 143 : 130;
     } else {
-      console.error(`Error: ${value.message}`);
+      if (value instanceof AgentscrapeBrowserError && value.artifactDirectory)
+        console.error(redactDiagnostic(`Artifacts retained: ${value.artifactDirectory}`));
+      console.error(redactDiagnostic(`Error: ${value.message}`));
       process.exitCode =
         error instanceof AgentscrapeUsageError ||
         (error instanceof AgentscrapeError && error.errorClass === "usage") ||

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,19 +11,26 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { fetchLinks, fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
+  currentBrowserArtifactRetention,
   openPage,
   resetBrowserUnavailableCache,
   runAgentBrowser,
+  withBrowserArtifactRetention,
   withBrowserNetworkPolicy,
   withBrowserSession,
   withBrowserSignal,
 } from "../src/browser";
 import { checkPresets } from "../src/canary";
 import { captureCorpus } from "../src/corpus";
-import { AgentscrapeCancelledError, AgentscrapeNetworkPolicyError } from "../src/errors";
+import {
+  AgentscrapeCancelledError,
+  AgentscrapeNetworkPolicyError,
+  AgentscrapeUsageError,
+} from "../src/errors";
 import { loadRegistry, scrapeWithPreset } from "../src/presets";
 
 const temporary: string[] = [];
@@ -30,6 +38,8 @@ const originalBrowser = process.env[AGENT_BROWSER_BIN_ENV];
 const originalHome = process.env.HOME;
 const originalInterleave = process.env.AGENTSCRAPE_TEST_INTERLEAVE;
 const originalState = process.env.AGENTSCRAPE_TEST_STATE;
+const originalMissingSelector = process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR;
+const originalTruncatedHtml = process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML;
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -42,6 +52,10 @@ afterEach(() => {
   else process.env.AGENTSCRAPE_TEST_INTERLEAVE = originalInterleave;
   if (originalState === undefined) delete process.env.AGENTSCRAPE_TEST_STATE;
   else process.env.AGENTSCRAPE_TEST_STATE = originalState;
+  if (originalMissingSelector === undefined) delete process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR;
+  else process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR = originalMissingSelector;
+  if (originalTruncatedHtml === undefined) delete process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML;
+  else process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML = originalTruncatedHtml;
   globalThis.fetch = originalFetch;
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -102,6 +116,15 @@ if (command[0] === "open") {
   }
   process.exit(0);
 }
+if (command[0] === "screenshot") {
+  writeFileSync(command[1], "png");
+  process.exit(0);
+}
+if (
+  command[0] === "wait" &&
+  process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR === "1" &&
+  command[1] !== "--load"
+) process.exit(1);
 if (command[0] === "wait" || command[0] === "set") process.exit(0);
 if (command[0] !== "eval") process.exit(93);
 const expression = command[1] || "";
@@ -110,7 +133,10 @@ if (expression === "window.location.href") {
   const url = existsSync(urlPath) ? readFileSync(urlPath, "utf8") + "#final" : "about:blank";
   console.log(JSON.stringify(url));
 } else if (expression === "document.documentElement.outerHTML") {
-  console.log(JSON.stringify("<html><body><main>Session body</main></body></html>"));
+  const html = process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML === "1"
+    ? "<html>" + "x".repeat(8_100_000) + "</html>"
+    : "<html><body><main>Session body</main></body></html>";
+  console.log(JSON.stringify(html));
 } else if (expression.includes("rootCount")) {
   console.log(JSON.stringify({ rootCount: 1, links: [{ url: "/docs/child", title: "Child", category: "" }] }));
 } else if (expression.includes("return {html:")) {
@@ -209,6 +235,105 @@ describe("owned browser session scopes", () => {
         .map((item) => item.session)
         .sort(),
     ).toEqual([...names].sort());
+  });
+
+  test("live API destinations retain both private HTML sidecars only on exact opt-in", async () => {
+    const value = fixture();
+    const defaultDestination = join(value.root, "default.md");
+    const retainedDestination = join(value.root, "retained.md");
+    await fetchMarkdown("https://example.com/default", {
+      generic: true,
+      destination: defaultDestination,
+      allowPrivateNetwork: true,
+    });
+    expect(existsSync(join(value.root, "default.raw.html"))).toBeFalse();
+    expect(existsSync(join(value.root, "default.selected.html"))).toBeFalse();
+
+    const retained = await fetchMarkdown("https://example.com/retained", {
+      generic: true,
+      destination: retainedDestination,
+      retainArtifacts: true,
+      allowPrivateNetwork: true,
+    });
+    expect(retained).toMatchObject({
+      full_html: "<html><body><main>Session body</main></body></html>",
+      selected_html: "<main>Session body</main>",
+    });
+    for (const name of ["retained.raw.html", "retained.selected.html"]) {
+      const path = join(value.root, name);
+      expect(existsSync(path)).toBeTrue();
+      expect(lstatSync(path).mode & 0o077).toBe(0);
+    }
+  });
+
+  test("envelope retention rejects before any browser command or file write", async () => {
+    const value = fixture();
+    const destination = join(value.root, "forbidden.json");
+    await expect(
+      fetchMarkdown("https://example.com/page", {
+        envelope: true,
+        generic: true,
+        retainArtifacts: true,
+        destination,
+        allowPrivateNetwork: true,
+      }),
+    ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    expect(events(value)).toEqual([]);
+    expect(existsSync(destination)).toBeFalse();
+  });
+
+  test("omitted retention inherits for sidecars and explicit false narrows sidecars and screenshots", async () => {
+    const value = fixture();
+    await withBrowserArtifactRetention(true, async () => {
+      expect(currentBrowserArtifactRetention()).toBeTrue();
+      await fetchMarkdown("https://example.com/inherited", {
+        generic: true,
+        destination: join(value.root, "inherited.md"),
+        allowPrivateNetwork: true,
+      });
+      expect(existsSync(join(value.root, "inherited.raw.html"))).toBeTrue();
+      expect(existsSync(join(value.root, "inherited.selected.html"))).toBeTrue();
+
+      await fetchMarkdown("https://example.com/narrowed", {
+        generic: true,
+        destination: join(value.root, "narrowed.md"),
+        retainArtifacts: false,
+        allowPrivateNetwork: true,
+      });
+      expect(existsSync(join(value.root, "narrowed.raw.html"))).toBeFalse();
+      expect(existsSync(join(value.root, "narrowed.selected.html"))).toBeFalse();
+      process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR = "1";
+      await expect(
+        fetchMarkdown("https://x.com/example/status/1", {
+          retainArtifacts: false,
+          allowPrivateNetwork: true,
+        }),
+      ).rejects.toThrow("Content not found");
+    });
+    expect(currentBrowserArtifactRetention()).toBeFalse();
+    expect(events(value).some((item) => item.command[0] === "screenshot")).toBeFalse();
+  });
+
+  test("inherited retention rejects envelope mode before operation effects", async () => {
+    const value = fixture();
+    const destination = join(value.root, "inherited-forbidden.json");
+    let returned = false;
+    await withBrowserArtifactRetention(true, async () => {
+      try {
+        await fetchMarkdown("https://example.com/page", {
+          envelope: true,
+          generic: true,
+          destination,
+          allowPrivateNetwork: true,
+        });
+        returned = true;
+      } catch (error) {
+        expect(error).toBeInstanceOf(AgentscrapeUsageError);
+      }
+    });
+    expect(returned).toBeFalse();
+    expect(events(value)).toEqual([]);
+    expect(existsSync(destination)).toBeFalse();
   });
 
   test("explicit shared names are exact and caller-owned", async () => {
@@ -373,6 +498,47 @@ describe("browser network consent", () => {
     });
     expect(allowed.results[0]?.status).not.toBe("not_configured");
     expect(events(value).length).toBeGreaterThan(0);
+  });
+});
+
+describe("corpus capture security", () => {
+  test("captured failure metadata is redacted and sample paths are private", async () => {
+    const value = fixture();
+    const root = join(value.root, "captured-corpus");
+    const sample = await captureCorpus(
+      "https://x.com/example/status/1?token=CORPUS-URL-SECRET#fragment-secret",
+      {
+        preset: "x-tweet",
+        expectFailure: "AgentscrapeError",
+        root,
+        allowPrivateNetwork: true,
+      },
+    );
+    expect(lstatSync(sample).mode & 0o077).toBe(0);
+    for (const name of ["meta.yaml", "page.html"]) {
+      expect(existsSync(join(sample, name))).toBeTrue();
+      expect(lstatSync(join(sample, name)).mode & 0o077).toBe(0);
+    }
+    const text = readFileSync(join(sample, "meta.yaml"), "utf8");
+    expect(text).not.toContain("CORPUS-URL-SECRET");
+    expect(text).not.toContain("fragment-secret");
+    expect(parseYaml(text)).toMatchObject({
+      url: "https://x.com/example/status/1?token=%5BREDACTED%5D",
+      failure: { type: "AgentscrapeError" },
+    });
+  });
+
+  test("truncated direct failure-page output is not persisted", async () => {
+    const value = fixture();
+    process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML = "1";
+    const sample = await captureCorpus("https://x.com/example/status/1", {
+      preset: "x-tweet",
+      expectFailure: "AgentscrapeError",
+      root: join(value.root, "truncated-corpus"),
+      allowPrivateNetwork: true,
+    });
+    expect(existsSync(join(sample, "meta.yaml"))).toBeTrue();
+    expect(existsSync(join(sample, "page.html"))).toBeFalse();
   });
 });
 

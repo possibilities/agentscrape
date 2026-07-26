@@ -1,3 +1,5 @@
+import { redactDiagnostic } from "./redaction";
+
 export type ErrorClass =
   | "usage"
   | "auth"
@@ -45,15 +47,16 @@ export class AgentscrapeAuthError extends AgentscrapeError {
 }
 export class AgentscrapeUpstreamDownError extends AgentscrapeError {
   constructor(message: string) {
-    super(message, "upstream");
+    super(redactDiagnostic(message), "upstream");
   }
 }
 export class AgentscrapeBrowserError extends AgentscrapeError {
   constructor(
     message: string,
     public readonly retryable = true,
+    public readonly artifactDirectory?: string,
   ) {
-    super(message, "browser");
+    super(redactDiagnostic(message), "browser");
   }
 }
 export class AgentscrapeProviderError extends AgentscrapeError {
@@ -73,12 +76,12 @@ export class AgentscrapeHttpError extends AgentscrapeProviderError {
 }
 export class AgentscrapeTimeoutError extends AgentscrapeError {
   constructor(message: string) {
-    super(message, "timeout");
+    super(redactDiagnostic(message), "timeout");
   }
 }
 export class AgentscrapeCancelledError extends AgentscrapeError {
   constructor(message = "operation cancelled") {
-    super(message, "cancelled");
+    super(redactDiagnostic(message), "cancelled");
   }
 }
 export function cancellationError(signal?: AbortSignal | null): AgentscrapeCancelledError {
@@ -106,6 +109,12 @@ export class PresetSelectionError extends AgentscrapeError {
 export class PresetOutputError extends AgentscrapeError {
   constructor(message: string) {
     super(message, "output");
+  }
+}
+export class AgentscrapeArtifactError extends AgentscrapeError {
+  constructor(message: string) {
+    super(redactDiagnostic(message), "output");
+    this.name = "AgentscrapeArtifactError";
   }
 }
 export class PresetDriftError extends AgentscrapeError {

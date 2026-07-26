@@ -1,12 +1,15 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
+import { prepareHtmlSidecars, writePreparedTextArtifacts } from "./artifacts";
 import {
   closeSession,
+  currentBrowserArtifactRetention,
   currentBrowserNetworkPolicy,
   requireAgentBrowserSuccess,
   resetBrowserUnavailableCache,
   runAgentBrowser,
+  withBrowserArtifactRetention,
   withBrowserNetworkPolicy,
   withBrowserProfile,
   withBrowserSession,
@@ -23,6 +26,7 @@ import {
   validateProviderFinalUrl,
 } from "./envelope";
 import {
+  AgentscrapeArtifactError,
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
@@ -68,6 +72,7 @@ import {
   validateContentResult,
 } from "./presets";
 import { resolveQueuePaths } from "./queue-paths";
+import { sanitizeErrorInPlace } from "./redaction";
 
 export {
   type ContentHandlerRegistration,
@@ -84,6 +89,7 @@ import {
 } from "./schemas";
 
 export {
+  AgentscrapeArtifactError,
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
@@ -116,6 +122,7 @@ export interface FetchMarkdownOptions extends HandlerOptions {
   maxContentBytes?: number | undefined;
   maxRelations?: number | undefined;
   signal?: AbortSignal | undefined;
+  retainArtifacts?: boolean | undefined;
 }
 
 async function directMarkdown(
@@ -282,21 +289,6 @@ async function browserFinalUrl(session?: string | null, signal?: AbortSignal): P
   return finalUrl;
 }
 
-function writeArtifacts(
-  destination: string,
-  result: ScrapeResult,
-  content = result.markdown,
-  includeHtml = true,
-): void {
-  writeFileSync(destination, content);
-  if (!includeHtml || result.links) return;
-  const directory = dirname(destination);
-  const stem = basename(destination, extname(destination));
-  if (result.full_html) writeFileSync(join(directory, `${stem}.raw.html`), result.full_html);
-  if (result.selected_html)
-    writeFileSync(join(directory, `${stem}.selected.html`), result.selected_html);
-}
-
 type MarkdownRoute =
   | { kind: "preset"; preset: NonNullable<ReturnType<typeof selectPreset>> }
   | { kind: "generic" }
@@ -319,138 +311,158 @@ export async function fetchMarkdown(
   url: string,
   options: FetchMarkdownOptions = {},
 ): Promise<ScrapeResult | ExtractionEnvelope> {
-  const envelopeMode = options.envelope ?? false;
-  const maxContentBytes = options.maxContentBytes ?? 1_000_000;
-  const maxRelations = options.maxRelations ?? 256;
-  let hint = implementationHint(url, options.preset);
-  let finalUrl: string | null = null;
-  let browserUsed = false;
-
-  try {
-    return await withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
-      withBrowserSession(options.session, async () => {
-        let requested: string;
-        try {
-          requested = validateEnvelopeRequest(url, maxContentBytes, maxRelations);
-        } catch (error) {
-          if (
-            !envelopeMode &&
-            error instanceof EnvelopeBuildError &&
-            error.failureClass === "invalid_request"
-          )
-            throw new AgentscrapeUsageError(error.message);
-          throw error;
-        }
-        const registry = loadRegistry();
-        const selected = selectPreset(requested, registry, {
-          preset: options.preset,
-          generic: options.generic,
-        });
-        const route = markdownRoute(requested, selected, options.generic ?? false);
-
-        throwIfAborted(options.signal);
-
-        let result: ScrapeResult | null;
-        if (route.kind === "preset") {
-          const preset = route.preset;
-          hint = preset.name;
-          browserUsed = options.html === undefined || options.html === null;
-          result = await withBrowserSignal(options.signal, () =>
-            withBrowserProfile(options.browserProfile ?? preset.browser_profile, async () => {
-              const autoRouteXStatus =
-                !options.preset &&
-                preset.source === "official" &&
-                preset.name === "x-tweet" &&
-                preset.mode === "content" &&
-                preset.handler === "x.scrape_tweet" &&
-                preset.schema === "TweetThread";
-
-              if (autoRouteXStatus) {
-                const captured = await captureXStatusPage(requested, options);
-                let effectivePreset = preset;
-                if (captured.kind === "article") {
-                  const articlePreset = registry.byName("x-article");
-                  if (
-                    articlePreset?.source !== "official" ||
-                    articlePreset.mode !== "content" ||
-                    articlePreset.handler !== "x.scrape_article" ||
-                    articlePreset.schema !== "XArticle"
-                  )
-                    throw new PresetConfigError(
-                      "automatic X status article routing requires the official x-article preset",
-                    );
-                  effectivePreset = articlePreset;
-                }
-                hint = effectivePreset.name;
-                const value = await scrapeCapturedXStatus(requested, captured, options);
-                validateContentResult(value, effectivePreset);
-                return value;
-              }
-
-              const value = await scrapeWithPreset(requested, preset, options);
-              if (preset.mode === "content") validateContentResult(value, preset);
-              return value;
-            }),
-          );
-        } else if (route.kind === "generic") {
-          hint = "generic-page";
-          browserUsed = true;
-          result = await withBrowserSignal(options.signal, () =>
-            withBrowserProfile(options.browserProfile, async () =>
-              scrapePage(requested, options.selector, options),
-            ),
-          );
-        } else if (route.kind === "github") {
-          hint = "github";
-          result = await fetchGithubIfApplicable(requested, options.signal);
-        } else {
-          hint = "direct-markdown";
-          result = await directMarkdown(requested, options);
-        }
-
-        if (!result) throw new AgentscrapeRuntimeError("selected route returned no result");
-        throwIfAborted(options.signal);
-        finalUrl =
-          validateProviderFinalUrl(result.final_url) ??
-          (browserUsed && envelopeMode
-            ? await browserFinalUrl(options.session, options.signal)
-            : requested);
-
-        if (envelopeMode) {
-          const envelope = buildSuccessEnvelope(result, {
-            requestedUrl: requested,
-            finalUrl,
-            implementationHint: hint,
-            maxContentBytes,
-            maxRelations,
-          });
-          if (options.destination)
-            writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
-          return envelope;
-        }
-        if (options.destination) writeArtifacts(options.destination, result);
-        return result;
-      }),
+  const rawRetainArtifacts = options.retainArtifacts;
+  if (rawRetainArtifacts !== undefined && typeof rawRetainArtifacts !== "boolean")
+    throw sanitizeErrorInPlace(
+      new AgentscrapeUsageError("retainArtifacts must be a boolean when provided"),
     );
-  } catch (error) {
-    if (envelopeMode) {
-      const envelope = buildFailureEnvelope(error, {
-        requestedUrl: url,
-        finalUrl,
-        implementation: hint,
-      });
-      if (error instanceof AgentscrapeNetworkPolicyError)
-        networkPolicyFailureEnvelopes.add(envelope);
-      if (options.destination)
-        writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
-      return envelope;
+  const effectiveRetainArtifacts =
+    rawRetainArtifacts === undefined ? currentBrowserArtifactRetention() : rawRetainArtifacts;
+  const envelopeMode = options.envelope ?? false;
+  if (effectiveRetainArtifacts && envelopeMode)
+    throw sanitizeErrorInPlace(
+      new AgentscrapeUsageError("retainArtifacts cannot be combined with envelope output"),
+    );
+
+  return withBrowserArtifactRetention(rawRetainArtifacts, async () => {
+    const maxContentBytes = options.maxContentBytes ?? 1_000_000;
+    const maxRelations = options.maxRelations ?? 256;
+    let hint = implementationHint(url, options.preset);
+    let finalUrl: string | null = null;
+    let browserUsed = false;
+
+    try {
+      return await withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
+        withBrowserSession(options.session, async () => {
+          let requested: string;
+          try {
+            requested = validateEnvelopeRequest(url, maxContentBytes, maxRelations);
+          } catch (error) {
+            if (
+              !envelopeMode &&
+              error instanceof EnvelopeBuildError &&
+              error.failureClass === "invalid_request"
+            )
+              throw new AgentscrapeUsageError(error.message);
+            throw error;
+          }
+          const registry = loadRegistry();
+          const selected = selectPreset(requested, registry, {
+            preset: options.preset,
+            generic: options.generic,
+          });
+          const route = markdownRoute(requested, selected, options.generic ?? false);
+
+          throwIfAborted(options.signal);
+
+          let result: ScrapeResult | null;
+          if (route.kind === "preset") {
+            const preset = route.preset;
+            hint = preset.name;
+            browserUsed = options.html === undefined || options.html === null;
+            result = await withBrowserSignal(options.signal, () =>
+              withBrowserProfile(options.browserProfile ?? preset.browser_profile, async () => {
+                const autoRouteXStatus =
+                  !options.preset &&
+                  preset.source === "official" &&
+                  preset.name === "x-tweet" &&
+                  preset.mode === "content" &&
+                  preset.handler === "x.scrape_tweet" &&
+                  preset.schema === "TweetThread";
+
+                if (autoRouteXStatus) {
+                  const captured = await captureXStatusPage(requested, options);
+                  let effectivePreset = preset;
+                  if (captured.kind === "article") {
+                    const articlePreset = registry.byName("x-article");
+                    if (
+                      articlePreset?.source !== "official" ||
+                      articlePreset.mode !== "content" ||
+                      articlePreset.handler !== "x.scrape_article" ||
+                      articlePreset.schema !== "XArticle"
+                    )
+                      throw new PresetConfigError(
+                        "automatic X status article routing requires the official x-article preset",
+                      );
+                    effectivePreset = articlePreset;
+                  }
+                  hint = effectivePreset.name;
+                  const value = await scrapeCapturedXStatus(requested, captured, options);
+                  validateContentResult(value, effectivePreset);
+                  return value;
+                }
+
+                const value = await scrapeWithPreset(requested, preset, options);
+                if (preset.mode === "content") validateContentResult(value, preset);
+                return value;
+              }),
+            );
+          } else if (route.kind === "generic") {
+            hint = "generic-page";
+            browserUsed = true;
+            result = await withBrowserSignal(options.signal, () =>
+              withBrowserProfile(options.browserProfile, async () =>
+                scrapePage(requested, options.selector, options),
+              ),
+            );
+          } else if (route.kind === "github") {
+            hint = "github";
+            result = await fetchGithubIfApplicable(requested, options.signal);
+          } else {
+            hint = "direct-markdown";
+            result = await directMarkdown(requested, options);
+          }
+
+          if (!result) throw new AgentscrapeRuntimeError("selected route returned no result");
+          throwIfAborted(options.signal);
+          finalUrl =
+            validateProviderFinalUrl(result.final_url) ??
+            (browserUsed && envelopeMode
+              ? await browserFinalUrl(options.session, options.signal)
+              : requested);
+
+          if (envelopeMode) {
+            const envelope = buildSuccessEnvelope(result, {
+              requestedUrl: requested,
+              finalUrl,
+              implementationHint: hint,
+              maxContentBytes,
+              maxRelations,
+            });
+            if (options.destination)
+              writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
+            return envelope;
+          }
+          if (options.destination) {
+            const sidecars = effectiveRetainArtifacts
+              ? prepareHtmlSidecars(options.destination, result)
+              : [];
+            writeFileSync(options.destination, result.markdown);
+            writePreparedTextArtifacts(sidecars);
+          }
+          return result;
+        }),
+      );
+    } catch (error) {
+      if (envelopeMode) {
+        const envelope = buildFailureEnvelope(error, {
+          requestedUrl: url,
+          finalUrl,
+          implementation: hint,
+        });
+        if (error instanceof AgentscrapeNetworkPolicyError)
+          networkPolicyFailureEnvelopes.add(envelope);
+        if (options.destination)
+          writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
+        return envelope;
+      }
+      if (error instanceof AgentscrapeError) throw sanitizeErrorInPlace(error);
+      const value = sanitizeErrorInPlace(error);
+      if (/authentication required/i.test(value.message))
+        throw sanitizeErrorInPlace(new AgentscrapeAuthError(value.message));
+      throw sanitizeErrorInPlace(new AgentscrapeError(value.message));
     }
-    if (error instanceof AgentscrapeError) throw error;
-    const value = error instanceof Error ? error : new Error(String(error));
-    if (/authentication required/i.test(value.message))
-      throw new AgentscrapeAuthError(value.message);
-    throw new AgentscrapeError(value.message);
-  }
+  });
 }
 
 export interface FetchLinksOptions extends HandlerOptions {
@@ -463,108 +475,122 @@ export async function fetchLinks(
   url: string,
   options: FetchLinksOptions = {},
 ): Promise<ScrapeResult<LinkList>> {
-  return withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
-    withBrowserSession(options.session, async () => {
-      if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1))
-        throw new AgentscrapeUsageError("--limit must be a positive integer");
-      if (
-        options.maxScrolls !== undefined &&
-        (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
-      )
-        throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
-      if (
-        options.sinceId !== undefined &&
-        options.sinceId !== null &&
-        !/^\d+$/.test(options.sinceId)
-      )
-        throw new AgentscrapeUsageError("--since-id must contain only digits");
-      const timelineKeys: Array<[keyof HandlerOptions, string]> = [
-        ["limit", "--limit"],
-        ["maxScrolls", "--max-scrolls"],
-        ["sinceId", "--since-id"],
-        ["includeReplies", "--include-replies"],
-        ["includeReposts", "--include-reposts"],
-      ];
-      const supplied = timelineKeys.find(
-        ([key]) => options[key] !== undefined && options[key] !== false && options[key] !== null,
-      );
-      const hasCallerSelector = [
-        options.sectionSelector,
-        options.categorySelector,
-        options.toggleSelector,
-      ].some((selector) => selector !== undefined && selector !== null);
-      if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
-        throw new AgentscrapeUsageError(
-          "an explicit preset cannot be combined with caller selectors",
-        );
-      let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
-      let resolvedPreset: string | null = null;
-      const registry = loadRegistry();
-      const preset = options.preset
-        ? registry.byName(options.preset)
-        : !hasCallerSelector
-          ? matchPreset(url, registry.presets)
-          : null;
-      if (options.preset && !preset)
-        throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
-      resolvedPreset = preset?.name ?? null;
-      if (supplied && resolvedPreset !== "x-timeline")
-        throw new AgentscrapeUsageError(`${supplied[1]} is only valid with the x-timeline preset`);
-      for (const [label, selector] of [
-        ["section selector", options.sectionSelector],
-        ["category selector", options.categorySelector],
-        ["toggle selector", options.toggleSelector],
-      ] as const) {
-        if (selector === undefined || selector === null) continue;
-        const problem = cssSelectorProblem(selector);
-        if (problem) throw new AgentscrapeUsageError(`Invalid ${label} '${selector}': ${problem}`);
-      }
-      result = await withBrowserSignal(options.signal, () =>
-        withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
-          if (preset) return scrapeWithPreset(url, preset, options);
-          let links: LinkItem[];
-          try {
-            if (options.sectionSelector && options.categorySelector)
-              links = await scrapeNavLinks(
-                url,
-                options.sectionSelector,
-                options.categorySelector,
-                options.toggleSelector ?? undefined,
-                options,
-              );
-            else if (options.sectionSelector || options.categorySelector)
-              links = await scrapeLinks(
-                url,
-                options.sectionSelector ?? options.categorySelector!,
-                options.toggleSelector ?? undefined,
-                options,
-              );
-            else
-              throw new AgentscrapeUsageError(
-                "provide --preset or at least one selector (--section-selector / --category-selector)",
-              );
-          } catch (error) {
-            if (error instanceof PresetDriftError) throw new AgentscrapeUsageError(error.message);
-            throw error;
+  try {
+    return await withBrowserArtifactRetention(false, () =>
+      withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
+        withBrowserSession(options.session, async () => {
+          if (
+            options.limit !== undefined &&
+            (!Number.isInteger(options.limit) || options.limit < 1)
+          )
+            throw new AgentscrapeUsageError("--limit must be a positive integer");
+          if (
+            options.maxScrolls !== undefined &&
+            (!Number.isInteger(options.maxScrolls) || options.maxScrolls < 1)
+          )
+            throw new AgentscrapeUsageError("--max-scrolls must be a positive integer");
+          if (
+            options.sinceId !== undefined &&
+            options.sinceId !== null &&
+            !/^\d+$/.test(options.sinceId)
+          )
+            throw new AgentscrapeUsageError("--since-id must contain only digits");
+          const timelineKeys: Array<[keyof HandlerOptions, string]> = [
+            ["limit", "--limit"],
+            ["maxScrolls", "--max-scrolls"],
+            ["sinceId", "--since-id"],
+            ["includeReplies", "--include-replies"],
+            ["includeReposts", "--include-reposts"],
+          ];
+          const supplied = timelineKeys.find(
+            ([key]) =>
+              options[key] !== undefined && options[key] !== false && options[key] !== null,
+          );
+          const hasCallerSelector = [
+            options.sectionSelector,
+            options.categorySelector,
+            options.toggleSelector,
+          ].some((selector) => selector !== undefined && selector !== null);
+          if (options.preset !== undefined && options.preset !== null && hasCallerSelector)
+            throw new AgentscrapeUsageError(
+              "an explicit preset cannot be combined with caller selectors",
+            );
+          let result: ScrapeResult<LinkList> | ScrapeResult | null = null;
+          let resolvedPreset: string | null = null;
+          const registry = loadRegistry();
+          const preset = options.preset
+            ? registry.byName(options.preset)
+            : !hasCallerSelector
+              ? matchPreset(url, registry.presets)
+              : null;
+          if (options.preset && !preset)
+            throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
+          resolvedPreset = preset?.name ?? null;
+          if (supplied && resolvedPreset !== "x-timeline")
+            throw new AgentscrapeUsageError(
+              `${supplied[1]} is only valid with the x-timeline preset`,
+            );
+          for (const [label, selector] of [
+            ["section selector", options.sectionSelector],
+            ["category selector", options.categorySelector],
+            ["toggle selector", options.toggleSelector],
+          ] as const) {
+            if (selector === undefined || selector === null) continue;
+            const problem = cssSelectorProblem(selector);
+            if (problem)
+              throw new AgentscrapeUsageError(`Invalid ${label} '${selector}': ${problem}`);
           }
-          const structured = new LinkList(links);
-          return {
-            full_html: "",
-            selected_html: "",
-            links,
-            markdown: structured.toMarkdown(),
-            structured,
-          };
+          result = await withBrowserSignal(options.signal, () =>
+            withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
+              if (preset) return scrapeWithPreset(url, preset, options);
+              let links: LinkItem[];
+              try {
+                if (options.sectionSelector && options.categorySelector)
+                  links = await scrapeNavLinks(
+                    url,
+                    options.sectionSelector,
+                    options.categorySelector,
+                    options.toggleSelector ?? undefined,
+                    options,
+                  );
+                else if (options.sectionSelector || options.categorySelector)
+                  links = await scrapeLinks(
+                    url,
+                    options.sectionSelector ?? options.categorySelector!,
+                    options.toggleSelector ?? undefined,
+                    options,
+                  );
+                else
+                  throw new AgentscrapeUsageError(
+                    "provide --preset or at least one selector (--section-selector / --category-selector)",
+                  );
+              } catch (error) {
+                if (error instanceof PresetDriftError)
+                  throw new AgentscrapeUsageError(error.message);
+                throw error;
+              }
+              const structured = new LinkList(links);
+              return {
+                full_html: "",
+                selected_html: "",
+                links,
+                markdown: structured.toMarkdown(),
+                structured,
+              };
+            }),
+          );
+          throwIfAborted(options.signal);
+          if (!result.links)
+            throw new AgentscrapeUsageError(
+              `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
+            );
+          return result as ScrapeResult<LinkList>;
         }),
-      );
-      throwIfAborted(options.signal);
-      if (!result.links)
-        throw new AgentscrapeUsageError(
-          `preset '${resolvedPreset ?? "this"}' is a content-mode preset and emits no links; use fetch-markdown instead`,
-        );
-      return result as ScrapeResult<LinkList>;
-    }),
-  );
+      ),
+    );
+  } catch (error) {
+    throw sanitizeErrorInPlace(error);
+  }
 }
 
 export function convertHtml(html: string): string {
