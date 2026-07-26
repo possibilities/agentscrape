@@ -15,6 +15,7 @@ import { parse as parseYaml } from "yaml";
 import { fetchLinks, fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
+  closeSession,
   currentBrowserArtifactRetention,
   openPage,
   resetBrowserUnavailableCache,
@@ -27,6 +28,7 @@ import {
 import { checkPresets } from "../src/canary";
 import { captureCorpus } from "../src/corpus";
 import {
+  AgentscrapeBrowserError,
   AgentscrapeCancelledError,
   AgentscrapeNetworkPolicyError,
   AgentscrapeUsageError,
@@ -40,6 +42,8 @@ const originalInterleave = process.env.AGENTSCRAPE_TEST_INTERLEAVE;
 const originalState = process.env.AGENTSCRAPE_TEST_STATE;
 const originalMissingSelector = process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR;
 const originalTruncatedHtml = process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML;
+const originalCloseExit = process.env.AGENTSCRAPE_TEST_CLOSE_EXIT;
+const originalCloseStderr = process.env.AGENTSCRAPE_TEST_CLOSE_STDERR;
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -56,6 +60,10 @@ afterEach(() => {
   else process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR = originalMissingSelector;
   if (originalTruncatedHtml === undefined) delete process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML;
   else process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML = originalTruncatedHtml;
+  if (originalCloseExit === undefined) delete process.env.AGENTSCRAPE_TEST_CLOSE_EXIT;
+  else process.env.AGENTSCRAPE_TEST_CLOSE_EXIT = originalCloseExit;
+  if (originalCloseStderr === undefined) delete process.env.AGENTSCRAPE_TEST_CLOSE_STDERR;
+  else process.env.AGENTSCRAPE_TEST_CLOSE_STDERR = originalCloseStderr;
   globalThis.fetch = originalFetch;
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -98,7 +106,11 @@ appendFileSync(join(stateRoot, "events.jsonl"), JSON.stringify({ session, comman
 const closed = join(sessionRoot, "closed");
 if (command[0] === "close") {
   writeFileSync(closed, "closed");
-  process.exit(0);
+  if (process.env.AGENTSCRAPE_TEST_CLOSE_STDERR) {
+    console.error(process.env.AGENTSCRAPE_TEST_CLOSE_STDERR);
+  }
+  const selectedExit = Number(process.env.AGENTSCRAPE_TEST_CLOSE_EXIT ?? "0");
+  process.exit(Number.isInteger(selectedExit) && selectedExit >= 0 && selectedExit <= 255 ? selectedExit : 94);
 }
 if (existsSync(closed)) {
   console.error("command used a closed session: " + session);
@@ -154,6 +166,8 @@ if (expression === "window.location.href") {
   process.env.AGENTSCRAPE_TEST_STATE = state;
   if (interleave) process.env.AGENTSCRAPE_TEST_INTERLEAVE = "1";
   else delete process.env.AGENTSCRAPE_TEST_INTERLEAVE;
+  delete process.env.AGENTSCRAPE_TEST_CLOSE_EXIT;
+  delete process.env.AGENTSCRAPE_TEST_CLOSE_STDERR;
   return { root, home, events };
 }
 
@@ -380,6 +394,104 @@ describe("owned browser session scopes", () => {
       });
       expect(inherited).toBe(named);
     });
+  });
+
+  test("failed automatic close preserves the exact callback failure and captured name", async () => {
+    const value = fixture();
+    process.env.AGENTSCRAPE_TEST_CLOSE_EXIT = "7";
+    process.env.AGENTSCRAPE_TEST_CLOSE_STDERR = "automatic close failed";
+    const sentinel = new Error("callback sentinel");
+    let capturedName = "";
+    let observed: unknown;
+
+    try {
+      await withBrowserSession(undefined, async (scope) => {
+        capturedName = scope.name;
+        await runAgentBrowser(["open", "about:blank"]);
+        scope.name = "mutated-after-use";
+        throw sentinel;
+      });
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toBe(sentinel);
+    expect(events(value)).toEqual([
+      { session: capturedName, command: ["open", "about:blank"] },
+      { session: capturedName, command: ["close"] },
+    ]);
+  });
+
+  test("automatic close spawn failure preserves the exact successful value", async () => {
+    const value = fixture();
+    const sentinel = { exact: "return sentinel" };
+    let capturedName = "";
+
+    const observed = await withBrowserSession(undefined, async (scope) => {
+      capturedName = scope.name;
+      await runAgentBrowser(["open", "about:blank"]);
+      rmSync(join(value.root, "agent-browser"));
+      return sentinel;
+    });
+
+    expect(observed).toBe(sentinel);
+    expect(events(value)).toEqual([{ session: capturedName, command: ["open", "about:blank"] }]);
+  });
+});
+
+describe("strict browser session close", () => {
+  test("completed nonzero close is a retryable, redacted, bounded browser failure", async () => {
+    const value = fixture();
+    process.env.AGENTSCRAPE_TEST_CLOSE_EXIT = "7";
+    process.env.AGENTSCRAPE_TEST_CLOSE_STDERR = `token=STRICT-CLOSE-SECRET ${"diagnostic ".repeat(600)}`;
+    let observed: unknown;
+
+    try {
+      await closeSession("strict-close");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toBeInstanceOf(AgentscrapeBrowserError);
+    const failure = observed as AgentscrapeBrowserError;
+    expect(failure.retryable).toBeTrue();
+    expect(failure.message).toStartWith("Failed to close browser session");
+    expect(failure.message).not.toContain("STRICT-CLOSE-SECRET");
+    expect(new TextEncoder().encode(failure.message).byteLength).toBeLessThanOrEqual(1024);
+    expect(events(value)).toEqual([{ session: "strict-close", command: ["close"] }]);
+  });
+
+  test("exit zero succeeds despite incidental close stderr", async () => {
+    const value = fixture();
+    process.env.AGENTSCRAPE_TEST_CLOSE_STDERR = "incidental close warning";
+
+    await closeSession("successful-close");
+
+    expect(events(value)).toEqual([{ session: "successful-close", command: ["close"] }]);
+  });
+
+  test("pre-cancellation wins and a missing executable is nonretryable", async () => {
+    const value = fixture();
+    const missing = join(value.root, "missing-agent-browser");
+    process.env[AGENT_BROWSER_BIN_ENV] = missing;
+    const controller = new AbortController();
+    controller.abort(new Error("cancel close first"));
+
+    await expect(closeSession("cancelled-close", controller.signal)).rejects.toBeInstanceOf(
+      AgentscrapeCancelledError,
+    );
+
+    let observed: unknown;
+    try {
+      await closeSession("missing-close");
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toBeInstanceOf(AgentscrapeBrowserError);
+    expect((observed as AgentscrapeBrowserError).retryable).toBeFalse();
+    expect((observed as Error).message).toBe("Failed to close browser session");
+    expect((observed as Error).message).not.toContain(missing);
+    expect(events(value)).toEqual([]);
   });
 });
 
