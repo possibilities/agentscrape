@@ -11,7 +11,11 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -28,10 +32,22 @@ jobs:
       - name: Run project checks
         run: bun run check
 
-      - name: Validate installer shell and plist portably
+      - name: Validate shell scripts
+        shell: bash
         run: |
-          bash -n scripts/install.sh
+          bash -n scripts/check-hermetic.sh scripts/install.sh
           AGENTSCRAPE_INSTALL_LAUNCHCTL=none bash scripts/install.sh --help >/dev/null
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --severity=error scripts/check-hermetic.sh scripts/install.sh
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            printf 'shellcheck is required on the Ubuntu runner\n' >&2
+            exit 1
+          else
+            printf 'shellcheck unavailable on the macOS runner; continuing\n' >&2
+          fi
+
+      - name: Validate plist with Python
+        run: |
           python3 - <<'PY'
           import plistlib
           from pathlib import Path
@@ -42,5 +58,24 @@ jobs:
           assert plist["ProgramArguments"] == ["__AGENTSCRAPE_PROGRAM__", "process-queue"]
           PY
 
-      - name: Check patch whitespace
-        run: git diff --check
+      - name: Lint plist with macOS plutil
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if command -v plutil >/dev/null 2>&1; then
+            plutil -lint plist/agentscrape.process-queue.plist
+          else
+            printf 'plutil unavailable on the macOS runner; continuing\n' >&2
+          fi
+
+      - name: Check whitespace and clean worktree
+        shell: bash
+        run: |
+          git diff --check
+          git diff --exit-code
+          git diff --cached --exit-code
+          status="$(git status --porcelain --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" >&2
+          fi
+          [[ -z "$status" ]]
