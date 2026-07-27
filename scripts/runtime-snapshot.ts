@@ -13,6 +13,8 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  rmdirSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { arch, platform } from "node:os";
@@ -32,6 +34,7 @@ const MAX_TOTAL_SIZE = 512 * 1024 * 1024;
 const MAX_PATH_SIZE = 4096;
 const MAX_DEPTH = 128;
 const MAX_MANIFEST_SIZE = 8 * 1024 * 1024;
+const MAX_RUNTIME_ROOTS = 64;
 const SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const METADATA = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
@@ -466,7 +469,7 @@ function inventoryEquals(left: Inventory, right: Inventory): boolean {
   );
 }
 
-function verify(rootValue: string, sha: string, tree?: string): void {
+function verify(rootValue: string, sha: string, tree?: string): Manifest {
   if (!SHA.test(sha) || (tree !== undefined && !SHA.test(tree))) fail("expected SHA is malformed");
   const root = resolve(rootValue);
   if (root !== rootValue) fail("snapshot root must be a normalized absolute path");
@@ -482,6 +485,175 @@ function verify(rootValue: string, sha: string, tree?: string): void {
     JSON.stringify(second.entries) !== JSON.stringify(secondManifest.manifest.entries)
   )
     fail("runtime snapshot changed during verification");
+  return secondManifest.manifest;
+}
+
+function assertRuntimeParent(path: string): Metadata {
+  const info = metadata(path);
+  if (
+    fileType(info.mode) !== "directory" ||
+    info.uid !== BigInt(process.getuid?.() ?? -1) ||
+    modeBits(info.mode) !== 0o700
+  )
+    fail("runtime parent must be an owned plain mode 0700 directory");
+  return info;
+}
+
+function absoluteEntry(root: string, path: string): string {
+  return `${root}${sep}${path.split("/").join(sep)}`;
+}
+
+function assertDeletionEntry(root: string, entry: SnapshotEntry, directoryMode = 0o500): Metadata {
+  const path = absoluteEntry(root, entry.path);
+  const info = metadata(path);
+  if (info.uid !== BigInt(process.getuid?.() ?? -1) || fileType(info.mode) !== entry.type)
+    fail(`snapshot entry changed before deletion: ${entry.path}`);
+  if (entry.type === "directory") {
+    if (modeBits(info.mode) !== directoryMode)
+      fail(`snapshot directory changed before deletion: ${entry.path}`);
+  } else if (entry.type === "file") {
+    if (
+      info.nlink !== 1n ||
+      modeBits(info.mode) !== Number.parseInt(entry.mode, 8) ||
+      info.size !== BigInt(entry.size)
+    )
+      fail(`snapshot file changed before deletion: ${entry.path}`);
+  } else if (info.nlink !== 1n || readlinkSync(path) !== entry.target) {
+    fail(`snapshot symlink changed before deletion: ${entry.path}`);
+  }
+  return info;
+}
+
+function deepestDirectories(entries: SnapshotEntry[]): DirectoryEntry[] {
+  return entries
+    .filter((entry): entry is DirectoryEntry => entry.type === "directory")
+    .sort((left, right) => {
+      const depth = right.path.split("/").length - left.path.split("/").length;
+      return depth || Buffer.compare(Buffer.from(left.path), Buffer.from(right.path));
+    });
+}
+
+function deleteVerifiedRoot(root: string, manifest: Manifest): void {
+  const rootBefore = metadata(root);
+  if (
+    fileType(rootBefore.mode) !== "directory" ||
+    rootBefore.uid !== BigInt(process.getuid?.() ?? -1) ||
+    modeBits(rootBefore.mode) !== 0o500
+  )
+    fail("snapshot root changed before deletion");
+  for (const entry of manifest.entries) assertDeletionEntry(root, entry);
+
+  const directories = deepestDirectories(manifest.entries);
+  for (const entry of directories) {
+    const path = absoluteEntry(root, entry.path);
+    const before = assertDeletionEntry(root, entry);
+    chmodSync(path, 0o700);
+    const changed = metadata(path);
+    if (
+      changed.dev !== before.dev ||
+      changed.ino !== before.ino ||
+      fileType(changed.mode) !== "directory" ||
+      changed.uid !== BigInt(process.getuid?.() ?? -1) ||
+      modeBits(changed.mode) !== 0o700
+    )
+      fail(`snapshot directory changed while opening for deletion: ${entry.path}`);
+  }
+  if (!sameMetadata(rootBefore, metadata(root))) fail("snapshot root changed before deletion");
+  chmodSync(root, 0o700);
+  const openedRoot = metadata(root);
+  if (
+    openedRoot.dev !== rootBefore.dev ||
+    openedRoot.ino !== rootBefore.ino ||
+    fileType(openedRoot.mode) !== "directory" ||
+    openedRoot.uid !== BigInt(process.getuid?.() ?? -1) ||
+    modeBits(openedRoot.mode) !== 0o700
+  )
+    fail("snapshot root changed while opening for deletion");
+
+  for (const entry of manifest.entries) {
+    if (entry.type === "directory") continue;
+    assertDeletionEntry(root, entry);
+    unlinkSync(absoluteEntry(root, entry.path));
+  }
+  for (const entry of directories) {
+    const path = absoluteEntry(root, entry.path);
+    assertDeletionEntry(root, entry, 0o700);
+    if (sortedNames(path).length !== 0)
+      fail(`snapshot directory is not empty during deletion: ${entry.path}`);
+    rmdirSync(path);
+  }
+
+  const manifestPath = `${root}${sep}${MANIFEST}`;
+  const manifestInfo = metadata(manifestPath);
+  if (
+    fileType(manifestInfo.mode) !== "file" ||
+    manifestInfo.uid !== BigInt(process.getuid?.() ?? -1) ||
+    manifestInfo.nlink !== 1n ||
+    modeBits(manifestInfo.mode) !== 0o400 ||
+    manifestInfo.size > BigInt(MAX_MANIFEST_SIZE) ||
+    sortedNames(root).join("\0") !== MANIFEST
+  )
+    fail("runtime manifest changed before deletion");
+  unlinkSync(manifestPath);
+  const rootFinished = metadata(root);
+  if (
+    rootFinished.dev !== rootBefore.dev ||
+    rootFinished.ino !== rootBefore.ino ||
+    fileType(rootFinished.mode) !== "directory" ||
+    rootFinished.uid !== BigInt(process.getuid?.() ?? -1) ||
+    modeBits(rootFinished.mode) !== 0o700 ||
+    sortedNames(root).length !== 0
+  )
+    fail("snapshot root changed during deletion");
+  rmdirSync(root);
+}
+
+function gc(runtimeValue: string, protectedSha: string): void {
+  const runtime = resolve(runtimeValue);
+  if (runtime !== runtimeValue) fail("runtime parent must be a normalized absolute path");
+  if (protectedSha !== "-" && !SHA.test(protectedSha)) fail("protected runtime SHA is malformed");
+
+  let expectedParent = assertRuntimeParent(runtime);
+  const names = sortedNames(runtime);
+  if (names.length > MAX_RUNTIME_ROOTS) fail("runtime parent has more than 64 snapshot roots");
+  for (const name of names) {
+    if (!SHA.test(name))
+      fail(`runtime parent contains a noncanonical child: ${JSON.stringify(name)}`);
+    const info = metadata(`${runtime}${sep}${name}`);
+    if (
+      fileType(info.mode) !== "directory" ||
+      info.uid !== BigInt(process.getuid?.() ?? -1) ||
+      modeBits(info.mode) !== 0o500
+    )
+      fail(`runtime child is not an owned plain mode 0500 directory: ${name}`);
+  }
+  if (protectedSha !== "-" && !names.includes(protectedSha))
+    fail("protected runtime snapshot is missing");
+  for (const name of names) verify(`${runtime}${sep}${name}`, name);
+  if (!sameMetadata(expectedParent, assertRuntimeParent(runtime)))
+    fail("runtime parent changed during GC inventory");
+
+  for (const name of names) {
+    if (name === protectedSha) continue;
+    if (!sameMetadata(expectedParent, assertRuntimeParent(runtime)))
+      fail("runtime parent changed during GC");
+    const root = `${runtime}${sep}${name}`;
+    const manifest = verify(root, name);
+    if (!sameMetadata(expectedParent, assertRuntimeParent(runtime)))
+      fail("runtime parent changed before snapshot deletion");
+    deleteVerifiedRoot(root, manifest);
+    fsyncDirectory(runtime);
+    expectedParent = assertRuntimeParent(runtime);
+  }
+
+  const remaining = sortedNames(runtime);
+  const expected = protectedSha === "-" ? [] : [protectedSha];
+  if (
+    remaining.length !== expected.length ||
+    remaining.some((name, index) => name !== expected[index])
+  )
+    fail("runtime parent changed before GC completion");
+  fsyncDirectory(runtime);
 }
 
 function fsyncFile(path: string): void {
@@ -696,7 +868,7 @@ function publish(stageValue: string, targetValue: string): void {
 
 function usage(): never {
   console.error(
-    "Usage: runtime-snapshot.ts prepare ROOT SHA TREE BUN_VERSION\n       runtime-snapshot.ts verify ROOT SHA [TREE]\n       runtime-snapshot.ts publish STAGE TARGET",
+    "Usage: runtime-snapshot.ts prepare ROOT SHA TREE BUN_VERSION\n       runtime-snapshot.ts verify ROOT SHA [TREE]\n       runtime-snapshot.ts publish STAGE TARGET\n       runtime-snapshot.ts gc RUNTIME_PARENT PROTECTED_SHA_OR_DASH",
   );
   process.exit(2);
 }
@@ -715,6 +887,8 @@ try {
     verify(root, sha, tree);
   } else if (command === "publish" && root && sha && process.argv.length === 5) {
     publish(root, sha);
+  } else if (command === "gc" && root && sha && process.argv.length === 5) {
+    gc(root, sha);
   } else {
     usage();
   }

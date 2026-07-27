@@ -600,6 +600,158 @@ async function seedCheckoutInstallation(
   expect(loaded.code, loaded.stderr).toBe(0);
 }
 
+function fixtureSha(value: number): string {
+  return value.toString(16).padStart(40, "0");
+}
+
+function runtimeLayout(home: string): { state: string; share: string; runtime: string } {
+  const local = join(home, ".local");
+  const stateParent = join(local, "state");
+  const state = join(stateParent, "agentscrape");
+  const shareParent = join(local, "share");
+  const share = join(shareParent, "agentscrape");
+  const runtime = join(state, "runtime");
+  for (const path of [local, stateParent, state, runtime, shareParent, share]) {
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    chmodSync(path, 0o700);
+  }
+  return { state: realpathSync(state), share: realpathSync(share), runtime: realpathSync(runtime) };
+}
+
+async function createTinySnapshot(
+  runtime: string,
+  sha: string,
+  options: {
+    assetsRoot?: string;
+    helperContent?: string;
+    symlinkEntry?: boolean;
+  } = {},
+): Promise<string> {
+  const assetsRoot = options.assetsRoot ?? sourceRoot;
+  const snapshot = join(runtime, sha);
+  for (const path of ["src", "config/presets", "plist", "scripts", "test/corpus", "node_modules"])
+    mkdirSync(join(snapshot, path), { recursive: true, mode: 0o700 });
+  writeFileSync(join(snapshot, "src/cli.ts"), "console.log('tiny runtime');\n");
+  writeFileSync(join(snapshot, "config/preset-schema.yaml"), "{}\n");
+  writeFileSync(join(snapshot, "package.json"), "{}\n");
+  writeFileSync(join(snapshot, "bun.lock"), "");
+  cpSync(
+    join(assetsRoot, "plist/agentscrape.process-queue.plist"),
+    join(snapshot, "plist/agentscrape.process-queue.plist"),
+  );
+  cpSync(join(assetsRoot, "scripts/install.sh"), join(snapshot, "scripts/install.sh"));
+  cpSync(
+    join(assetsRoot, "scripts/runtime-snapshot.ts"),
+    join(snapshot, "scripts/runtime-snapshot.ts"),
+  );
+  chmodSync(join(snapshot, "scripts/install.sh"), 0o755);
+  chmodSync(join(snapshot, "scripts/runtime-snapshot.ts"), 0o755);
+  if (options.helperContent) {
+    writeFileSync(join(snapshot, "scripts/runtime-snapshot.ts"), options.helperContent);
+    chmodSync(join(snapshot, "scripts/runtime-snapshot.ts"), 0o755);
+  }
+  if (options.symlinkEntry) symlinkSync("cli.ts", join(snapshot, "src/cli-link.ts"));
+  const prepared = await command([
+    process.execPath,
+    join(sourceRoot, "scripts/runtime-snapshot.ts"),
+    "prepare",
+    snapshot,
+    sha,
+    "f".repeat(40),
+    Bun.version,
+  ]);
+  expect(prepared.code, prepared.stderr).toBe(0);
+  return snapshot;
+}
+
+function cloneSnapshotIdentity(source: string, runtime: string, sha: string): string {
+  const destination = join(runtime, sha);
+  copyTree(source, destination);
+  const manifestPath = join(destination, ".agentscrape-runtime-manifest.json");
+  chmodSync(destination, 0o700);
+  chmodSync(manifestPath, 0o600);
+  const manifest = JSON.parse(text(manifestPath));
+  manifest.sha = sha;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+  chmodSync(manifestPath, 0o400);
+  chmodSync(destination, 0o500);
+  return destination;
+}
+
+async function seedSnapshotInstallation(
+  fixture: ReturnType<typeof installEnv>,
+  sha = fixtureSha(1),
+  options: Parameters<typeof createTinySnapshot>[2] = {},
+): Promise<{
+  state: string;
+  runtime: string;
+  snapshot: string;
+  sha: string;
+  publicPaths: string[];
+}> {
+  const layout = runtimeLayout(fixture.home);
+  const snapshot = await createTinySnapshot(layout.runtime, sha, options);
+  const commandPath = join(fixture.home, ".local/bin/agentscrape");
+  const service = join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist");
+  const queue = join(layout.share, "queue");
+  const log = join(layout.state, "process-queue.log");
+  const receipt = join(layout.state, "install-receipt");
+  const deployed = join(layout.state, "deployed-sha");
+  for (const directory of [dirname(commandPath), dirname(service), queue]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    chmodSync(directory, 0o700);
+  }
+  const bun = join(fixture.tools, "bun");
+  const source = join(snapshot, "src/cli.ts");
+  const servicePath = `${dirname(bun)}:${dirname(commandPath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+  writeFileSync(
+    commandPath,
+    `#!/usr/bin/env bash\nset -euo pipefail\n# agentscrape-installer-owned: agentscrape.command.v1\n# label: agentscrape.process-queue\n# source-root: ${snapshot}\n# source-sha: ${sha}\n# bun: ${bun}\nexport AGENTSCRAPE_DATA_HOME=${shellQuote(layout.share)}\nexec ${shellQuote(bun)} ${shellQuote(source)} "$@"\n`,
+  );
+  chmodSync(commandPath, 0o755);
+  const plist = text(join(snapshot, "plist/agentscrape.process-queue.plist"))
+    .replace(/\n$/, "")
+    .replaceAll("__AGENTSCRAPE_PROGRAM__", xmlEscape(commandPath))
+    .replaceAll("__AGENTSCRAPE_PATH__", xmlEscape(servicePath))
+    .replaceAll("__AGENTSCRAPE_QUEUE__", xmlEscape(queue))
+    .replaceAll("__AGENTSCRAPE_LOG__", xmlEscape(log));
+  writeFileSync(service, plist);
+  chmodSync(service, 0o600);
+  writeFileSync(
+    receipt,
+    [
+      "marker=agentscrape-installer-owned: agentscrape.install-receipt.v1",
+      "label=agentscrape.process-queue",
+      `root=${snapshot}`,
+      `source=${source}`,
+      `bun=${bun}`,
+      `command=${commandPath}`,
+      `service=${service}`,
+      `share=${layout.share}`,
+      `queue=${queue}`,
+      `log=${log}`,
+      `path=${servicePath}`,
+      `sha=${sha}`,
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(deployed, `${sha}\n`);
+  writeFileSync(log, "");
+  for (const path of [service, receipt, deployed, log]) chmodSync(path, 0o600);
+  const loaded = await command(
+    [join(fixture.tools, "launchctl"), "bootstrap", `gui/${process.getuid?.() ?? 0}`, service],
+    { env: fixture.env },
+  );
+  expect(loaded.code, loaded.stderr).toBe(0);
+  return {
+    state: layout.state,
+    runtime: layout.runtime,
+    snapshot,
+    sha,
+    publicPaths: [commandPath, service, receipt, deployed],
+  };
+}
+
 beforeAll(async () => {
   suiteCheckoutParent = mkdtempSync(join(tmpdir(), "agentscrape-suite-checkout-"));
   const checkout = join(suiteCheckoutParent, "agentscrape");
@@ -801,6 +953,14 @@ describe("installer", () => {
       const shellcheck = await command(["shellcheck", "--severity=error", "scripts/install.sh"]);
       expect(shellcheck.code, `${shellcheck.stderr}\n${shellcheck.stdout}`).toBe(0);
     }
+    for (const argv of [
+      ["bash", "scripts/install.sh", "--gc-runtime", "extra"],
+      ["bash", "scripts/install.sh", "--install", "--gc-runtime"],
+      ["bash", "scripts/install.sh", "--help", "--gc-runtime"],
+    ]) {
+      const usage = await command(argv);
+      expect(usage.code).toBe(2);
+    }
   });
 
   test("installs one complete sealed snapshot and is idempotent", async () => {
@@ -850,6 +1010,172 @@ describe("installer", () => {
     expect(
       [commandPath, plistPath, receiptPath, shaPath, runtime].map((path) => statSync(path).ino),
     ).toEqual(identities);
+  });
+
+  test("explicit installed GC preserves public/current state, deletes stale roots, and is idempotent", async () => {
+    const fixture = installEnv({}, { preseedSnapshots: false });
+    const installed = await seedSnapshotInstallation(fixture, fixtureSha(1));
+    const staleOne = await createTinySnapshot(installed.runtime, fixtureSha(2), {
+      symlinkEntry: true,
+    });
+    const marker = join(fixture.state, "stale-helper-ran");
+    const staleTwo = await createTinySnapshot(installed.runtime, fixtureSha(3), {
+      helperContent: `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(marker)}, "ran");\nprocess.exit(91);\n`,
+    });
+    const publicBefore = installed.publicPaths.map((path) => ({
+      bytes: text(path),
+      ino: statSync(path).ino,
+    }));
+    const protectedInode = statSync(installed.snapshot).ino;
+
+    const collected = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: { ...fixture.env, AGENTSCRAPE_INSTALL_PLUTIL: "/missing/plutil" },
+    });
+    expect(collected.code, collected.stderr).toBe(0);
+    expect(existsSync(staleOne)).toBeFalse();
+    expect(existsSync(staleTwo)).toBeFalse();
+    expect(existsSync(marker)).toBeFalse();
+    expect(statSync(installed.snapshot).ino).toBe(protectedInode);
+    expect(
+      installed.publicPaths.map((path) => ({ bytes: text(path), ino: statSync(path).ino })),
+    ).toEqual(publicBefore);
+    expect(readdirSync(installed.runtime)).toEqual([installed.sha]);
+
+    const again = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: fixture.env,
+    });
+    expect(again.code, again.stderr).toBe(0);
+    expect(readdirSync(installed.runtime)).toEqual([installed.sha]);
+  });
+
+  test("trusted-checkout GC after uninstall removes every verified root", async () => {
+    const fixture = installEnv({}, { preseedSnapshots: false });
+    const installed = await seedSnapshotInstallation(fixture, fixtureSha(4));
+    await createTinySnapshot(installed.runtime, fixtureSha(5), { symlinkEntry: true });
+    const removed = await command(["bash", "scripts/install.sh", "--uninstall"], {
+      env: fixture.env,
+    });
+    expect(removed.code, removed.stderr).toBe(0);
+    expect(readdirSync(installed.runtime)).toHaveLength(2);
+
+    const collected = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: fixture.env,
+    });
+    expect(collected.code, collected.stderr).toBe(0);
+    expect(readdirSync(installed.runtime)).toEqual([]);
+  });
+
+  test("protected snapshot authorizes installed fallback but not GC after uninstall", async () => {
+    const checkout = await committedPhaseCheckout();
+    const fixture = installEnv({}, { preseedSnapshots: false });
+    const installed = await seedSnapshotInstallation(fixture, fixtureSha(6), {
+      assetsRoot: checkout,
+    });
+    const stale = await createTinySnapshot(installed.runtime, fixtureSha(7), {
+      assetsRoot: checkout,
+    });
+    makeWritable(checkout);
+    rmSync(checkout, { recursive: true, force: true });
+
+    const fallback = await command(
+      ["bash", join(installed.snapshot, "scripts/install.sh"), "--gc-runtime"],
+      { env: fixture.env },
+    );
+    expect(fallback.code, fallback.stderr).toBe(0);
+    expect(existsSync(stale)).toBeFalse();
+    expect(existsSync(installed.snapshot)).toBeTrue();
+
+    const removed = await command(
+      ["bash", join(installed.snapshot, "scripts/install.sh"), "--uninstall"],
+      { env: fixture.env },
+    );
+    expect(removed.code, removed.stderr).toBe(0);
+    const refused = await command(
+      ["bash", join(installed.snapshot, "scripts/install.sh"), "--gc-runtime"],
+      { env: fixture.env },
+    );
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("requires a trusted Git checkout");
+    expect(existsSync(installed.snapshot)).toBeTrue();
+  });
+
+  test("GC inventory is all-or-nothing for malformed, noncanonical, and symlink roots", async () => {
+    const fixture = installEnv({}, { preseedSnapshots: false });
+    const installed = await seedSnapshotInstallation(fixture, fixtureSha(8));
+    const stale = await createTinySnapshot(installed.runtime, fixtureSha(9));
+    const gc = () => command(["bash", "scripts/install.sh", "--gc-runtime"], { env: fixture.env });
+
+    const malformed = join(installed.runtime, fixtureSha(10));
+    mkdirSync(malformed, { mode: 0o700 });
+    writeFileSync(join(malformed, ".agentscrape-runtime-manifest.json"), "{}\n", {
+      mode: 0o400,
+    });
+    chmodSync(malformed, 0o500);
+    expect((await gc()).code).toBe(1);
+    expect(existsSync(stale)).toBeTrue();
+    makeWritable(malformed);
+    rmSync(malformed, { recursive: true });
+
+    const noncanonical = join(installed.runtime, "A".repeat(40));
+    mkdirSync(noncanonical, { mode: 0o500 });
+    expect((await gc()).code).toBe(1);
+    expect(existsSync(stale)).toBeTrue();
+    chmodSync(noncanonical, 0o700);
+    rmSync(noncanonical, { recursive: true });
+
+    const outside = temp("agentscrape-gc-outside-");
+    const sentinel = join(outside, "sentinel");
+    writeFileSync(sentinel, "outside\n");
+    const linkedRoot = join(installed.runtime, fixtureSha(11));
+    symlinkSync(outside, linkedRoot);
+    expect((await gc()).code).toBe(1);
+    expect(existsSync(stale)).toBeTrue();
+    expect(text(sentinel)).toBe("outside\n");
+    unlinkSync(linkedRoot);
+  });
+
+  test("GC refuses current mismatch, foreign service, and a missing protected root", async () => {
+    const fixture = installEnv({}, { preseedSnapshots: false });
+    const installed = await seedSnapshotInstallation(fixture, fixtureSha(12));
+    const stale = await createTinySnapshot(installed.runtime, fixtureSha(13));
+    const deployed = join(installed.state, "deployed-sha");
+
+    writeFileSync(deployed, `${fixtureSha(13)}\n`);
+    const mismatch = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: fixture.env,
+    });
+    expect(mismatch.code).toBe(1);
+    expect(existsSync(stale)).toBeTrue();
+    writeFileSync(deployed, `${installed.sha}\n`);
+
+    const foreign = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: { ...fixture.env, FAKE_LAUNCHCTL_FOREIGN_PRINT: "1" },
+    });
+    expect(foreign.code).toBe(1);
+    expect(existsSync(stale)).toBeTrue();
+
+    makeWritable(installed.snapshot);
+    rmSync(installed.snapshot, { recursive: true });
+    const missing = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: fixture.env,
+    });
+    expect(missing.code).toBe(1);
+    expect(existsSync(stale)).toBeTrue();
+  });
+
+  test("GC rejects a 65-root runtime before deleting any root", async () => {
+    const fixture = installEnv({}, { preseedSnapshots: false });
+    const layout = runtimeLayout(fixture.home);
+    const first = await createTinySnapshot(layout.runtime, fixtureSha(1));
+    for (let index = 2; index <= 65; index += 1)
+      cloneSnapshotIdentity(first, layout.runtime, fixtureSha(index));
+
+    const refused = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
+      env: fixture.env,
+    });
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("more than 64");
+    expect(readdirSync(layout.runtime)).toHaveLength(65);
   });
 
   test("archives exact HEAD and installed command survives checkout deletion", async () => {
@@ -1052,6 +1378,7 @@ describe("installer", () => {
     for (const argv of [
       ["bash", "scripts/install.sh"],
       ["bash", "scripts/install.sh", "--uninstall"],
+      ["bash", "scripts/install.sh", "--gc-runtime"],
     ]) {
       const competing = await command(argv, { env: fixture.env });
       expect(competing.code).not.toBe(0);
