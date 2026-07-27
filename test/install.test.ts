@@ -466,8 +466,14 @@ case "\${1:-}" in
     printf 'default environment = {\n'
     printf '  PATH => /usr/bin:/bin:/usr/sbin:/sbin\n'
     printf '}\n'
+    oslog=64
+    xpc="$label"
+    [[ "\${FAKE_LAUNCHCTL_WRONG_OSLOG_PRINT:-0}" == "1" ]] && oslog=63
+    [[ "\${FAKE_LAUNCHCTL_WRONG_XPC_PRINT:-0}" == "1" ]] && xpc=foreign
     printf 'environment = {\n'
+    printf '  OSLogRateLimit => %s\n' "$oslog"
     printf '  PATH => %s\n' "$path"
+    printf '  XPC_SERVICE_NAME => %s\n' "$xpc"
     printf '}\n'
     ;;
   bootout)
@@ -1057,6 +1063,8 @@ describe("installer", () => {
       { FAKE_LAUNCHCTL_FAIL_PRINT: "1" },
       { FAKE_LAUNCHCTL_FOREIGN_PRINT: "1" },
       { FAKE_LAUNCHCTL_WRONG_PATH_PRINT: "1" },
+      { FAKE_LAUNCHCTL_WRONG_OSLOG_PRINT: "1" },
+      { FAKE_LAUNCHCTL_WRONG_XPC_PRINT: "1" },
       { FAKE_LAUNCHCTL_BASH_ENV_PRINT: "1" },
     ]) {
       const refused = await command(["bash", "scripts/install.sh", "--uninstall"], {
