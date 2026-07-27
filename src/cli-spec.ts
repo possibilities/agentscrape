@@ -1,4 +1,5 @@
 import { AgentscrapeUsageError } from "./errors";
+import { AGENTSCRAPE_VERSION } from "./version";
 
 export type LongOptionName = `--${string}`;
 export type ShortOptionName = `-${string}`;
@@ -155,7 +156,7 @@ function commandOptions(
 
 const rawCliSpec = {
   name: "agentscrape",
-  version: "0.1.0",
+  version: AGENTSCRAPE_VERSION,
   description: "Fetch and extract web content through an agent-friendly Bun CLI",
   agentHelp:
     "Agentscrape fetches Markdown, navigation links, live or recorded feeds, and strict preset output.\n\nUse fetch-markdown URL [DEST] for documents, fetch-links URL with a preset or selectors for navigation, and discover-feed [FILE] --source-url URL for bounded live discovery or network-free recorded parsing. Browser-backed commands accept --media and --session, and require --allow-private-network for live navigation. X timeline collection accepts --limit, --max-scrolls, --since-id, --include-replies, and --include-reposts. Envelope output is schema version 1 and emits a classified failure instead of diagnostics on stdout.",
@@ -390,6 +391,13 @@ const rawCliSpec = {
         ],
         formatOption("Select output", ["json", "yaml"], "json"),
       ),
+    },
+    {
+      name: "doctor",
+      summary: "Inspect offline runtime readiness and optional capabilities",
+      paragraphs: [],
+      positionals: [],
+      options: commandOptions([], formatOption("Select output", ["human", "json"], "human")),
     },
   ],
   hiddenCommands: [

@@ -32,6 +32,7 @@ import {
   renderJsonHelp,
 } from "./cli-spec";
 import { captureCorpus, testCorpus } from "./corpus";
+import { currentDoctorReport, doctorExitCode, renderDoctorReport } from "./doctor";
 import { AgentscrapeError, AgentscrapeUsageError, cancellationError } from "./errors";
 import {
   type ArchiveOptions,
@@ -610,6 +611,19 @@ async function queueCommand(
   output(outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result));
   return Number(result.errors ?? 0) ? 1 : 0;
 }
+function doctorCommand(args: string[]): number {
+  const parsed = parseArgs("doctor", args);
+  const helpCode = commandHelp(parsed, "doctor");
+  if (helpCode !== null) return helpCode;
+  if (parsed.positionals.length)
+    throw new AgentscrapeUsageError("doctor takes no positional arguments");
+  const selected = (one(parsed, "--format") ?? "human").toLowerCase();
+  if (selected !== "human" && selected !== "json")
+    throw new AgentscrapeUsageError("--format must be human or json");
+  const report = currentDoctorReport();
+  output(renderDoctorReport(report, selected));
+  return doctorExitCode(report);
+}
 export interface MainOptions {
   signal?: AbortSignal;
 }
@@ -678,6 +692,7 @@ export async function main(
   if (command === "convert-html") return convertCommand(args);
   if (["open-session", "close-session"].includes(command))
     return sessionCommand(command, args, signal);
+  if (command === "doctor") return doctorCommand(args);
   return queueCommand(command, args, signal);
 }
 

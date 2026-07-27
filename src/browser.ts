@@ -5,7 +5,6 @@ import {
   chmodSync,
   closeSync,
   constants,
-  existsSync,
   fchmodSync,
   fstatSync,
   lstatSync,
@@ -357,15 +356,19 @@ export async function withBrowserSession<T>(
     if (owner && scope.used) await closeSessionBestEffort(capturedName);
   }
 }
-function resolveBrowser(home = runtimeHome()): string {
-  const override = process.env[AGENT_BROWSER_BIN_ENV];
-  if (override) return findExecutable(override) || override;
-  const managed = join(home, ".local/bin/agent-browser");
+export function findAgentBrowserExecutable(
+  home = runtimeHome(),
+  configured = process.env[AGENT_BROWSER_BIN_ENV],
+  executableLookup: (name: string) => string | null = findExecutable,
+): string | null {
+  if (configured) return executableLookup(configured);
   return (
-    (existsSync(managed) && findExecutable(managed)) ||
-    findExecutable("agent-browser") ||
-    "agent-browser"
+    executableLookup(join(home, ".local/bin/agent-browser")) || executableLookup("agent-browser")
   );
+}
+function resolveBrowser(home = runtimeHome()): string {
+  const configured = process.env[AGENT_BROWSER_BIN_ENV];
+  return findAgentBrowserExecutable(home, configured) || configured || "agent-browser";
 }
 function isNetworkFreeBrowserCommand(args: string[]): boolean {
   return args.length === 2 && args[0] === "open" && args[1] === "about:blank";

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   CLI_SPEC,
   type CliSpec,
@@ -11,6 +13,7 @@ import {
   validateCliSpec,
 } from "../src/cli-spec";
 import { AgentscrapeUsageError } from "../src/errors";
+import { AGENTSCRAPE_VERSION } from "../src/version";
 
 const visibleInventory = [
   ["fetch-markdown", "Fetch a document and emit Markdown or structured output"],
@@ -27,6 +30,7 @@ const visibleInventory = [
   ["close-session", "Close a browser session"],
   ["process-queue", "Process standalone artifact jobs"],
   ["reconcile-queue", "Inventory or reconcile frozen queue records"],
+  ["doctor", "Inspect offline runtime readiness and optional capabilities"],
 ] as const;
 
 function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
@@ -64,6 +68,14 @@ function optionValues(option: (typeof CLI_SPEC.commands)[number]["options"][numb
 }
 
 describe("CLI syntax specification", () => {
+  test("uses the package version authority without local production literals", () => {
+    expect(CLI_SPEC.version).toBe(AGENTSCRAPE_VERSION);
+    for (const file of ["cli-spec.ts", "envelope.ts"]) {
+      const source = readFileSync(join(import.meta.dir, "..", "src", file), "utf8");
+      expect(source, file).not.toMatch(/["']0\.1\.0["']/);
+    }
+  });
+
   test("has the exact visible inventory and a hidden-compatible help command", () => {
     expect(CLI_SPEC.commands.map(({ name, summary }) => [name, summary])).toEqual(
       visibleInventory.map(([name, summary]) => [name, summary]),
@@ -314,6 +326,37 @@ describe("CLI syntax specification", () => {
     };
     expect(jsonHelp("check-presets")).toEqual(expected);
     expect(renderJsonHelp("check-presets")).toBe(JSON.stringify(expected, null, 2));
+
+    const doctorExpected = {
+      name: "doctor",
+      description: "Inspect offline runtime readiness and optional capabilities",
+      arguments: [
+        {
+          name: "--format",
+          type: "text",
+          required: false,
+          description: "Select output",
+          choices: ["human", "json"],
+          default: "human",
+        },
+        {
+          name: "--help",
+          type: "flag",
+          required: false,
+          description: "Show help",
+          aliases: ["-h"],
+        },
+        {
+          name: "--help-json",
+          type: "flag",
+          required: false,
+          description: "Show machine-readable JSON help",
+        },
+      ],
+    };
+    expect(jsonHelp("doctor")).toEqual(doctorExpected);
+    expect(renderJsonHelp("doctor")).toBe(JSON.stringify(doctorExpected, null, 2));
+    expect(renderHumanHelp("doctor")).toStartWith("Usage: agentscrape doctor [OPTIONS]");
     expect(Object.keys(jsonHelp())).toEqual(["name", "description", "arguments", "commands"]);
   });
 });

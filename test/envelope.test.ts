@@ -49,6 +49,7 @@ import {
   XTimeline,
   XTimelineTweet,
 } from "../src/schemas";
+import { AGENTSCRAPE_VERSION } from "../src/version";
 
 const result = <T extends { toMarkdown(): string }>(
   structured: T,
@@ -85,6 +86,7 @@ describe("version 1 extraction envelope", () => {
     expect(envelope).toEqual(expected);
     expect(envelope.schema_version).toBe("1");
     expect(envelope.extractor.name).toBe("agentscrape");
+    expect(envelope.extractor.version).toBe(AGENTSCRAPE_VERSION);
   });
   test("rejects invalid URL and bound requests", () => {
     expect(() => validateEnvelopeRequest("file:///tmp/a", 100, 1)).toThrow("HTTP");
@@ -356,5 +358,6 @@ describe("failure projection and redaction", () => {
     );
     expect(envelope.artifacts).toEqual([]);
     expect(envelope.metadata).toBeNull();
+    expect(envelope.extractor.version).toBe(AGENTSCRAPE_VERSION);
   });
 });

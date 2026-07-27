@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { CanaryResult } from "../src/canary";
 import { checkPresetResultsExitCode } from "../src/cli";
+import { AGENTSCRAPE_VERSION, REQUIRED_BUN_VERSION } from "../src/version";
 
 const root = join(import.meta.dir, "..");
 const temporary: string[] = [];
@@ -105,6 +106,7 @@ describe("CLI offline smoke suite", () => {
       "close-session",
       "process-queue",
       "reconcile-queue",
+      "doctor",
     ]) {
       expect(result.stdout).toContain(name);
     }
@@ -132,6 +134,74 @@ describe("CLI offline smoke suite", () => {
     expect((await command(["list-presets"])).stdout).toContain("deepwiki-wiki-page");
     expect((await command(["show-preset", "x-tweet"])).stdout).toContain("Schema: TweetThread");
     expect((await command(["validate-preset", "deepwiki-wiki-page"])).stdout).toContain("OK:");
+  });
+  test("doctor renders offline human and JSON reports without executing capabilities", async () => {
+    const directory = temp();
+    const home = join(directory, "home");
+    const binaries = join(directory, "bin");
+    const marker = join(directory, "CAPABILITY-WAS-EXECUTED");
+    mkdirSync(home);
+    mkdirSync(binaries);
+    for (const name of ["agent-browser", "gh", "pandoc", "summaryctl", "agentbrain"]) {
+      const path = join(binaries, name);
+      writeFileSync(path, `#!/bin/sh\nprintf 'invoked' >> ${JSON.stringify(marker)}\n`);
+      chmodSync(path, 0o755);
+    }
+    const options = {
+      home,
+      env: { PATH: binaries, AGENTSCRAPE_AGENT_BROWSER_BIN: "" },
+    };
+
+    const human = await command(["doctor"], options);
+    expect(human.code).toBe(0);
+    expect(human.stderr).toBe("");
+    expect(human.stdout).toContain("agentscrape doctor\nstatus: pass");
+    expect(human.stdout).toContain(`version: ${AGENTSCRAPE_VERSION}`);
+    expect(human.stdout).toContain(
+      `runtime: bun actual=${REQUIRED_BUN_VERSION} expected=${REQUIRED_BUN_VERSION} status=pass`,
+    );
+    expect(human.stdout).toContain("  reconciliation: agentbrain available");
+    expect(human.stdout).not.toContain(directory);
+
+    const json = await command(["doctor", "--format", "json"], options);
+    expect(json.code).toBe(0);
+    expect(json.stderr).toBe("");
+    expect(JSON.parse(json.stdout)).toEqual({
+      schema_version: 1,
+      status: "pass",
+      version: AGENTSCRAPE_VERSION,
+      source: { kind: "source", sha: null },
+      runtime: {
+        name: "bun",
+        expected: REQUIRED_BUN_VERSION,
+        actual: REQUIRED_BUN_VERSION,
+        status: "pass",
+      },
+      capabilities: [
+        { feature: "browser", executable: "agent-browser", available: true },
+        { feature: "github", executable: "gh", available: true },
+        { feature: "github-rst", executable: "pandoc", available: true },
+        { feature: "queue-summary", executable: "summaryctl", available: true },
+        { feature: "reconciliation", executable: "agentbrain", available: true },
+      ],
+    });
+    expect(existsSync(marker)).toBeFalse();
+
+    const help = await command(["doctor", "--help"], options);
+    expect(help).toMatchObject({ code: 0, stderr: "" });
+    expect(help.stdout).toContain("--format human|json");
+    expect(JSON.parse((await command(["doctor", "--help-json"], options)).stdout)).toMatchObject({
+      name: "doctor",
+    });
+    for (const argv of [
+      ["doctor", "unexpected"],
+      ["doctor", "--format", "yaml"],
+    ]) {
+      const invalid = await command(argv, options);
+      expect(invalid.code, argv.join(" ")).toBe(2);
+      expect(invalid.stdout, argv.join(" ")).toBe("");
+    }
+    expect(existsSync(marker)).toBeFalse();
   });
   test("close-session keeps success quiet and reports a redacted normal failure", async () => {
     const directory = temp();
@@ -644,6 +714,7 @@ describe("CLI offline smoke suite", () => {
         "at most 100",
       ],
       [["reconcile-queue", "--limit", "0"], "at least 1"],
+      [["doctor", "unexpected"], "no positional arguments"],
       [
         ["discover-feed", "--source-url", "https://blog.example.com/feed.xml", "--format", "human"],
         "--format must be json or yaml",
@@ -669,6 +740,8 @@ describe("CLI offline smoke suite", () => {
       ["--help-json"],
       ["fetch-links", "--help-json"],
       ["discover-feed", "--help-json"],
+      ["doctor", "--help"],
+      ["doctor", "--help-json"],
     ]) {
       const result = await command(argv);
       expect(result.code, argv.join(" ")).toBe(0);
@@ -687,7 +760,7 @@ describe("CLI offline smoke suite", () => {
       "--agent-help",
       "--agent-teaser",
     ]);
-    expect(rootHelp.commands).toHaveLength(14);
+    expect(rootHelp.commands).toHaveLength(15);
     expect(feedJson.arguments.find((argument: any) => argument.name === "file")).toMatchObject({
       positional: true,
       required: false,
