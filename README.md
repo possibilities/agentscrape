@@ -231,4 +231,4 @@ The offline suite covers handler fixtures, corpus replay, preset invariants, env
 
 `bun run check` is the contributor and CI default. Before typecheck, lint, and serial bounded tests, it replaces `HOME` with a private temporary directory and removes inherited Agentscrape, XDG config/data/state, and Bun/Node process-option state; `bun run test` uses the same boundary. Tests intentionally use loopback networking, so this is not an external-network sandbox.
 
-CI runs the check on Ubuntu 24.04 and macOS 15, validates the shell installer and plist, and rejects whitespace errors or any tracked, staged, or untracked worktree changes.
+CI runs the check on Ubuntu 24.04 and macOS 26, validates the shell installer and plist, and rejects whitespace errors or any tracked, staged, or untracked worktree changes.

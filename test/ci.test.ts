@@ -154,7 +154,7 @@ describe("CI workflow contract", () => {
     expect(job["timeout-minutes"]).toBe(15);
     expect(job.strategy).toEqual({
       "fail-fast": false,
-      matrix: { os: ["ubuntu-24.04", "macos-15"] },
+      matrix: { os: ["ubuntu-24.04", "macos-26"] },
     });
 
     const actionSteps = job.steps.filter((step) => step.uses !== undefined);
