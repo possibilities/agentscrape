@@ -444,7 +444,9 @@ describe("CLI offline smoke suite", () => {
       port: 0,
       fetch() {
         requests += 1;
-        return new Response("# CLI direct");
+        return new Response("# CLI direct", {
+          headers: { "content-type": "text/markdown" },
+        });
       },
     });
     try {
@@ -901,6 +903,7 @@ describe("CLI offline smoke suite", () => {
               controller.enqueue(new TextEncoder().encode("late"));
             },
           }),
+          { headers: { "content-type": "text/markdown" } },
         );
       },
     });

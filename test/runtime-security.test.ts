@@ -431,6 +431,7 @@ describe("streaming direct Markdown", () => {
               controller.close();
             },
           }),
+          { headers: { "content-type": "text/markdown" } },
         ),
     });
     try {
@@ -511,6 +512,7 @@ describe("streaming direct Markdown", () => {
               controller.enqueue(new Uint8Array([120]));
             },
           }),
+          { headers: { "content-type": "text/markdown" } },
         ),
     });
     try {

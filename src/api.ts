@@ -63,6 +63,7 @@ import {
   PinnedHttpFault,
   type PinnedHttpResponse,
   pinnedHeader,
+  pinnedHeaderValues,
   requestPinnedHttp,
 } from "./pinned-http";
 import {
@@ -128,6 +129,102 @@ export interface FetchMarkdownOptions extends HandlerOptions {
   retainArtifacts?: boolean | undefined;
 }
 
+function isHttpTokenCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    "!#$%&'*+-.^_`|~".includes(character)
+  );
+}
+
+function directMarkdownMimeAdmitted(fieldValues: readonly string[] | undefined): boolean {
+  if (fieldValues?.length !== 1) return false;
+  const input = fieldValues[0]!;
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    if (code > 0x7e || code === 0x7f || (code < 0x20 && code !== 0x09)) return false;
+  }
+
+  let offset = 0;
+  const skipOws = () => {
+    while (input[offset] === " " || input[offset] === "\t") offset += 1;
+  };
+  const token = (): string | null => {
+    const start = offset;
+    while (offset < input.length && isHttpTokenCharacter(input[offset]!)) offset += 1;
+    return offset === start ? null : input.slice(start, offset);
+  };
+  const parameterValue = (): string | null => {
+    if (input[offset] !== '"') return token();
+    offset += 1;
+    let decoded = "";
+    while (offset < input.length) {
+      const character = input[offset]!;
+      const code = character.charCodeAt(0);
+      if (character === '"') {
+        offset += 1;
+        return decoded;
+      }
+      if (character === "\\") {
+        offset += 1;
+        if (offset >= input.length) return null;
+        const escaped = input[offset]!;
+        const escapedCode = escaped.charCodeAt(0);
+        if ((escapedCode < 0x20 && escapedCode !== 0x09) || escapedCode > 0x7e) return null;
+        decoded += escaped;
+        offset += 1;
+        continue;
+      }
+      if ((code < 0x20 && code !== 0x09) || code > 0x7e) return null;
+      decoded += character;
+      offset += 1;
+    }
+    return null;
+  };
+
+  skipOws();
+  const type = token();
+  if (type?.toLowerCase() !== "text" || input[offset] !== "/") return false;
+  offset += 1;
+  const subtype = token();
+  if (subtype?.toLowerCase() !== "markdown") return false;
+  skipOws();
+
+  const parameterNames = new Set<string>();
+  while (offset < input.length) {
+    if (input[offset] !== ";") return false;
+    offset += 1;
+    skipOws();
+    const rawName = token();
+    if (rawName === null) return false;
+    const name = rawName.toLowerCase();
+    if (parameterNames.has(name)) return false;
+    parameterNames.add(name);
+    skipOws();
+    if (input[offset] !== "=") return false;
+    offset += 1;
+    skipOws();
+    const value = parameterValue();
+    if (value === null) return false;
+    if (name === "charset" && value.toLowerCase() !== "utf-8") return false;
+    skipOws();
+  }
+  return true;
+}
+
+function directMarkdownEncodingAdmitted(fieldValues: readonly string[] | undefined): boolean {
+  if (fieldValues === undefined) return true;
+  if (fieldValues.length !== 1) return false;
+  const value = fieldValues[0]!;
+  let start = 0;
+  let end = value.length;
+  while (value[start] === " " || value[start] === "\t") start += 1;
+  while (end > start && (value[end - 1] === " " || value[end - 1] === "\t")) end -= 1;
+  return value.slice(start, end).toLowerCase() === "identity";
+}
+
 async function directMarkdown(
   url: string,
   options: FetchMarkdownOptions,
@@ -166,6 +263,8 @@ async function directMarkdown(
         throw error;
       }
       let response: PinnedHttpResponse;
+      let invalidContentEncoding = false;
+      let invalidMarkdownMime = false;
       try {
         response = await requestPinnedHttp({
           url: currentUrl,
@@ -178,6 +277,15 @@ async function directMarkdown(
           },
           maxResponseBytes: limit,
           signal,
+          bodyPolicy: (metadata) => {
+            invalidContentEncoding = !directMarkdownEncodingAdmitted(
+              pinnedHeaderValues(metadata.pinnedHeaderValues, "content-encoding"),
+            );
+            invalidMarkdownMime = !directMarkdownMimeAdmitted(
+              pinnedHeaderValues(metadata.pinnedHeaderValues, "content-type"),
+            );
+            return invalidContentEncoding || invalidMarkdownMime ? "discard" : "read";
+          },
         });
       } catch (error) {
         if (error instanceof PinnedHttpFault) {
@@ -233,10 +341,14 @@ async function directMarkdown(
           retryable,
         );
       }
-      const contentEncoding = pinnedHeader(response.headers, "content-encoding");
-      if (contentEncoding && contentEncoding.trim().toLowerCase() !== "identity")
+      if (invalidContentEncoding)
         throw new AgentscrapeProviderError(
           "direct Markdown response used an unsupported content encoding",
+          false,
+        );
+      if (invalidMarkdownMime)
+        throw new AgentscrapeProviderError(
+          "direct Markdown response did not provide an admissible Markdown Content-Type",
           false,
         );
       const finalUrl = validateProviderFinalUrl(current) ?? current;
