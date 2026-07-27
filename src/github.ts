@@ -8,7 +8,7 @@ import {
   throwIfAborted,
 } from "./errors";
 import type { ScrapeResult } from "./handlers/types";
-import { convertHtml, fencedCodeBlock } from "./html";
+import { convertHtml, fencedCodeBlock, markdownLink } from "./html";
 import { GenericPage } from "./schemas";
 import { findExecutable, type ProcessOptions, type ProcessResult, runProcess } from "./subprocess";
 
@@ -417,7 +417,7 @@ async function fetchTarget(target: GithubTarget, context: GithubOperationContext
     const lines = [
       `# ${data.name || data.login}`,
       "",
-      `**Login:** [${data.login}](${data.html_url})`,
+      `**Login:** ${markdownLink(String(data.login ?? ""), String(data.html_url ?? ""))}`,
     ];
     if (data.bio) lines.push("", String(data.bio));
     for (const [label, key] of [
@@ -484,7 +484,7 @@ async function fetchTarget(target: GithubTarget, context: GithubOperationContext
   ];
   for (const item of data)
     lines.push(
-      `- ${item.html_url ? `[\`${item.name}\`](${item.html_url})` : `\`${item.name}\``} (${item.type}${item.size ? `, ${item.size} bytes` : ""})`,
+      `- ${item.html_url ? markdownLink(`\`${item.name}\``, String(item.html_url)) : `\`${item.name}\``} (${item.type}${item.size ? `, ${item.size} bytes` : ""})`,
     );
   return `${lines.join("\n")}\n`;
 }

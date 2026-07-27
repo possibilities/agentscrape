@@ -3,6 +3,7 @@ import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "./browser
 import { browserEval, browserEvalString } from "./browser-eval";
 import { AgentscrapeBrowserError, AgentscrapeValueError, PresetDriftError } from "./errors";
 import type { HandlerOptions } from "./handlers/types";
+import { safeLink } from "./html";
 import type { LinkItem } from "./schemas";
 
 interface BrowserLink {
@@ -343,9 +344,8 @@ export function offlineExtractLinks(
         category = $(element).text().replace(/\s+/g, " ").trim();
       if (element.tagName !== "a") continue;
       const href = $(element).attr("href");
-      if (!href) continue;
-      const link = new URL(href, baseUrl).href;
-      if (seen.has(link)) continue;
+      const link = safeLink(href, baseUrl);
+      if (!link || seen.has(link)) continue;
       seen.add(link);
       links.push({
         url: link,

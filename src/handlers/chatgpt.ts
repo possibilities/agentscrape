@@ -30,10 +30,7 @@ export async function scrapeConversation(
     turns.push(
       new ConversationTurn(
         role,
-        renderRichMarkdown(element.html() ?? "", {
-          fenceLanguage: false,
-          sanitizeLinks: false,
-        }).trim(),
+        renderRichMarkdown(element.html() ?? "", { fenceLanguage: false }).trim(),
       ),
     );
   });
