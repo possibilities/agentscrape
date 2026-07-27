@@ -19,7 +19,7 @@ import {
   writePreparedTextArtifacts,
 } from "./artifacts";
 import { requireAgentBrowserSuccess, runAgentBrowser, setMediaMode } from "./browser";
-import { checkPresets } from "./canary";
+import { type CanaryResult, checkPresets } from "./canary";
 import { captureCorpus, testCorpus } from "./corpus";
 import { AgentscrapeError, AgentscrapeUsageError, cancellationError } from "./errors";
 import {
@@ -727,6 +727,12 @@ async function corpusCommand(
   );
   return result.failed ? 1 : 0;
 }
+export function checkPresetResultsExitCode(
+  results: ReadonlyArray<Pick<CanaryResult, "status">>,
+): 0 | 1 {
+  return results.every((result) => result.status === "pass") ? 0 : 1;
+}
+
 async function canaryCommand(args: string[], signal?: AbortSignal): Promise<number> {
   const parsed = parseArgs(
     args,
@@ -749,7 +755,7 @@ async function canaryCommand(args: string[], signal?: AbortSignal): Promise<numb
     ...(signal ? { signal } : {}),
   });
   output(outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result, null, 2));
-  return result.results.some((item) => item.status === "drift") ? 1 : 0;
+  return checkPresetResultsExitCode(result.results);
 }
 async function sessionCommand(
   command: string,

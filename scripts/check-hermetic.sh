@@ -3,10 +3,11 @@ set -Eeuo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/check-hermetic.sh <check|test> [--] [bun test arguments...]
+Usage: scripts/check-hermetic.sh <check|test|coverage> [--] [bun test arguments...]
 
-  check  Run typecheck, lint, then the serial bounded test command.
-  test   Run only the serial bounded test command.
+  check     Run typecheck, lint, then the serial bounded test command.
+  test      Run only the serial bounded test command.
+  coverage  Run the serial bounded test command with text and LCOV coverage.
 EOF
 }
 
@@ -17,13 +18,13 @@ fail() {
 }
 
 if (( $# == 0 )); then
-  fail "missing mode (expected 'check' or 'test')"
+  fail "missing mode (expected 'check', 'test', or 'coverage')"
 fi
 
 mode="$1"
 shift
 case "$mode" in
-  check | test) ;;
+  check | test | coverage) ;;
   -h | --help)
     usage
     exit 0
@@ -94,10 +95,19 @@ export HOME="$private_home"
 export PATH="$repo_root/node_modules/.bin:${PATH:-/usr/bin:/bin}"
 
 run_tests() {
+  local test_command=(bun test --parallel=1 --max-concurrency=1 --timeout 60000)
+  if [[ "$mode" == "coverage" ]]; then
+    test_command+=(
+      --coverage
+      --coverage-reporter=text
+      --coverage-reporter=lcov
+      --coverage-dir=coverage
+    )
+  fi
   if (( has_test_args )); then
-    bun test --parallel=1 --max-concurrency=1 --timeout 60000 "${test_args[@]}"
+    "${test_command[@]}" "${test_args[@]}"
   else
-    bun test --parallel=1 --max-concurrency=1 --timeout 60000
+    "${test_command[@]}"
   fi
 }
 
@@ -109,5 +119,9 @@ case "$mode" in
     ;;
   test)
     run_tests
+    ;;
+  coverage)
+    run_tests
+    bun scripts/check-coverage.ts coverage/lcov.info 0.70
     ;;
 esac

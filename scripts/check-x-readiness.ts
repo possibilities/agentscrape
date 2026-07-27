@@ -16,6 +16,11 @@ export interface XReadinessStatus {
   error?: string;
 }
 
+export function xReadinessStatusExitCode(status: XReadinessStatus): 0 | 1 | 2 {
+  if (status.error || status.agentscrape === null) return 2;
+  return status.ready ? 0 : 1;
+}
+
 export async function probeXReadiness(
   options: { binary?: string; signal?: AbortSignal } = {},
 ): Promise<XReadinessStatus> {
@@ -74,7 +79,7 @@ function parseArgs(argv: string[]): WatchOptions {
     else if (token === "--timeout") timeoutSeconds = integer(argv[++index], token, 0);
     else if (token === "--help" || token === "-h") {
       console.log(
-        "Usage: bun run scripts/check-x-readiness.ts [--once] [--interval SECONDS] [--timeout SECONDS]\n\nEach check emits one JSON object. Exit 0 when ready, 1 when not ready, and 2 when agentscrape is missing.",
+        "Usage: bun run scripts/check-x-readiness.ts [--once] [--interval SECONDS] [--timeout SECONDS]\n\nEach status check emits one JSON object. Exit 0 when ready, 1 when the binary is present but a required capability is missing or unhealthy, and 2 when the binary is missing or probing/configuration fails.",
       );
       throw new HelpRequested();
     } else throw new Error(`unknown option '${token}'`);
@@ -94,9 +99,9 @@ export async function watchXReadiness(options: WatchOptions): Promise<number> {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     console.log(JSON.stringify(status));
-    if (status.error) return 2;
-    if (status.ready) return 0;
-    if (options.once || performance.now() >= deadline) return 1;
+    const statusExitCode = xReadinessStatusExitCode(status);
+    if (statusExitCode !== 1) return statusExitCode;
+    if (options.once || performance.now() >= deadline) return statusExitCode;
     const remaining = deadline - performance.now();
     await Bun.sleep(Math.min(options.intervalSeconds * 1000, remaining));
   }

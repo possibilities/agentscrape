@@ -22,6 +22,7 @@
     "format": "biome check --write src test",
     "typecheck": "tsc --noEmit",
     "test": "bash scripts/check-hermetic.sh test",
+    "coverage": "bash scripts/check-hermetic.sh coverage",
     "x-readiness": "bun run scripts/check-x-readiness.ts",
     "check": "bash scripts/check-hermetic.sh check"
   },

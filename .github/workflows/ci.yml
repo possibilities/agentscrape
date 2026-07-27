@@ -32,6 +32,19 @@ jobs:
       - name: Run project checks
         run: bun run check
 
+      - name: Run coverage gate
+        if: runner.os == 'Linux'
+        run: bun run coverage
+
+      - name: Upload coverage LCOV
+        if: runner.os == 'Linux' && success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-lcov-ubuntu-24.04
+          path: coverage/lcov.info
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Validate shell scripts
         shell: bash
         run: |
