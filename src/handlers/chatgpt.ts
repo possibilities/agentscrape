@@ -6,9 +6,6 @@ import { renderRichMarkdown } from "../html";
 import { ChatGPTConversation, ConversationTurn } from "../schemas";
 import type { HandlerOptions, ScrapeResult } from "./types";
 
-export function isChatGptUrl(url: string): boolean {
-  return /^https?:\/\/chatgpt\.com\/(?:c|share)\//.test(url);
-}
 export async function scrapeConversation(
   url: string,
   options: HandlerOptions = {},
