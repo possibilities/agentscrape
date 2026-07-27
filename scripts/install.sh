@@ -4,11 +4,12 @@ umask 077
 
 usage() {
   cat <<'EOF'
-Usage: scripts/install.sh [--install|--uninstall|--help]
+Usage: scripts/install.sh [--install|--uninstall|--gc-runtime|--help]
 
 Install creates the standalone agentscrape command and its user LaunchAgent.
 Uninstall removes only exact installer-owned public files. Runtime snapshots and
-queue, failed-job, corpus, and log data are retained.
+queue, failed-job, corpus, and log data are retained. GC explicitly removes only
+verified, unprotected runtime snapshots; it is never automatic.
 EOF
 }
 
@@ -18,13 +19,17 @@ fail() {
 }
 
 ACTION=install
+(( $# <= 1 )) || { usage >&2; exit 2; }
 case "${1:-}" in
   ""|--install) ;;
   --uninstall) ACTION=uninstall ;;
+  --gc-runtime) ACTION=gc-runtime ;;
   --help|-h) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
-(( $# <= 1 )) || { usage >&2; exit 2; }
+if [[ "$ACTION" == gc-runtime ]]; then
+  trap 'exit 1' ERR
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ROOT_DIR="$ROOT"
@@ -126,6 +131,10 @@ RECEIPT_SHARE=""
 RECEIPT_QUEUE=""
 RECEIPT_LOG=""
 RECEIPT_SERVICE_PATH=""
+GC_PUBLIC_STATE=""
+GC_PROTECTED_SHA="-"
+GC_AUTHORITY_SHA=""
+GC_AUTHORITY_TREE=""
 
 path_owner_uid() {
   case "$PLATFORM" in
@@ -470,14 +479,18 @@ resolve_git_tree() {
 }
 
 run_helper() {
-  local authority="$1" sha="$2" tree="$3" bun="$4" temporary resolved; shift 4
+  local authority="$1" sha="$2" tree="$3" bun="$4" temporary resolved status=0; shift 4
   resolved="$(resolve_git_tree "$authority" "$sha")" || fail "Git authority cannot authenticate runtime helper for $sha"
   [[ "$resolved" == "$tree" ]] || fail "Git authority resolved the wrong tree for $sha"
   temporary="$(mktemp -d "$STATE_DIR/.runtime-helper.XXXXXX")"
-  git -C "$authority" show "$sha:scripts/runtime-snapshot.ts" >"$temporary/helper.ts"
+  git -C "$authority" show "$sha:scripts/runtime-snapshot.ts" >"$temporary/helper.ts" || {
+    rm -rf "$temporary"
+    fail "Git authority could not materialize runtime helper for $sha"
+  }
   chmod 500 "$temporary/helper.ts"
-  "$bun" "$temporary/helper.ts" "$@"
+  "$bun" "$temporary/helper.ts" "$@" || status=$?
   rm -rf "$temporary"
+  return "$status"
 }
 
 verify_snapshot() {
@@ -829,6 +842,71 @@ rollback_uninstall() {
   exit "$status"
 }
 
+gc_checkout_authority() {
+  local top sha tree
+  top="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [[ "$top" == "$ROOT_DIR" ]] || return 1
+  sha="$(git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || return 1
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  tree="$(resolve_git_tree "$ROOT_DIR" "$sha")" || return 1
+  GC_AUTHORITY_SHA="$sha"; GC_AUTHORITY_TREE="$tree"
+}
+
+gc_classify_public_state() {
+  local path present=0
+  ALLOW_CURRENT_SERVICE_IDENTITY=0; ALLOW_RECEIPT_SERVICE_IDENTITY=0
+  for path in "$COMMAND_PATH" "$SERVICE_DEST" "$RECEIPT_PATH" "$DEPLOYED_SHA_PATH"; do
+    [[ ! -e "$path" && ! -L "$path" ]] || ((present+=1))
+  done
+  if (( present == 0 )); then
+    inspect_service
+    [[ "$LOADED_SERVICE_STATE" == absent ]] || fail "runtime GC requires an exactly absent service when uninstalled"
+    GC_PUBLIC_STATE=uninstalled; GC_PROTECTED_SHA="-"
+    return
+  fi
+  (( present == 4 )) || fail "runtime GC refuses incomplete or ambiguous public install state"
+
+  validate_regular_slot "$COMMAND_PATH" "runtime GC command"
+  validate_regular_slot "$SERVICE_DEST" "runtime GC LaunchAgent"
+  validate_regular_slot "$RECEIPT_PATH" "runtime GC receipt"
+  validate_regular_slot "$DEPLOYED_SHA_PATH" "runtime GC deployed SHA"
+  load_receipt || fail "runtime GC refuses a malformed or unowned install receipt"
+  [[ "$RECEIPT_FORMAT" == current && "$RECEIPT_KIND" == snapshot ]] ||
+    fail "runtime GC requires a current snapshot-backed install receipt"
+  [[ "$RECEIPT_SHARE" == "$SHARE_DIR" && "$RECEIPT_QUEUE" == "$QUEUE_DIR" &&
+    "$RECEIPT_LOG" == "$LOG_PATH" && "$RECEIPT_COMMAND" == "$COMMAND_PATH" &&
+    "$RECEIPT_SERVICE" == "$SERVICE_DEST" && "$RECEIPT_BUN" == "$BUN_BIN" &&
+    "$RECEIPT_SERVICE_PATH" == "$SERVICE_PATH" ]] ||
+    fail "runtime GC receipt does not agree with configured paths"
+  deployed_matches "$DEPLOYED_SHA_PATH" "$RECEIPT_SHA" ||
+    fail "runtime GC deployed SHA does not agree with its receipt"
+  receipt_command_matches || fail "runtime GC refuses a mismatched installed command"
+  receipt_plist_matches || fail "runtime GC refuses a mismatched LaunchAgent"
+
+  ALLOW_RECEIPT_SERVICE_IDENTITY=1
+  inspect_service
+  [[ "$LOADED_SERVICE_STATE" == owned || "$LOADED_SERVICE_STATE" == absent ]] ||
+    fail "runtime GC refuses a foreign loaded service"
+  GC_PUBLIC_STATE=installed; GC_PROTECTED_SHA="$RECEIPT_SHA"
+}
+
+garbage_collect_runtime() {
+  gc_classify_public_state
+  validate_owned_directory "$RUNTIME_DIR" "runtime directory" 700
+  if gc_checkout_authority; then
+    run_helper "$ROOT_DIR" "$GC_AUTHORITY_SHA" "$GC_AUTHORITY_TREE" "$BUN_BIN" \
+      gc "$RUNTIME_DIR" "$GC_PROTECTED_SHA" || fail "authenticated runtime GC helper failed"
+    return
+  fi
+  [[ "$GC_PUBLIC_STATE" == installed ]] ||
+    fail "runtime GC from an uninstalled state requires a trusted Git checkout"
+  [[ "$ROOT_DIR" == "$RECEIPT_ROOT" ]] ||
+    fail "runtime GC without a trusted Git checkout must run from the protected installed snapshot"
+  verify_sealed_snapshot || fail "runtime GC protected snapshot failed sealed preflight or verification"
+  "$RECEIPT_BUN" "$UNINSTALL_HELPER" gc "$RUNTIME_DIR" "$GC_PROTECTED_SHA" ||
+    fail "protected runtime GC helper failed"
+}
+
 uninstall() {
   local evidence=0
   for path in "$COMMAND_PATH" "$SERVICE_DEST" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"; do [[ ! -e "$path" && ! -L "$path" ]] || evidence=1; done
@@ -890,6 +968,12 @@ SERVICE_PATH="$(expected_service_path "$BUN_BIN" "$COMMAND_PATH")"
 validate_paths
 acquire_lock
 trap 'release_lock "$?"' EXIT
+if [[ "$ACTION" == gc-runtime ]]; then
+  canonicalize_data_paths
+  garbage_collect_runtime
+  printf 'garbage-collected verified runtime snapshots\n'
+  exit 0
+fi
 ensure_directory "$STATE_DIR" "state directory" 700
 canonicalize_data_paths
 ensure_directory "$RUNTIME_DIR" "runtime directory" 700

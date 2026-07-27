@@ -44,7 +44,27 @@ The loaded service should reference `~/.local/bin/agentscrape`, the installer-re
 ./scripts/install.sh --uninstall
 ```
 
-Uninstall is idempotent and requires an exactly inspectable `launchctl` state plus correlated command, plist, receipt, and deployed-SHA bytes. Snapshot receipts use a bounded no-follow manifest/helper preflight and then the sealed helper's full inventory verification, so `<snapshot>/scripts/install.sh --uninstall` remains usable after the source checkout is removed and rollback publication does not depend on Git. Exact 8- or 12-line checkout receipts can migrate only while their exact source checkout and commit tree remain available and agree with the current checkout's Git authority. The new installer uninstalls a checkout-backed receipt only from that same checkout when its commit also contains the authenticated runtime helper; helperless predecessors fail closed without changing public evidence. It unloads the service, removes only revalidated files, and fsyncs their parent directories under the HOME-scoped lock. Catchable failures attempt a conservative no-replace restore when the affected pathname is still absent or unchanged; ambiguous evidence is retained. Queue files, failed jobs, browser/session data, logs, corpus captures, and every published runtime snapshot are preserved. Runtime cleanup/garbage collection is deferred to ASR25.
+Uninstall is idempotent and requires an exactly inspectable `launchctl` state plus correlated command, plist, receipt, and deployed-SHA bytes. Snapshot receipts use a bounded no-follow manifest/helper preflight and then the sealed helper's full inventory verification, so `<snapshot>/scripts/install.sh --uninstall` remains usable after the source checkout is removed and rollback publication does not depend on Git. Exact 8- or 12-line checkout receipts can migrate only while their exact source checkout and commit tree remain available and agree with the current checkout's Git authority. The new installer uninstalls a checkout-backed receipt only from that same checkout when its commit also contains the authenticated runtime helper; helperless predecessors fail closed without changing public evidence. It unloads the service, removes only revalidated files, and fsyncs their parent directories under the HOME-scoped lock. Catchable failures attempt a conservative no-replace restore when the affected pathname is still absent or unchanged; ambiguous evidence is retained. Queue files, failed jobs, browser/session data, logs, corpus captures, and every published runtime snapshot are preserved by uninstall; runtime cleanup is a separate explicit operation.
+
+## Runtime snapshot garbage collection
+
+Runtime GC is never run by install or uninstall. Quiesce interactive commands and workers that may still be using an old snapshot, then run:
+
+```sh
+./scripts/install.sh --gc-runtime
+```
+
+The command takes the same HOME-scoped installer lock before classifying public state and holds it through deletion and the runtime-parent fsync. Its accepted states and helper authority are:
+
+| Public state | Helper authority | Protection and result |
+| --- | --- | --- |
+| Exactly installed: owned regular command, plist, current 12-line snapshot receipt, and deployed SHA all agree; `launchd` is exactly owned or absent | Authenticated `HEAD` helper from the invoking Git checkout; if that checkout is gone, the fully preflighted and verified protected receipt helper when invoked from that installed snapshot | Preserve the receipt SHA and delete every other verified snapshot |
+| Exactly uninstalled: all four public artifacts and the service are absent | Authenticated `HEAD` helper from a trusted Git checkout only | Protect nothing and delete every verified snapshot |
+| Checkout-backed, incomplete, mismatched, foreign, or ambiguous | None | Refuse without deletion |
+
+Before deleting anything, the helper requires an owned plain mode-`0700` runtime parent, at most 64 immediate children, canonical lowercase 40-hex owned mode-`0500` snapshot directories, the protected root when one is declared, and complete manifest verification of every root. A stale root's helper is inventory only and is never executed. Verified stale roots are reverified and removed deterministically with manifest-driven no-follow unlink/rmdir operations; the runtime directory itself remains, so repeat GC is idempotent.
+
+GC does not inspect process liveness: operator quiescence is required. There is no rollback after deletion starts. If GC is interrupted after opening a root for deletion, that partial/noncanonical root makes a later GC fail closed for manual inspection. As elsewhere, active malicious same-UID namespace races are outside the claimed boundary.
 
 ## Rollback and cutover
 
