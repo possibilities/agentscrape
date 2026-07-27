@@ -17,10 +17,10 @@ import { EnvelopeBuildError, type ExtractorDefinition, projectScrapeResult } fro
 import type { ScrapeResult } from "./handlers/types";
 import { isSecureHttpUrl, redactDiagnostic, redactUrl } from "./redaction";
 import type { ExtractionEnvelope, FailureClass } from "./schemas";
+import { AGENTSCRAPE_VERSION } from "./version";
 
 export { EnvelopeBuildError } from "./extractors";
 
-const VERSION = "0.1.0";
 const MESSAGES: Record<FailureClass, string> = {
   invalid_request: "The extraction request is invalid.",
   authentication_required: "The source requires authentication.",
@@ -133,7 +133,7 @@ export function buildSuccessEnvelope(
     final_url: safeUrl(options.finalUrl),
     extractor: {
       name: "agentscrape",
-      version: VERSION,
+      version: AGENTSCRAPE_VERSION,
       implementation: bounded(projected.implementation, 100),
       implementation_version: "1",
     },
@@ -206,7 +206,7 @@ export function buildFailureEnvelope(
     final_url: options.finalUrl ? safeUrl(options.finalUrl) : null,
     extractor: {
       name: "agentscrape",
-      version: VERSION,
+      version: AGENTSCRAPE_VERSION,
       implementation: bounded(options.implementation || "unknown", 100),
       implementation_version: "1",
     },

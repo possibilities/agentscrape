@@ -2,13 +2,50 @@
 
 Fetch and extract web content through an agent-friendly Bun CLI.
 
-Agentscrape does not write back to remote providers. It is not read-only locally: commands can write destinations, capture corpus fixtures, convert HTML into sibling Markdown files, enqueue and fail queue records, reconcile archived records when `--apply` is given, create browser session state, and the installer mutates the user command and LaunchAgent paths it owns.
+Agentscrape does not write back to remote providers. It is not read-only locally: commands can write destinations, capture corpus fixtures, convert HTML into sibling Markdown files, enqueue and fail queue records, reconcile archived records when `--apply` is given, create browser session state, and the installer mutates the user command and LaunchAgent paths it owns. See the [threat model](docs/threat-model.md) for the claimed boundaries and non-guarantees.
 
 ## Runtime requirements
 
-- Bun 1.3.14
-- macOS `launchctl` and `plutil` for the standalone queue worker installer
-- `agent-browser` available in `PATH` for JavaScript-rendered pages and live canaries
+| Component | Requirement | Used for |
+| --- | --- | --- |
+| Bun | **Always exactly 1.3.14**, matching `package.json` `engines.bun` | CLI and trusted TypeScript source execution |
+| Production JavaScript dependencies | **Always** the frozen production dependency set; the standalone installer copies and seals it into the snapshot | Parsing, conversion, and extraction |
+| `agent-browser` | Optional | JavaScript-rendered pages, browser sessions, and live canaries. Agentscrape invokes `agent-browser`, which delegates to `browserctl`; Agentscrape does not invoke `browserctl` directly. |
+| `gh` | Optional | GitHub and Gist routes |
+| `pandoc` | Optional | Conversion of GitHub `.rst` content, including repository READMEs and blob routes |
+| `summaryctl` | Optional | Queue jobs whose record requests `summarize` |
+| `agentbrain` | Optional | `reconcile-queue --apply` only |
+| Trusted Git checkout plus `git`, `tar`, Bash, and core operating-system tools | Install/deploy only | Resolve and archive the exact commit, prepare the snapshot, and publish owned files |
+| macOS `launchctl` and `plutil` | Supported standalone install only | Validate and manage the user LaunchAgent |
+
+Agentbuilds is commonly the trusted deployment orchestrator, but it is not a production runtime dependency. Python and shellcheck are CI validation tools only, not installer or Agentscrape runtime requirements.
+
+## Distribution and version identity
+
+`package.json` remains `private: true`. The supported end-user distribution is the macOS standalone command installed as a sealed, effectively immutable snapshot from trusted Git, usually through Agentbuilds. Sealing detects ordinary mutation; it is not protection from malicious code with the same UID.
+
+The package exports are trusted Bun TypeScript source contracts for repository and linked-package use. There is no npm publication, transpiled JavaScript distribution, general Node.js compatibility, or stability promise for undeclared deep imports. The package semantic version is the compatibility line reported by the CLI, doctor, and extraction envelopes. A standalone deployment is identified more narrowly by the exact Git SHA recorded in its receipt and verified snapshot manifest; semantic-version equality does not establish deployment-byte identity.
+
+## Environment
+
+| Variable | Runtime behavior |
+| --- | --- |
+| `HOME` | Supplies the default data home, managed `~/.local/bin/agent-browser` candidate, browserctl advisory-state location, and installer-owned user paths. The installer requires a normalized absolute, safely owned home. |
+| `PATH` | Resolves Bun at install time and optional runtime executables. For `agent-browser`, a valid explicit override wins, then `$HOME/.local/bin/agent-browser`, then `PATH`. |
+| `TMPDIR` | Influences the operating-system temporary directory used for explicitly retained diagnostic screenshots; those artifacts are not moved into the data home. |
+| `AGENTSCRAPE_DATA_HOME` | Non-empty absolute runtime data root. It wins exactly and contains `queue/`, `retry/`, `failed/`, `frozen/`, `reconciliation/`, and the captured-corpus overlay. |
+| `XDG_DATA_HOME` | Non-empty absolute fallback; runtime data becomes `$XDG_DATA_HOME/agentscrape`. Without either data variable, the fallback is `$HOME/.local/share/agentscrape`. The installer uses the same XDG fallback for its share directory. |
+| `AGENTSCRAPE_AGENT_BROWSER_BIN` | A non-empty explicit `agent-browser` command/path. Runtime preserves an invalid configured value so spawn produces the normal missing-command classification; doctor reports it unavailable and does not fall back. |
+| `AGENTSCRAPE_AGENT_BROWSER_TIMEOUT` | Positive finite seconds for browser commands; default 30 seconds. Missing, nonnumeric, zero, or negative values use the default. |
+| `AGENTSCRAPE_PROCESS_QUEUE_RETRY_INITIAL_DELAY_SECONDS` | Initial browser-host retry delay; finite values from 0.1 through 3600 seconds are accepted, otherwise the default is 1. |
+| `AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_DELAY_SECONDS` | Retry cap; finite values from 0.1 through 3600 seconds are accepted, otherwise the default is 60. The effective cap is never below the initial delay. |
+| `AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS` | Total attempts including the initial failed attempt; default 5. When present it must be an integer from 1 through 100 or queue processing fails closed. |
+| `XDG_STATE_HOME` | Installer state defaults to `$XDG_STATE_HOME/agentscrape`, otherwise `$HOME/.local/state/agentscrape`. The HOME-scoped installer lock remains under `$HOME/.local/state/.agentscrape-installer`. |
+| Installer overrides | The approved deployment overrides are `AGENTSCRAPE_INSTALL_BIN_DIR`, `AGENTSCRAPE_INSTALL_LAUNCH_AGENTS_DIR`, `AGENTSCRAPE_INSTALL_STATE_DIR`, `AGENTSCRAPE_INSTALL_SHARE_DIR`, `AGENTSCRAPE_INSTALL_BUN`, `AGENTSCRAPE_INSTALL_LAUNCHCTL`, and `AGENTSCRAPE_INSTALL_PLUTIL`. |
+
+Retry delay is exponential, `min(effective maximum, initial × 2^(completed failures - 1))`. The policy is captured when a retry chain begins, so later environment changes do not rewrite an existing chain.
+
+The managed wrapper always exports the installer-resolved share directory as `AGENTSCRAPE_DATA_HOME`. The LaunchAgent plist receives only the `PATH` rendered at installation and executes that wrapper; it does not inherit later interactive-shell XDG, retry, or browser overrides. Interactive invocations of the wrapper still inherit their calling shell except for the wrapper-fixed data home.
 
 ## Install
 
@@ -97,6 +134,9 @@ For an operator cutover from any predecessor deployment, use this generic sequen
 | `open-session NAME` / `close-session NAME` | Manage reusable browser sessions | Writes or removes local browser session state |
 | `process-queue` | Process durable standalone scrape-artifact jobs | Mutates queue, failed-job, destination, and log state |
 | `reconcile-queue` | Inventory or apply reconciliation for frozen indexed records | `--apply` mutates archived reconciliation state; inventory mode does not |
+| `doctor [--format human\|json]` | Inspect the exact Bun runtime and inventory optional executables using offline filesystem/PATH lookups | None |
+
+`doctor` is an offline local runtime/executable inventory: it executes no capability and checks no auth, service, provider, queue, or deployment receipt health. Human output is the default and `--format json` emits the same deterministic report shape. Missing optional capabilities are informational; exit 0 means the Bun version is the exact requirement, exit 1 means it is incompatible, and usage errors exit 2. `bun run x-readiness -- --once` is the external deployment-capability probe for an Agentscrape binary. `check-presets --live` is live operational-health observation against configured provider canaries. These answer different questions and are not aliases.
 
 Run `agentscrape --help` or any command with `--help` for options. Explicit CLI/API session closes report failures; automatic owned-session cleanup is silent and best-effort.
 
