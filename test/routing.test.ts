@@ -266,6 +266,21 @@ url_patterns:
     expectMarkers(value, ["handler"]);
   });
 
+  test("fetchMarkdown rejects a selector preset before browser effects", async () => {
+    const value = fixture();
+    const output = await program(
+      value,
+      resultBody("https://docs.invalid/guide", `{ preset: "docs-sidebar" }`),
+    );
+
+    expect(output.value.error).toMatchObject({
+      name: "AgentscrapeUsageError",
+      errorClass: "usage",
+    });
+    expect(output.value.error.message).toContain("not a content-mode preset");
+    expectMarkers(value, []);
+  });
+
   test("generic forces the browser instead of GitHub or direct fetch", async () => {
     for (const url of ["https://github.com/owner/repository", "https://docs.invalid/guide.md"]) {
       const value = fixture();
@@ -496,6 +511,98 @@ describe("request validation precedes every route side effect", () => {
   }
 });
 
+describe("definition-role X status routing", () => {
+  const articleUrl = "https://x.com/i/status/2047794182463394072";
+  const articleHtml = readFileSync(
+    join(import.meta.dir, "corpus/x-article/sample-001/page.html"),
+    "utf8",
+  );
+
+  test("accepts a local x-article shadow with the official article pair", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "x-article.yaml"),
+      `name: x-article
+summary: Local shadow retaining the article definition
+domain: x.com
+aliases: [twitter.com]
+mode: content
+handler: x.scrape_article
+schema: XArticle
+`,
+    );
+    const output = await program(
+      value,
+      `  const result = await api.fetchMarkdown(${JSON.stringify(articleUrl)}, {
+    envelope: true,
+    html: ${JSON.stringify(articleHtml)},
+  });
+  console.log(JSON.stringify(result));`,
+    );
+
+    expect(output.value).toMatchObject({
+      status: "success",
+      extractor: { implementation: "x-article" },
+      metadata: { content_type: "article" },
+    });
+    expectMarkers(value, []);
+  });
+
+  test("fails closed when a local x-article shadow has no article role", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "x-article.yaml"),
+      `name: x-article
+summary: Mismatched local article shadow
+domain: x.com
+aliases: [twitter.com]
+mode: content
+handler: shadow.handle
+schema: ShadowArticle
+`,
+    );
+    const output = await program(
+      value,
+      `  class ShadowArticle extends api.ScrapeSchema {
+    toMarkdown() { return "# Must not execute"; }
+  }
+  const unregister = api.registerContentHandler({
+    handlerName: "shadow.handle",
+    schemaName: "ShadowArticle",
+    schema: ShadowArticle,
+    handler: async () => {
+      await Bun.write(process.env.HANDLER_MARKER, "must not run");
+      const structured = new ShadowArticle();
+      return { full_html: "", selected_html: "", markdown: structured.toMarkdown(), structured };
+    },
+  });
+  try {
+    const result = await api.fetchMarkdown(${JSON.stringify(articleUrl)}, {
+      envelope: true,
+      html: ${JSON.stringify(articleHtml)},
+    });
+    console.log(JSON.stringify(result));
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value).toMatchObject({
+      status: "failure",
+      extractor: { implementation: "x-tweet" },
+      failure: { failure_class: "internal_error" },
+    });
+    expect(output.value.failure.evidence).toContain(
+      "automatic X status article routing requires the official x-article preset",
+    );
+    expectMarkers(value, []);
+  });
+});
+
 describe("registered content routing", () => {
   test("a registered matching preset wins and receives the original URL", async () => {
     const value = fixture();
@@ -545,6 +652,352 @@ url_patterns:
 
     expect(output.value.markdown).toBe(url);
     expect(readFileSync(value.handlerMarker, "utf8")).toBe(url);
+    expectMarkers(value, ["handler"]);
+  });
+
+  test("a default non-browser custom extractor builds a generic envelope", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "custom-envelope.yaml"),
+      `name: custom-envelope
+summary: Custom generic envelope
+domain: custom.test
+mode: content
+handler: envelope.handle
+schema: EnvelopePage
+url_patterns:
+  - '^https://custom[.]test/start[?]View=Case$'
+`,
+    );
+    const url = "https://custom.test/start?View=Case";
+    const output = await program(
+      value,
+      `  class EnvelopePage extends api.ScrapeSchema {
+    constructor(content) { super(); this.content = content; }
+    toMarkdown() { return this.content; }
+  }
+  const unregister = api.registerContentHandler({
+    handlerName: "envelope.handle",
+    schemaName: "EnvelopePage",
+    schema: EnvelopePage,
+    handler: async (receivedUrl) => {
+      await Bun.write(process.env.HANDLER_MARKER, receivedUrl);
+      const structured = new EnvelopePage("# Custom title\\n\\n[Reference](/reference)");
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown: structured.toMarkdown(),
+        structured,
+      };
+    },
+  });
+  try {
+    const result = await api.fetchMarkdown(${JSON.stringify(url)}, { envelope: true });
+    console.log(JSON.stringify(result));
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value).toMatchObject({
+      status: "success",
+      requested_url: url,
+      final_url: url,
+      extractor: { implementation: "custom-envelope" },
+      metadata: { title: "Custom title" },
+    });
+    expect(output.value.relations).toEqual([
+      { relation_type: "references", target_url: "https://custom.test/reference" },
+    ]);
+    expect(readFileSync(value.handlerMarker, "utf8")).toBe(url);
+    expectMarkers(value, ["handler"]);
+  });
+
+  test("an explicit custom result final URL wins without browser capture", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "custom-final.yaml"),
+      `name: custom-final
+summary: Custom provider final URL
+domain: custom.test
+mode: content
+handler: final.handle
+schema: FinalPage
+`,
+    );
+    const requested = "https://custom.test/start";
+    const finalUrl = "https://custom.test/final?ok=yes";
+    const output = await program(
+      value,
+      `  class FinalPage extends api.ScrapeSchema {
+    toMarkdown() { return "# Final"; }
+  }
+  const unregister = api.registerContentHandler({
+    handlerName: "final.handle",
+    schemaName: "FinalPage",
+    schema: FinalPage,
+    capabilities: { browser: true },
+    handler: async () => {
+      await Bun.write(process.env.HANDLER_MARKER, "ran");
+      const structured = new FinalPage();
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown: structured.toMarkdown(),
+        structured,
+        final_url: ${JSON.stringify(finalUrl)},
+      };
+    },
+  });
+  try {
+    const result = await api.fetchMarkdown(${JSON.stringify(requested)}, {
+      envelope: true,
+      preset: "custom-final",
+    });
+    console.log(JSON.stringify(result));
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value).toMatchObject({
+      status: "success",
+      requested_url: requested,
+      final_url: finalUrl,
+      extractor: { implementation: "custom-final" },
+    });
+    expectMarkers(value, ["handler"]);
+  });
+
+  test("a browser-enabled custom extractor captures the browser final URL", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "custom-browser.yaml"),
+      `name: custom-browser
+summary: Browser-enabled custom content
+domain: custom.test
+mode: content
+handler: browser.handle
+schema: BrowserPage
+`,
+    );
+    const finalUrl = "https://custom.test/captured";
+    writeFileSync(
+      value.browser,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$BROWSER_MARKER"
+case "$*" in
+  *" eval window.location.href") printf '%s' ${JSON.stringify(JSON.stringify(finalUrl))} ;;
+  *" close") ;;
+  *) printf 'unexpected command: %s' "$*" >&2; exit 1 ;;
+esac
+`,
+    );
+    const output = await program(
+      value,
+      `  class BrowserPage extends api.ScrapeSchema {
+    toMarkdown() { return "# Browser capability"; }
+  }
+  const unregister = api.registerContentHandler({
+    handlerName: "browser.handle",
+    schemaName: "BrowserPage",
+    schema: BrowserPage,
+    capabilities: { browser: true },
+    handler: async () => {
+      await Bun.write(process.env.HANDLER_MARKER, "ran");
+      const structured = new BrowserPage();
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown: structured.toMarkdown(),
+        structured,
+      };
+    },
+  });
+  try {
+    const result = await api.fetchMarkdown("https://custom.test/start", {
+      envelope: true,
+      preset: "custom-browser",
+      allowPrivateNetwork: true,
+    });
+    console.log(JSON.stringify(result));
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value).toMatchObject({ status: "success", final_url: finalUrl });
+    expectMarkers(value, ["browser", "handler"]);
+    expect(readFileSync(value.browserMarker, "utf8")).toContain("eval window.location.href");
+  });
+
+  test("fetchLinks rejects a non-link custom extractor before handler and browser effects", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "custom-no-links.yaml"),
+      `name: custom-no-links
+summary: Custom content without links capability
+domain: custom.test
+mode: content
+handler: no-links.handle
+schema: NoLinksPage
+`,
+    );
+    const output = await program(
+      value,
+      `  class NoLinksPage extends api.ScrapeSchema {
+    toMarkdown() { return "# No links"; }
+  }
+  const unregister = api.registerContentHandler({
+    handlerName: "no-links.handle",
+    schemaName: "NoLinksPage",
+    schema: NoLinksPage,
+    handler: async () => {
+      await Bun.write(process.env.HANDLER_MARKER, "must not run");
+      const structured = new NoLinksPage();
+      return { full_html: "", selected_html: "", markdown: structured.toMarkdown(), structured };
+    },
+  });
+  try {
+    await api.fetchLinks("https://custom.test/start", { preset: "custom-no-links" });
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value.error).toMatchObject({
+      name: "AgentscrapeUsageError",
+      errorClass: "usage",
+    });
+    expect(output.value.error.message).toContain("emits no links");
+    expectMarkers(value, []);
+  });
+
+  test("a preset named x-timeline cannot claim timeline options without the capability", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "x-timeline.yaml"),
+      `name: x-timeline
+summary: Name-only timeline shadow
+domain: custom.test
+mode: content
+handler: name-only-timeline.handle
+schema: NameOnlyTimeline
+`,
+    );
+    const output = await program(
+      value,
+      `  class NameOnlyTimeline extends api.ScrapeSchema {
+    toMarkdown() { return "# Name only"; }
+  }
+  const unregister = api.registerContentHandler({
+    handlerName: "name-only-timeline.handle",
+    schemaName: "NameOnlyTimeline",
+    schema: NameOnlyTimeline,
+    capabilities: { links: true },
+    handler: async () => {
+      await Bun.write(process.env.HANDLER_MARKER, "must not run");
+      const structured = new NameOnlyTimeline();
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown: structured.toMarkdown(),
+        structured,
+        links: [],
+      };
+    },
+  });
+  try {
+    await api.fetchLinks("https://custom.test/start", { preset: "x-timeline", limit: 1 });
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value.error).toMatchObject({
+      name: "AgentscrapeUsageError",
+      errorClass: "usage",
+      message: "--limit is only valid with the x-timeline preset",
+    });
+    expectMarkers(value, []);
+  });
+
+  test("fetchLinks executes a custom links opt-in and enforces its result", async () => {
+    const value = fixture();
+    const directory = join(value.root, "scrapers");
+    mkdirSync(directory);
+    writeFileSync(
+      join(directory, "custom-links.yaml"),
+      `name: custom-links
+summary: Custom content with links capability
+domain: custom.test
+mode: content
+handler: links.handle
+schema: LinksPage
+`,
+    );
+    const output = await program(
+      value,
+      `  class LinksPage extends api.ScrapeSchema {
+    toMarkdown() { return "# Links"; }
+  }
+  let calls = 0;
+  const unregister = api.registerContentHandler({
+    handlerName: "links.handle",
+    schemaName: "LinksPage",
+    schema: LinksPage,
+    capabilities: { links: true },
+    handler: async () => {
+      calls += 1;
+      await Bun.write(process.env.HANDLER_MARKER, "ran");
+      const structured = new LinksPage();
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown: structured.toMarkdown(),
+        structured,
+        ...(calls === 1 ? { links: [{
+          url: "https://custom.test/item",
+          title: "Item",
+          section: "",
+          category: "",
+        }] } : {}),
+      };
+    },
+  });
+  try {
+    const result = await api.fetchLinks("https://custom.test/start", { preset: "custom-links" });
+    let missingLinksError;
+    try {
+      await api.fetchLinks("https://custom.test/start", { preset: "custom-links" });
+    } catch (error) {
+      missingLinksError = error?.message;
+    }
+    console.log(JSON.stringify({ links: result.links, missingLinksError }));
+  } finally {
+    unregister();
+  }`,
+    );
+
+    expect(output.value.links).toEqual([
+      {
+        url: "https://custom.test/item",
+        title: "Item",
+        section: "",
+        category: "",
+      },
+    ]);
+    expect(output.value.missingLinksError).toContain("content-mode preset and emits no links");
     expectMarkers(value, ["handler"]);
   });
 });

@@ -46,6 +46,7 @@ import {
   PresetSelectionError,
   throwIfAborted,
 } from "./errors";
+import { articlePresetNameFor, type ExtractorDefinition } from "./extractors";
 import { scrapePage } from "./generic";
 import { fetchGithubIfApplicable, isGithubUrl, parseGithubUrl } from "./github";
 import type { HandlerOptions, ScrapeResult } from "./handlers/types";
@@ -67,6 +68,7 @@ import {
 import {
   loadRegistry,
   matchPreset,
+  resolveContentDefinition,
   scrapeWithPreset,
   selectPreset,
   validateContentResult,
@@ -75,6 +77,7 @@ import { resolveQueuePaths } from "./queue-paths";
 import { sanitizeErrorInPlace } from "./redaction";
 
 export {
+  type ContentHandlerCapabilities,
   type ContentHandlerRegistration,
   registerContentHandler,
   type ScrapeSchemaConstructor,
@@ -330,6 +333,7 @@ export async function fetchMarkdown(
     let hint = implementationHint(url, options.preset);
     let finalUrl: string | null = null;
     let browserUsed = false;
+    let envelopeDefinition: ExtractorDefinition | undefined;
 
     try {
       return await withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
@@ -359,41 +363,54 @@ export async function fetchMarkdown(
           if (route.kind === "preset") {
             const preset = route.preset;
             hint = preset.name;
-            browserUsed = options.html === undefined || options.html === null;
+            if (preset.mode !== "content")
+              throw new AgentscrapeUsageError(
+                `preset '${preset.name}' is not a content-mode preset; use fetchLinks instead`,
+              );
+            const definition = resolveContentDefinition(preset);
+            if (!definition)
+              throw new PresetConfigError(`Preset '${preset.name}' has no resolvable handler`);
+            if (!definition.capabilities.markdown)
+              throw new AgentscrapeUsageError(
+                `preset '${preset.name}' does not support Markdown extraction`,
+              );
+            envelopeDefinition = definition;
+            browserUsed =
+              definition.capabilities.browser &&
+              (options.html === undefined || options.html === null);
             result = await withBrowserSignal(options.signal, () =>
               withBrowserProfile(options.browserProfile ?? preset.browser_profile, async () => {
                 const autoRouteXStatus =
-                  !options.preset &&
-                  preset.source === "official" &&
-                  preset.name === "x-tweet" &&
-                  preset.mode === "content" &&
-                  preset.handler === "x.scrape_tweet" &&
-                  preset.schema === "TweetThread";
+                  !options.preset && definition.capabilities.xRole === "status";
 
                 if (autoRouteXStatus) {
                   const captured = await captureXStatusPage(requested, options);
                   let effectivePreset = preset;
+                  let effectiveDefinition = definition;
                   if (captured.kind === "article") {
-                    const articlePreset = registry.byName("x-article");
-                    if (
-                      articlePreset?.source !== "official" ||
-                      articlePreset.mode !== "content" ||
-                      articlePreset.handler !== "x.scrape_article" ||
-                      articlePreset.schema !== "XArticle"
-                    )
+                    const articlePresetName = articlePresetNameFor(definition);
+                    const articlePreset = articlePresetName
+                      ? registry.byName(articlePresetName)
+                      : null;
+                    const articleDefinition = articlePreset
+                      ? resolveContentDefinition(articlePreset)
+                      : null;
+                    if (articleDefinition?.capabilities.xRole !== "article")
                       throw new PresetConfigError(
                         "automatic X status article routing requires the official x-article preset",
                       );
-                    effectivePreset = articlePreset;
+                    effectivePreset = articlePreset!;
+                    effectiveDefinition = articleDefinition;
                   }
                   hint = effectivePreset.name;
+                  envelopeDefinition = effectiveDefinition;
                   const value = await scrapeCapturedXStatus(requested, captured, options);
                   validateContentResult(value, effectivePreset);
                   return value;
                 }
 
                 const value = await scrapeWithPreset(requested, preset, options);
-                if (preset.mode === "content") validateContentResult(value, preset);
+                validateContentResult(value, preset);
                 return value;
               }),
             );
@@ -428,6 +445,7 @@ export async function fetchMarkdown(
               implementationHint: hint,
               maxContentBytes,
               maxRelations,
+              definition: envelopeDefinition,
             });
             if (options.destination)
               writeFileSync(options.destination, `${JSON.stringify(envelope, null, 2)}\n`);
@@ -526,7 +544,14 @@ export async function fetchLinks(
           if (options.preset && !preset)
             throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
           resolvedPreset = preset?.name ?? null;
-          if (supplied && resolvedPreset !== "x-timeline")
+          const definition = preset?.mode === "content" ? resolveContentDefinition(preset) : null;
+          if (preset?.mode === "content" && !definition)
+            throw new PresetConfigError(`Preset '${preset.name}' has no resolvable handler`);
+          if (preset?.mode === "content" && !definition?.capabilities.links)
+            throw new AgentscrapeUsageError(
+              `preset '${resolvedPreset}' is a content-mode preset and emits no links; use fetch-markdown instead`,
+            );
+          if (supplied && !definition?.capabilities.timelineOptions)
             throw new AgentscrapeUsageError(
               `${supplied[1]} is only valid with the x-timeline preset`,
             );
