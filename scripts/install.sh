@@ -647,7 +647,7 @@ run_launchctl_bounded() {
 trim_space() { local v="$1"; while [[ "$v" == ' '* || "$v" == $'\t'* ]]; do v="${v#?}"; done; while [[ "$v" == *' ' || "$v" == *$'\t' ]]; do v="${v%?}"; done; printf '%s' "$v"; }
 
 loaded_output_matches() {
-  local program="$1" service_path="$2" plist="$3" line trimmed in_env=0 programs=0 plists=0 envs=0 paths=0 invalid=0
+  local program="$1" service_path="$2" plist="$3" line trimmed in_env=0 programs=0 plists=0 envs=0 paths=0 oslogs=0 xpcs=0 invalid=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="$(trim_space "$line")"
     case "$trimmed" in
@@ -656,7 +656,16 @@ loaded_output_matches() {
       'environment = {') ((envs+=1)); in_env=1 ;;
       'environment = {'*) ((envs+=1)); [[ "$trimmed" == "environment = { PATH => $service_path }" ]] && ((paths+=1)) || invalid=1 ;;
       '}') in_env=0 ;;
-      *' => '*) if (( in_env )); then [[ "$trimmed" == "PATH => $service_path" ]] && ((paths+=1)) || invalid=1; fi ;;
+      *' => '*)
+        if (( in_env )); then
+          case "$trimmed" in
+            "PATH => $service_path") ((paths+=1)) ;;
+            'OSLogRateLimit => 64') ((oslogs+=1)); (( oslogs == 1 )) || invalid=1 ;;
+            "XPC_SERVICE_NAME => $LABEL") ((xpcs+=1)); (( xpcs == 1 )) || invalid=1 ;;
+            *) invalid=1 ;;
+          esac
+        fi
+        ;;
     esac
   done <<<"$LOADED_SERVICE_PRINT"
   (( ! invalid && programs == 1 && plists == 1 && envs == 1 && paths == 1 ))
