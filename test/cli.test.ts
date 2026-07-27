@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { CanaryResult } from "../src/canary";
+import { checkPresetResultsExitCode } from "../src/cli";
 
 const root = join(import.meta.dir, "..");
 const temporary: string[] = [];
@@ -105,6 +107,24 @@ describe("CLI offline smoke suite", () => {
       "reconcile-queue",
     ]) {
       expect(result.stdout).toContain(name);
+    }
+  });
+  test("check-presets exit mapping fails on every emitted nonpass status", () => {
+    const cases: Array<[CanaryResult["status"][], 0 | 1]> = [
+      [[], 0],
+      [["pass"], 0],
+      [["pass", "pass"], 0],
+      [["drift"], 1],
+      [["operational_failure"], 1],
+      [["not_configured"], 1],
+      [["pass", "drift"], 1],
+      [["operational_failure", "pass"], 1],
+      [["pass", "not_configured", "pass"], 1],
+    ];
+
+    for (const [statuses, expected] of cases) {
+      const results: Array<Pick<CanaryResult, "status">> = statuses.map((status) => ({ status }));
+      expect(checkPresetResultsExitCode(results)).toBe(expected);
     }
   });
   test("version and preset inspection commands succeed", async () => {
@@ -525,6 +545,19 @@ describe("CLI offline smoke suite", () => {
     expect(withoutConsent.stderr).toContain(
       "Browser-backed live navigation requires explicit unrestricted network consent",
     );
+  });
+  test("unknown canary preset emits not_configured JSON and exits 1", async () => {
+    const preset = "asr-27-intentionally-unknown-preset";
+    const result = await command(["check-presets", "--live", "--preset", preset]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("");
+    const envelope = JSON.parse(result.stdout);
+    expect(Object.keys(envelope)).toEqual(["checked_at", "results"]);
+    expect(new Date(envelope.checked_at).toString()).not.toBe("Invalid Date");
+    expect(envelope.results).toEqual([
+      { preset, status: "not_configured", detail: "no canary configured" },
+    ]);
   });
   test("empty queue and reconciliation commands are safe in an isolated home", async () => {
     const home = temp();

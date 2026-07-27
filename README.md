@@ -178,7 +178,7 @@ Registration is process-local, rejects built-in/name collisions, enforces the re
 
 Official presets cover Anthropic, Claude, OpenAI, and Perplexity billing; ChatGPT conversations; DeepWiki wiki/search pages; X posts, profiles, timelines, and articles; and generic documentation navigation.
 
-For deployment readiness, `bun run x-readiness -- --once` probes the PATH-resolved Agentscrape executable for both X presets and the timeline cursor flag. Each subprocess has a five-second deadline and bounded output. Every check prints one JSON status object; exit 0 means ready, 1 means present but not ready, and 2 means Agentscrape is missing. Without `--once`, use `--interval SECONDS` and optional `--timeout SECONDS` to watch.
+For deployment readiness, `bun run x-readiness -- --once` probes the PATH-resolved Agentscrape executable for both X presets and the timeline cursor flag. Each subprocess has a five-second deadline and bounded output. Each completed status check prints one JSON object; exit 0 means ready, 1 means the binary is present but a required capability is missing or unhealthy, and 2 means the binary is missing or a probe/configuration error occurred. Without `--once`, use `--interval SECONDS` and optional `--timeout SECONDS` to watch.
 
 Under a responsive event loop, a subprocess timeout, cancellation, output overflow, or capture/wait terminal event is followed by at most a fixed 100 ms teardown grace, using local stdout/stderr cancellation rather than waiting indefinitely for pipe EOF. A requested timeout therefore settles in `timeoutMs` plus up to 100 ms plus event-loop scheduling. The runner sends `SIGKILL` to the original detached process group, but arbitrary descendants that create a new session with `setsid` may survive; those processes are outside containment and are not claimed as killed.
 
@@ -204,7 +204,7 @@ Corpus metadata uses version `1`, declares `content`, `links`, or `nav-links` mo
 
 `capture-corpus` writes to `${AGENTSCRAPE_DATA_HOME:-${XDG_DATA_HOME:-~/.local/share}/agentscrape}/corpus` unless an API caller supplies an explicit root. Default-path creation rejects symlinked, foreign, or ambiguous ancestry. With no explicit root, `test-corpus` always runs the shipped `test/corpus` first and then that configured overlay when it exists and is physically distinct; secure overlay replay rejects files over 8,000,000 bytes and samples over 24,000,000 bytes before bounded no-follow reads. Overlay labels are `captured/<preset>/<sample>`, so duplicate shipped/captured samples both run deterministically. Replay never mutates the shipped snapshot.
 
-`check-presets --live --allow-private-network` uses `config/preset-canaries.yaml`, validates the same registry and output contract as normal fetching, checks semantic invariants rather than exact mutable text, closes every browser session it was allowed to use, and exits nonzero only for drift.
+`check-presets --live --allow-private-network` uses `config/preset-canaries.yaml`, validates the same registry and output contract as normal fetching, checks semantic invariants rather than exact mutable text, and closes every browser session it was allowed to use. Its JSON or YAML output carries each result's `status`; it exits 0 only when every emitted result is `pass`, and exits 1 when any emitted result is `drift`, `operational_failure`, or `not_configured`.
 
 ## Queue
 
@@ -221,6 +221,7 @@ bun install --frozen-lockfile
 bun run typecheck
 bun run lint
 bun run test
+bun run coverage
 bun run check
 bun run x-readiness -- --once
 ```
@@ -229,6 +230,8 @@ See `docs/migration/standalone.md` for intentional standalone identity and compa
 
 The offline suite covers handler fixtures, corpus replay, preset invariants, envelope projection, recorded and fake-transport live feed discovery, output formatting, and command smoke tests. It makes no live internet calls.
 
-`bun run check` is the contributor and CI default. Before typecheck, lint, and serial bounded tests, it replaces `HOME` with a private temporary directory and removes inherited Agentscrape, XDG config/data/state, and Bun/Node process-option state; `bun run test` uses the same boundary. Tests intentionally use loopback networking, so this is not an external-network sandbox.
+`bun run check` is the contributor and CI default. Before typecheck, lint, and serial bounded tests, it replaces `HOME` with a private temporary directory and removes inherited Agentscrape, XDG config/data/state, and Bun/Node process-option state; `bun run test` and `bun run coverage` use the same isolated boundary. Tests intentionally use loopback networking, so this is not an external-network sandbox.
+
+`bun run coverage` runs the full serial suite with text and LCOV reporters, strictly aggregates each LCOV record's `LF`/`LH` line and `FNF`/`FNH` function summaries, and requires at least 70% aggregate coverage for both lines and functions. Missing, malformed, incomplete, or zero-denominator LCOV fails closed. This floor is a gate, not a claim of comprehensive coverage; work in spawned CLI subprocesses is not necessarily attributed to the parent report. After a successful Linux gate, CI uploads `coverage/lcov.info` as `coverage-lcov-ubuntu-24.04` for seven days.
 
 CI runs the check on Ubuntu 24.04 and macOS 26, validates the shell installer and plist, and rejects whitespace errors or any tracked, staged, or untracked worktree changes.
