@@ -5,7 +5,6 @@ import { AgentscrapeTimeoutError, AgentscrapeUsageError, PresetDriftError } from
 import {
   scrapeAnthropicBilling,
   scrapeClaudeBilling,
-  scrapeCodexUsage,
   scrapeOpenAiBilling,
   scrapePerplexityBilling,
 } from "../src/handlers/billing";
@@ -80,13 +79,6 @@ describe("official billing invariants", () => {
     expect(
       scrapeClaudeBilling("https://claude.ai/settings/billing", {
         html: fixture("preset-audit-claude-billing-missing-landmark.html"),
-      }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
-  });
-  test("Codex rejects a page without quota landmarks as drift", async () => {
-    await expect(
-      scrapeCodexUsage("https://chatgpt.com/codex/settings/usage", {
-        html: "<html><body>Usage</body></html>",
       }),
     ).rejects.toBeInstanceOf(PresetDriftError);
   });

@@ -31,7 +31,6 @@ import { runProcess } from "./subprocess";
 export { resolveDataHome } from "./queue-paths";
 
 const queuePaths = resolveQueuePaths();
-export const DATA_HOME = queuePaths.dataHome;
 export const QUEUE_DIR = queuePaths.queue;
 export const FROZEN_DIR = queuePaths.frozen;
 export const RETRY_DIR = queuePaths.retry;
