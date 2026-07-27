@@ -150,6 +150,16 @@ describe("link extraction parity", () => {
     );
   });
 
+  test("offline extraction skips unsafe destinations", () => {
+    expect(
+      offlineExtractLinks(
+        `<nav><a href="javascript:x">active</a><a href="%6a%61vascript:x">encoded</a><a href="/%zz">bad</a><a href="/ok">ok</a></nav>`,
+        "nav",
+        "https://docs.test/docs",
+      ),
+    ).toEqual([{ url: "https://docs.test/ok", title: "ok", category: "" }]);
+  });
+
   test("offline extraction preserves heading categories and drifts on empty roots", () => {
     expect(
       offlineExtractLinks(

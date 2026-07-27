@@ -91,6 +91,19 @@ describe("conversation and social fail-closed handlers", () => {
     });
     expect(result.markdown.trim()).toBe(fixture("chatgpt-code-blocks.expected.md").trim());
   });
+  test("ChatGPT cannot bypass destination sanitization", async () => {
+    const result = await scrapeConversation("https://chatgpt.com/share/example", {
+      html: `<article data-turn-id="1" data-turn="assistant"><div class="markdown">
+        <a href="javascript:alert(1)">unsafe</a><img src="data:text/html,x" alt="fallback">
+        <pre><code>before\n\`\`\`\`\nafter</code></pre><iframe>drop</iframe>
+      </div></article>`,
+    });
+    expect(result.markdown).toContain("unsafefallback");
+    expect(result.markdown).not.toContain("javascript:");
+    expect(result.markdown).not.toContain("data:text");
+    expect(result.markdown).not.toContain("iframe");
+    expect(result.markdown).toContain("`````\nbefore\n````\nafter\n`````");
+  });
   test("ChatGPT rejects a page without conversation turns", async () => {
     expect(
       scrapeConversation("https://chatgpt.com/share/nope", {

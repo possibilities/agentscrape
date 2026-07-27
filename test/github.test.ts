@@ -467,6 +467,43 @@ printf 'offline issue'`);
     expect(treeResult?.markdown).toContain("[`guide.md`]");
   });
 
+  test("generated GitHub links fall back safely while raw Markdown remains unchanged", async () => {
+    const profile = sequence({
+      stdout: JSON.stringify({
+        login: "person[x]",
+        name: "Raw <name>",
+        html_url: "javascript:alert(1)",
+      }),
+    });
+    const profileResult = await fetchGithubIfApplicable("https://github.com/person", undefined, {
+      runProcess: profile.runProcess,
+    });
+    expect(profileResult?.markdown).toContain("# Raw <name>");
+    expect(profileResult?.markdown).toContain("**Login:** person\\[x\\]");
+    expect(profileResult?.markdown).not.toContain("javascript:");
+
+    const tree = sequence({
+      stdout: JSON.stringify([{ name: "guide[x].md", type: "file", html_url: "data:text/html,x" }]),
+    });
+    const treeResult = await fetchGithubIfApplicable(
+      "https://github.com/o/r/tree/main/docs",
+      undefined,
+      { runProcess: tree.runProcess },
+    );
+    expect(treeResult?.markdown).toContain("`guide\\[x\\].md`");
+    expect(treeResult?.markdown).not.toContain("data:text");
+
+    const raw = "[provider](javascript:still-raw)\n";
+    const blob = sequence({ stdout: raw });
+    expect(
+      (
+        await fetchGithubIfApplicable("https://github.com/o/r/blob/main/README.md", undefined, {
+          runProcess: blob.runProcess,
+        })
+      )?.markdown,
+    ).toBe(raw);
+  });
+
   test("multi-file Gists preserve Markdown and source file identity", async () => {
     const process = sequence(
       { stdout: "one.md\ntwo.js\n" },

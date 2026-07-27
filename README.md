@@ -224,6 +224,10 @@ Under a responsive event loop, a subprocess timeout, cancellation, output overfl
 
 ## Output contract
 
+All Agentscrape output is untrusted content. The HTML converters and selected generated schema/GitHub links filter recognized `a[href]`, `img[src]`, and Markdown destinations to credential-free HTTP(S) or safe relative references. This is not global Markdown or HTML sanitization, prompt-injection defense, domain authorization, or network-egress enforcement. Direct Markdown, provider-authored Markdown/text, and GitHub passthrough content remain unchecked and preserve their current bytes; direct-Markdown response MIME admission belongs to ASR-33.
+
+Downstream consumers should disable raw HTML and remote images (or proxy images through a separately enforced policy), and must not automatically follow emitted links. Allowed HTTP(S) destinations can still track a renderer or target private services if a consumer fetches them. Treat labels, image alternatives, code, metadata, and non-recognized Markdown/HTML constructs as attacker-controlled. Envelope media types, hashes, and relation lists do not imply content safety.
+
 `fetch-markdown` defaults to Markdown. `--json` and `--yaml` serialize structured output. `--envelope` emits the provider-neutral extraction envelope with schema version `1`, extractor identity `agentscrape`, one bounded UTF-8 Markdown artifact, normalized metadata/relations, or a classified failure. Existing envelope keys and enum shapes are stable.
 
 Raw browser evidence is not retained by default: ordinary CLI/API fetches and queue jobs create neither raw/selected HTML sidecars nor diagnostic screenshots. Retention is available only on `fetch-markdown`, through CLI `--retain-artifacts` or API `retainArtifacts: true`; `fetch-links` and direct `scrapeWithPreset` calls cannot opt in. Retention cannot be combined with envelope output. In-memory `full_html` and `selected_html` result fields are unchanged.

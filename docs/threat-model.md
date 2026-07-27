@@ -37,9 +37,13 @@ Environment variables, command arguments, local preset files, queue records, rec
 
 ## Untrusted content boundary
 
-Remote provider output and recorded provider output cross an untrusted boundary. Typed handlers and envelope projection enforce their current structural, size, relation-count, URL, and redaction contracts, but emitted Markdown and provider text must still be treated as untrusted by downstream renderers and agents.
+Remote provider output and recorded provider output cross an untrusted boundary. All emitted output remains untrusted. Typed handlers and envelope projection enforce their current structural, size, relation-count, URL, and redaction contracts, but emitted Markdown and provider text must still be treated as untrusted by downstream renderers and agents.
 
-A detailed Markdown/link safety policy is deferred to **ASR-32**. Direct-Markdown MIME admission is deferred to **ASR-33**. This threat model does not claim that either policy has landed, and consumers must not infer an HTML-sanitization, safe-link, or response-MIME guarantee from the current extraction envelope.
+The HTML converters remove a small set of active elements and filter recognized anchor and image destinations. Selected schema and GitHub-generated Markdown links use the same policy. Surrounding whitespace is trimmed; empty values, remaining whitespace/control/format characters, malformed percent escapes, backslashes, angle brackets, quotes, backticks, protocol-relative references, credentials, and schemes other than HTTP(S) are rejected. A bounded six-pass classification copy decodes percent escapes and HTML entities to expose smuggling, but emitted destinations are never taken from that copy. Absolute HTTP(S) destinations are normalized; relative path, query, and fragment references resolve only against a valid HTTP(S) base, or remain relative when no base exists. Unsafe anchors are unwrapped and unsafe images become escaped text alternatives or disappear.
+
+This filtering is not global Markdown or HTML sanitization, prompt-injection defense, domain authorization, or network-egress enforcement. It does not inspect arbitrary Markdown/HTML constructs or make labels, alternative text, code, or metadata trusted.
+
+Direct Markdown, GitHub passthrough content, and provider-authored Markdown/text are unchecked and preserve their current bytes. Direct-Markdown MIME admission is deferred to **ASR-33**; no response-MIME guarantee should be inferred. Downstream renderers should disable raw HTML and remote images (or use a separately enforced image proxy), and consumers must not automatically follow emitted links. Allowed HTTP(S) destinations can still track a renderer or target private services when fetched. Envelope media types, hashes, and relation lists do not imply content safety.
 
 Corpus HTML and retained HTML/screenshots are raw evidence, not sanitized output. They can contain private account data, active markup, tracking values, or secrets.
 
@@ -123,8 +127,9 @@ Runtime GC is separate and never automatic. It verifies every candidate snapshot
 Agentscrape does not claim:
 
 - browser destination enforcement after unrestricted consent;
-- trustworthiness, safety, or sanitization of provider Markdown or raw evidence;
-- direct-Markdown MIME admission or the deferred ASR-32/ASR-33 policies;
+- trustworthiness, prompt safety, or global Markdown/HTML sanitization of output, provider content, or raw evidence;
+- domain authorization or egress safety from recognized-link destination filtering;
+- direct-Markdown MIME admission (the deferred ASR-33 policy);
 - exactly-once provider, destination, summary, or reconciliation effects;
 - containment of trusted custom handlers or escaped external-command descendants;
 - provider availability, authentication health, or optional-tool health from doctor;

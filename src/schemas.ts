@@ -1,3 +1,5 @@
+import { markdownLink } from "./html";
+
 export abstract class ScrapeSchema {
   abstract toMarkdown(): string;
 }
@@ -45,7 +47,7 @@ export class TweetContent extends ScrapeSchema {
   toMarkdown(): string {
     const parts = [this.text.replace(/[ \t]+$/gm, "").trim()].filter(Boolean);
     if (this.timestamp) {
-      parts.push(this.permalink ? `[${this.timestamp}](${this.permalink})` : this.timestamp);
+      parts.push(this.permalink ? markdownLink(this.timestamp, this.permalink) : this.timestamp);
     } else if (this.permalink) parts.push(this.permalink);
     const missing = [...new Set(this.links.filter((link) => link && !this.text.includes(link)))];
     if (missing.length) parts.push(missing.join("\n"));
@@ -80,7 +82,7 @@ export class TweetThread extends ScrapeSchema {
       .join(" (");
     const author = display.includes(" (") ? `${display})` : display;
     if (author)
-      parts.push(`**Author**: ${this.author_url ? `[${author}](${this.author_url})` : author}`);
+      parts.push(`**Author**: ${this.author_url ? markdownLink(author, this.author_url) : author}`);
     const blocks = this.tweets.map((tweet) => tweet.toMarkdown()).filter(Boolean);
     if (blocks.length) parts.push(blocks.join("\n\n---\n\n"));
     if (this.quoted_tweet) {
@@ -220,7 +222,9 @@ export class XTimelineTweet extends ScrapeSchema {
     ]
       .filter(([, on]) => on)
       .map(([name]) => `\`${name}\``);
-    const meta = [...tags, this.created_at, this.url ? `[link](${this.url})` : ""].filter(Boolean);
+    const meta = [...tags, this.created_at, this.url ? markdownLink("link", this.url) : ""].filter(
+      Boolean,
+    );
     if (meta.length) lines.push(meta.join(" · "));
     return lines.join("\n\n").trim();
   }
@@ -347,7 +351,7 @@ export class DeepWikiCitation extends ScrapeSchema {
         location += `-L${this.line_end}`;
     }
     const label = this.label.trim() || location || this.target_url;
-    let entry = this.target_url ? `[${label}](${this.target_url})` : label;
+    let entry = this.target_url ? markdownLink(label, this.target_url) : label;
     if (location && location !== label) entry += ` (${location})`;
     return entry;
   }
@@ -441,7 +445,7 @@ export class LinkList extends ScrapeSchema {
     return this.links
       .map((link) => {
         const title = link.title || link.url;
-        const entry = link.url ? `[${title}](${link.url})` : title;
+        const entry = link.url ? markdownLink(title, link.url) : title;
         const meta = [link.section, link.category].filter(Boolean);
         return `- ${entry}${meta.length ? ` (${meta.join(" / ")})` : ""}`;
       })
