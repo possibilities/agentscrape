@@ -3,11 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PresetConfigError, PresetOutputError, PresetSelectionError } from "../src/errors";
+import { officialExtractorDefinitions, resolveExtractorDefinition } from "../src/extractors";
 import {
   canonicalMatchUrl,
   loadRegistry,
   matchPreset,
   registerContentHandler,
+  resolveContentDefinition,
+  schemaNames,
   scrapeWithPreset,
   selectPreset,
   validateContentResult,
@@ -35,6 +38,51 @@ describe("strict preset registry", () => {
     expect(registry.presets.map((item) => item.name)).toContain("deepwiki-wiki-page");
     expect(registry.presets.map((item) => item.name)).toContain("x-article");
     expect(registry.presets).toHaveLength(13);
+  });
+  test("publishes one immutable definition for every official content pair", () => {
+    const expectedPairs = [
+      "anthropic_billing.scrape_anthropic_billing:AnthropicBilling",
+      "chatgpt.scrape_conversation:ChatGPTConversation",
+      "claude_billing.scrape_claude_billing:ClaudeBilling",
+      "deepwiki.scrape_search_conversation:DeepWikiSearchConversation",
+      "deepwiki.scrape_wiki_page:DeepWikiWikiPage",
+      "openai_billing.scrape_openai_billing:OpenAIBilling",
+      "perplexity_billing.scrape_perplexity_billing:PerplexityBilling",
+      "x.scrape_article:XArticle",
+      "x.scrape_profile:XProfile",
+      "x.scrape_timeline:XTimeline",
+      "x.scrape_tweet:TweetThread",
+    ];
+    const pairs = officialExtractorDefinitions.map(
+      (definition) => `${definition.handlerName}:${definition.schemaName}`,
+    );
+    expect(pairs).toEqual(expectedPairs);
+    expect(new Set(pairs).size).toBe(11);
+    expect(Object.isFrozen(officialExtractorDefinitions)).toBeTrue();
+    for (const definition of officialExtractorDefinitions) {
+      expect(Object.isFrozen(definition), definition.schemaName).toBeTrue();
+      expect(Object.isFrozen(definition.capabilities), definition.schemaName).toBeTrue();
+      expect(Object.isFrozen(definition.implementationIdentity), definition.schemaName).toBeTrue();
+      expect(definition.capabilities.browser, definition.schemaName).toBeTrue();
+      expect(definition.capabilities.markdown, definition.schemaName).toBeTrue();
+      expect(definition.projector, definition.schemaName).toBeFunction();
+      expect(resolveExtractorDefinition(definition.handlerName, definition.schemaName)).toBe(
+        definition,
+      );
+    }
+
+    const contentPresets = loadRegistry().presets.filter((preset) => preset.mode === "content");
+    expect(contentPresets).toHaveLength(11);
+    for (const preset of contentPresets) {
+      const definition = resolveContentDefinition(preset);
+      expect(definition, preset.name).not.toBeNull();
+      expect(definition?.handlerName).toBe(preset.handler);
+      expect(definition?.schemaName).toBe(preset.schema);
+      expect(Object.isFrozen(definition), preset.name).toBeTrue();
+    }
+    expect(schemaNames()).toEqual(
+      officialExtractorDefinitions.map((definition) => definition.schemaName).sort(),
+    );
   });
   test("canonicalizes only credential-free HTTP URLs", () => {
     expect(canonicalMatchUrl("HTTPS://X.COM:443/User?a=1#fragment")).toBe("https://x.com/User?a=1");
@@ -314,6 +362,113 @@ describe("strict preset registry", () => {
       PresetConfigError,
     );
   });
+  test("strictly normalizes and freezes custom capabilities", () => {
+    class CapabilityPage extends ScrapeSchema {
+      toMarkdown(): string {
+        return "# Capabilities";
+      }
+    }
+    const handler = async () => {
+      const structured = new CapabilityPage();
+      return {
+        full_html: "",
+        selected_html: "",
+        markdown: structured.toMarkdown(),
+        structured,
+      };
+    };
+    for (const capabilities of [null, { browser: "yes" }, { links: 1 }, { timelineOptions: true }])
+      expect(() =>
+        registerContentHandler({
+          handlerName: "capabilities.invalid",
+          schemaName: "InvalidCapabilityPage",
+          handler,
+          schema: CapabilityPage,
+          capabilities: capabilities as never,
+        }),
+      ).toThrow(PresetConfigError);
+
+    const unregisterDefault = registerContentHandler({
+      handlerName: "capabilities.default",
+      schemaName: "DefaultCapabilityPage",
+      handler,
+      schema: CapabilityPage,
+    });
+    const defaultDefinition = resolveExtractorDefinition(
+      "capabilities.default",
+      "DefaultCapabilityPage",
+    )!;
+    expect(defaultDefinition.capabilities).toEqual({
+      browser: false,
+      markdown: true,
+      links: false,
+      timelineOptions: false,
+      xRole: null,
+    });
+    expect(Object.isFrozen(defaultDefinition)).toBeTrue();
+    expect(Object.isFrozen(defaultDefinition.capabilities)).toBeTrue();
+    expect(Object.isFrozen(defaultDefinition.implementationIdentity)).toBeTrue();
+    expect(schemaNames()).toContain("DefaultCapabilityPage");
+    unregisterDefault();
+    unregisterDefault();
+    expect(resolveExtractorDefinition("capabilities.default", "DefaultCapabilityPage")).toBeNull();
+    expect(schemaNames()).not.toContain("DefaultCapabilityPage");
+
+    expect(() =>
+      registerContentHandler({
+        handlerName: "x.scrape_tweet",
+        schemaName: "BuiltinCollisionPage",
+        handler,
+        schema: CapabilityPage,
+      }),
+    ).toThrow("content handler 'x.scrape_tweet' is already registered");
+    expect(() =>
+      registerContentHandler({
+        handlerName: "capabilities.builtin-schema",
+        schemaName: "XArticle",
+        handler,
+        schema: CapabilityPage,
+      }),
+    ).toThrow("content schema 'XArticle' is already registered");
+
+    const supplied = { browser: true, links: true };
+    const unregisterOptIn = registerContentHandler({
+      handlerName: "capabilities.opt-in",
+      schemaName: "OptInCapabilityPage",
+      handler,
+      schema: CapabilityPage,
+      capabilities: supplied,
+    });
+    supplied.browser = false;
+    supplied.links = false;
+    const optIn = resolveExtractorDefinition("capabilities.opt-in", "OptInCapabilityPage")!;
+    expect(optIn.capabilities).toEqual({
+      browser: true,
+      markdown: true,
+      links: true,
+      timelineOptions: false,
+      xRole: null,
+    });
+    expect(Reflect.set(optIn.capabilities, "browser", false)).toBeFalse();
+    expect(optIn.capabilities.browser).toBeTrue();
+    expect(() =>
+      registerContentHandler({
+        handlerName: "capabilities.opt-in",
+        schemaName: "OtherCapabilityPage",
+        handler,
+        schema: CapabilityPage,
+      }),
+    ).toThrow("content handler 'capabilities.opt-in' is already registered");
+    expect(() =>
+      registerContentHandler({
+        handlerName: "capabilities.other",
+        schemaName: "OptInCapabilityPage",
+        handler,
+        schema: CapabilityPage,
+      }),
+    ).toThrow("content schema 'OptInCapabilityPage' is already registered");
+    unregisterOptIn();
+  });
   test("explicit TypeScript registration safely binds a custom handler and schema", async () => {
     class CustomPage extends ScrapeSchema {
       constructor(public content: string) {
@@ -345,9 +500,9 @@ describe("strict preset registry", () => {
       "custom",
       "name: custom\nsummary: Registered content\ndomain: custom.test\nmode: content\nhandler: custom.registered\nschema: CustomPage\nurl_patterns: ['^https://custom\\.test/page$']\n",
     );
+    const registry = loadRegistry({ officialDir: official, localDir: local });
+    const preset = registry.byName("custom")!;
     try {
-      const registry = loadRegistry({ officialDir: official, localDir: local });
-      const preset = registry.byName("custom")!;
       const result = await scrapeWithPreset("https://custom.test/page", preset);
       expect(result.markdown).toBe("# Registered");
       expect(() => validateContentResult(result, preset)).not.toThrow();
@@ -362,6 +517,9 @@ describe("strict preset registry", () => {
     } finally {
       unregister();
     }
+    await expect(scrapeWithPreset("https://custom.test/page", preset)).rejects.toThrow(
+      "Preset 'custom' has no resolvable handler",
+    );
     try {
       loadRegistry({ officialDir: official, localDir: local });
       throw new Error("unregistered content preset unexpectedly loaded");

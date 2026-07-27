@@ -25,6 +25,7 @@ import {
   PresetOutputError,
   PresetSelectionError,
 } from "../src/errors";
+import { officialExtractorDefinitions } from "../src/extractors";
 import type { ScrapeResult } from "../src/handlers/types";
 import {
   AnthropicBilling,
@@ -39,6 +40,7 @@ import {
   GenericPage,
   OpenAIBilling,
   PerplexityBilling,
+  ScrapeSchema,
   ScrapeWarning,
   TweetContent,
   TweetThread,
@@ -210,29 +212,54 @@ describe("version 1 extraction envelope", () => {
       source_id: "7",
     });
   });
-  test("every official structured schema has a central projector", () => {
+  test("fails closed for an unregistered structured schema", () => {
+    class UnknownPage extends ScrapeSchema {
+      toMarkdown(): string {
+        return "# Unknown";
+      }
+    }
+    expect(() => build(result(new UnknownPage()))).toThrow(
+      "unsupported structured result type: UnknownPage",
+    );
+  });
+  test("every official definition dispatches its central projector", () => {
     const citation = new DeepWikiCitation({ label: "src", target_url: "https://github.com/a/b" });
-    const values = [
-      new XProfile({ display_name: "A", handle: "a", bio: "bio" }),
-      new XTimeline({
-        handle: "a",
-        tweets: [new XTimelineTweet({ id: "1", url: "https://x.com/a/status/1", text: "x" })],
-        warnings: [new ScrapeWarning("scroll_stalled", "partial")],
-      }),
-      new ChatGPTConversation([new ConversationTurn("user", "hello")]),
-      new DeepWikiWikiPage({ title: "Wiki", markdown: "body", citations: [citation] }),
-      new DeepWikiSearchConversation({
-        rounds: [new DeepWikiQARound({ question: "Q", answer: "A", citations: [citation] })],
-      }),
-      new ClaudeBilling({ current_plan: 1 }),
-      new AnthropicBilling("org", 0, false),
-      new OpenAIBilling("org", "Prepaid", 0, false),
-      new PerplexityBilling(0, 1, false),
-    ];
-    for (const structured of values) {
+    const values = new Map<string, { toMarkdown(): string }>([
+      ["XProfile", new XProfile({ display_name: "A", handle: "a", bio: "bio" })],
+      [
+        "XTimeline",
+        new XTimeline({
+          handle: "a",
+          tweets: [new XTimelineTweet({ id: "1", url: "https://x.com/a/status/1", text: "x" })],
+          warnings: [new ScrapeWarning("scroll_stalled", "partial")],
+        }),
+      ],
+      ["ChatGPTConversation", new ChatGPTConversation([new ConversationTurn("user", "hello")])],
+      [
+        "DeepWikiWikiPage",
+        new DeepWikiWikiPage({ title: "Wiki", markdown: "body", citations: [citation] }),
+      ],
+      [
+        "DeepWikiSearchConversation",
+        new DeepWikiSearchConversation({
+          rounds: [new DeepWikiQARound({ question: "Q", answer: "A", citations: [citation] })],
+        }),
+      ],
+      ["ClaudeBilling", new ClaudeBilling({ current_plan: 1 })],
+      ["AnthropicBilling", new AnthropicBilling("org", 0, false)],
+      ["OpenAIBilling", new OpenAIBilling("org", "Prepaid", 0, false)],
+      ["PerplexityBilling", new PerplexityBilling(0, 1, false)],
+    ]);
+    const dedicated = new Set(["TweetThread", "XArticle"]);
+    expect(new Set([...values.keys(), ...dedicated])).toEqual(
+      new Set(officialExtractorDefinitions.map((definition) => definition.schemaName)),
+    );
+    for (const definition of officialExtractorDefinitions) {
+      if (dedicated.has(definition.schemaName)) continue;
+      const structured = values.get(definition.schemaName)!;
       const envelope = build(result(structured));
-      expect(envelope.status).toBe("success");
-      expect(envelope.extractor.implementation).not.toBe("generic-page");
+      expect(envelope.status, definition.schemaName).toBe("success");
+      expect(envelope.extractor.implementation, definition.schemaName).not.toBe("generic-page");
     }
   });
 });

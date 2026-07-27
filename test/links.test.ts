@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fetchLinks } from "../src/api";
 import { AgentscrapeUsageError, PresetDriftError } from "../src/errors";
 import { offlineExtractLinks, scrapeLinks } from "../src/links";
@@ -114,6 +116,21 @@ describe("link extraction parity", () => {
         sectionSelector: "#navigation-items",
       }),
     ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    expect(openPage).not.toHaveBeenCalled();
+    expect(runAgentBrowser).not.toHaveBeenCalled();
+  });
+
+  test("allows XTimeline links and timeline options through definition capabilities", async () => {
+    const result = await fetchLinks("https://x.com/testuser", {
+      preset: "x-timeline",
+      html: readFileSync(join(import.meta.dir, "fixtures/x-timeline.html"), "utf8"),
+      limit: 2,
+      session: "direct",
+    });
+    expect(result.links?.map((item) => item.url)).toEqual([
+      "https://x.com/testuser/status/100",
+      "https://x.com/testuser/status/500",
+    ]);
     expect(openPage).not.toHaveBeenCalled();
     expect(runAgentBrowser).not.toHaveBeenCalled();
   });

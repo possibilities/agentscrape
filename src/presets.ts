@@ -5,30 +5,21 @@ import { withBrowserNetworkPolicy, withBrowserSignal } from "./browser";
 import { cssSelectorProblem } from "./css-selector";
 import { PresetConfigError, PresetOutputError, PresetSelectionError } from "./errors";
 import {
-  scrapeAnthropicBilling,
-  scrapeClaudeBilling,
-  scrapeOpenAiBilling,
-  scrapePerplexityBilling,
-} from "./handlers/billing";
-import { scrapeConversation } from "./handlers/chatgpt";
-import { scrapeSearchConversation, scrapeWikiPage } from "./handlers/deepwiki";
-import type { ContentHandler, HandlerOptions, ScrapeResult } from "./handlers/types";
-import { scrapeArticle, scrapeProfile, scrapeTimeline, scrapeTweet } from "./handlers/x";
-import {
-  AnthropicBilling,
-  ChatGPTConversation,
-  ClaudeBilling,
-  DeepWikiSearchConversation,
-  DeepWikiWikiPage,
-  LinkList,
-  OpenAIBilling,
-  PerplexityBilling,
-  ScrapeSchema,
-  TweetThread,
-  XArticle,
-  XProfile,
-  XTimeline,
-} from "./schemas";
+  type ExtractorDefinition,
+  extractorDefinitionForHandler,
+  extractorDefinitionForSchema,
+  extractorSchemaNames,
+  resolveExtractorDefinition,
+} from "./extractors";
+import type { HandlerOptions, ScrapeResult } from "./handlers/types";
+import { LinkList, type ScrapeSchema } from "./schemas";
+
+export {
+  type ContentHandlerCapabilities,
+  type ContentHandlerRegistration,
+  registerContentHandler,
+  type ScrapeSchemaConstructor,
+} from "./extractors";
 
 export type PresetMode = "content" | "links" | "nav-links";
 export interface PresetConfig {
@@ -48,132 +39,6 @@ export interface PresetConfig {
   source: "official" | "local";
 }
 
-export type ScrapeSchemaConstructor = abstract new (...args: any[]) => ScrapeSchema;
-export interface ContentHandlerRegistration {
-  handlerName: string;
-  schemaName: string;
-  handler: ContentHandler;
-  schema: ScrapeSchemaConstructor;
-}
-
-const HANDLERS: Record<string, ContentHandler> = {};
-const SCHEMAS: Record<string, ScrapeSchemaConstructor> = {};
-const HANDLER_SCHEMAS: Record<string, string> = {};
-function addContentHandler(registration: ContentHandlerRegistration): void {
-  HANDLERS[registration.handlerName] = registration.handler;
-  SCHEMAS[registration.schemaName] = registration.schema;
-  HANDLER_SCHEMAS[registration.handlerName] = registration.schemaName;
-}
-for (const registration of [
-  {
-    handlerName: "anthropic_billing.scrape_anthropic_billing",
-    schemaName: "AnthropicBilling",
-    handler: scrapeAnthropicBilling,
-    schema: AnthropicBilling,
-  },
-  {
-    handlerName: "chatgpt.scrape_conversation",
-    schemaName: "ChatGPTConversation",
-    handler: scrapeConversation,
-    schema: ChatGPTConversation,
-  },
-  {
-    handlerName: "claude_billing.scrape_claude_billing",
-    schemaName: "ClaudeBilling",
-    handler: scrapeClaudeBilling,
-    schema: ClaudeBilling,
-  },
-  {
-    handlerName: "deepwiki.scrape_search_conversation",
-    schemaName: "DeepWikiSearchConversation",
-    handler: scrapeSearchConversation,
-    schema: DeepWikiSearchConversation,
-  },
-  {
-    handlerName: "deepwiki.scrape_wiki_page",
-    schemaName: "DeepWikiWikiPage",
-    handler: scrapeWikiPage,
-    schema: DeepWikiWikiPage,
-  },
-  {
-    handlerName: "openai_billing.scrape_openai_billing",
-    schemaName: "OpenAIBilling",
-    handler: scrapeOpenAiBilling,
-    schema: OpenAIBilling,
-  },
-  {
-    handlerName: "perplexity_billing.scrape_perplexity_billing",
-    schemaName: "PerplexityBilling",
-    handler: scrapePerplexityBilling,
-    schema: PerplexityBilling,
-  },
-  {
-    handlerName: "x.scrape_article",
-    schemaName: "XArticle",
-    handler: scrapeArticle,
-    schema: XArticle,
-  },
-  {
-    handlerName: "x.scrape_profile",
-    schemaName: "XProfile",
-    handler: scrapeProfile,
-    schema: XProfile,
-  },
-  {
-    handlerName: "x.scrape_timeline",
-    schemaName: "XTimeline",
-    handler: scrapeTimeline,
-    schema: XTimeline,
-  },
-  {
-    handlerName: "x.scrape_tweet",
-    schemaName: "TweetThread",
-    handler: scrapeTweet,
-    schema: TweetThread,
-  },
-] satisfies ContentHandlerRegistration[]) {
-  addContentHandler(registration);
-}
-
-/**
- * Register one trusted in-process TypeScript content handler and its structured schema.
- *
- * Registration is explicit and process-local: configuration and environment variables never load
- * executable modules. The returned function unregisters only this exact registration.
- */
-export function registerContentHandler(registration: ContentHandlerRegistration): () => void {
-  if (!/^[A-Za-z][A-Za-z0-9_.-]{0,199}$/.test(registration.handlerName))
-    throw new PresetConfigError("content handler name is invalid");
-  if (!/^[A-Za-z][A-Za-z0-9_.-]{0,199}$/.test(registration.schemaName))
-    throw new PresetConfigError("content schema name is invalid");
-  if (typeof registration.handler !== "function")
-    throw new PresetConfigError("content handler must be a function");
-  if (
-    typeof registration.schema !== "function" ||
-    !(registration.schema.prototype instanceof ScrapeSchema)
-  )
-    throw new PresetConfigError("content schema must extend ScrapeSchema");
-  if (HANDLERS[registration.handlerName])
-    throw new PresetConfigError(
-      `content handler '${registration.handlerName}' is already registered`,
-    );
-  if (SCHEMAS[registration.schemaName])
-    throw new PresetConfigError(
-      `content schema '${registration.schemaName}' is already registered`,
-    );
-  addContentHandler(registration);
-  let active = true;
-  return () => {
-    if (!active) return;
-    active = false;
-    if (HANDLERS[registration.handlerName] === registration.handler)
-      delete HANDLERS[registration.handlerName];
-    if (SCHEMAS[registration.schemaName] === registration.schema)
-      delete SCHEMAS[registration.schemaName];
-    if (HANDLER_SCHEMAS[registration.handlerName] === registration.schemaName)
-      delete HANDLER_SCHEMAS[registration.handlerName];
-  };
-}
 const COMMON = new Set(["name", "summary", "domain", "mode", "aliases", "browser_profile"]);
 const MODE_FIELDS: Record<PresetMode, Set<string>> = {
   content: new Set(["url_patterns", "handler", "schema"]),
@@ -281,15 +146,18 @@ function problems(data: Record<string, unknown>, label: string): string[] {
   if (mode === "content") {
     if (typeof data.handler !== "string" || !data.handler)
       result.push(`${label}: content mode requires 'handler'`);
-    else if (!HANDLERS[data.handler])
+    else if (!extractorDefinitionForHandler(data.handler))
       result.push(
         `${label}: cannot resolve handler '${data.handler}'; the CLI does not load local executable code (register trusted TypeScript handlers through the package API)`,
       );
     if (typeof data.schema !== "string" || !data.schema)
       result.push(`${label}: content mode requires 'schema'`);
-    else if (!SCHEMAS[data.schema])
+    else if (!extractorDefinitionForSchema(data.schema))
       result.push(`${label}: schema '${data.schema}' is not a ScrapeSchema class`);
-    else if (typeof data.handler === "string" && HANDLER_SCHEMAS[data.handler] !== data.schema)
+    else if (
+      typeof data.handler === "string" &&
+      !resolveExtractorDefinition(data.handler, data.schema)
+    )
       result.push(
         `${label}: handler '${data.handler}' is not registered with schema '${data.schema}'`,
       );
@@ -511,6 +379,13 @@ export function selectPreset(
   return null;
 }
 
+export function resolveContentDefinition(
+  preset: Pick<PresetConfig, "mode" | "handler" | "schema">,
+): ExtractorDefinition | null {
+  if (preset.mode !== "content" || !preset.handler || !preset.schema) return null;
+  return resolveExtractorDefinition(preset.handler, preset.schema);
+}
+
 export function validateContentResult(
   result: unknown,
   preset: PresetConfig,
@@ -527,7 +402,10 @@ export function validateContentResult(
   for (const key of ["full_html", "selected_html", "markdown"])
     if (typeof value[key] !== "string")
       throw new PresetOutputError(`${label} result field '${key}' is not a string`);
-  const expected = preset.schema ? SCHEMAS[preset.schema] : undefined;
+  const definition = resolveContentDefinition(preset);
+  if (preset.mode === "content" && !definition)
+    throw new PresetConfigError(`Preset '${preset.name}' has no resolvable handler`);
+  const expected = definition?.schema;
   if (expected && !(value.structured instanceof expected)) {
     const observed =
       value.structured === null
@@ -557,10 +435,10 @@ export async function scrapeWithPreset(
         browserProfile: options.browserProfile ?? preset.browser_profile,
       };
       if (preset.mode === "content") {
-        const handler = preset.handler ? HANDLERS[preset.handler] : undefined;
-        if (!handler)
+        const definition = resolveContentDefinition(preset);
+        if (!definition)
           throw new PresetConfigError(`Preset '${preset.name}' has no resolvable handler`);
-        return handler(url, resolved);
+        return definition.handler(url, resolved);
       }
       const { scrapeLinks, scrapeNavLinks } = await import("./links");
       const links =
@@ -586,5 +464,5 @@ export async function scrapeWithPreset(
 }
 
 export function schemaNames(): string[] {
-  return Object.keys(SCHEMAS).sort();
+  return extractorSchemaNames();
 }
