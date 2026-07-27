@@ -15,6 +15,7 @@ import {
   PinnedHttpFault,
   type PinnedHttpRequestFactory,
   pinnedHeader,
+  pinnedHeaderValues,
   requestPinnedHttp,
 } from "../src/pinned-http";
 import type { ExtractionEnvelope } from "../src/schemas";
@@ -22,6 +23,7 @@ import type { ExtractionEnvelope } from "../src/schemas";
 interface Script {
   status: number;
   headers?: Record<string, string>;
+  rawHeaders?: string[];
   chunks?: Array<string | Uint8Array>;
   aborted?: boolean;
   afterCallback?: () => void;
@@ -48,6 +50,7 @@ function scriptedFactory(
       const response = stream as unknown as IncomingMessage;
       response.statusCode = script.status;
       response.headers = script.headers ?? {};
+      if (script.rawHeaders !== undefined) response.rawHeaders = script.rawHeaders;
       queueMicrotask(() => {
         callback(response);
         script.afterCallback?.();
@@ -206,6 +209,89 @@ describe("pinned one-hop HTTP", () => {
     expect((captures[0]!.headers as Record<string, string>).host).toBe("origin.test:8443");
   });
 
+  test("preserves raw duplicate field lines and derives fake-message fallback values", async () => {
+    const duplicate = await requestPinnedHttp(
+      {
+        url: new URL("https://origin.test/resource"),
+        address: { address: "8.8.8.8", family: 4 },
+        method: "GET",
+        maxResponseBytes: 10,
+      },
+      {
+        requestFactory: scriptedFactory([
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/markdown, text/plain",
+              "content-encoding": "identity, gzip",
+            },
+            rawHeaders: [
+              "Content-Type",
+              "text/markdown",
+              "CONTENT-TYPE",
+              "text/plain",
+              "Content-Encoding",
+              "identity",
+              "content-encoding",
+              "gzip",
+            ],
+          },
+        ]),
+      },
+    );
+    expect(pinnedHeaderValues(duplicate.pinnedHeaderValues, "Content-Type")).toEqual([
+      "text/markdown",
+      "text/plain",
+    ]);
+    expect(pinnedHeaderValues(duplicate.pinnedHeaderValues, "Content-Encoding")).toEqual([
+      "identity",
+      "gzip",
+    ]);
+
+    const fallback = await requestPinnedHttp(
+      {
+        url: new URL("https://origin.test/resource"),
+        address: { address: "8.8.8.8", family: 4 },
+        method: "GET",
+        maxResponseBytes: 10,
+      },
+      {
+        requestFactory: scriptedFactory([
+          { status: 200, headers: { "X-Test": "stable" }, chunks: ["ok"] },
+        ]),
+      },
+    );
+    expect(fallback.pinnedHeaderValues.get("x-test")).toEqual(["stable"]);
+  });
+
+  test("body policy sees per-line values and discards before length or body limits", async () => {
+    let observedValues: readonly string[] | undefined;
+    const response = await requestPinnedHttp(
+      {
+        url: new URL("https://origin.test/resource"),
+        address: { address: "8.8.8.8", family: 4 },
+        method: "GET",
+        maxResponseBytes: 1,
+        bodyPolicy: (value) => {
+          observedValues = value.pinnedHeaderValues.get("content-type");
+          return "discard";
+        },
+      },
+      {
+        requestFactory: scriptedFactory([
+          {
+            status: 200,
+            headers: { "content-length": "invalid" },
+            rawHeaders: ["Content-Type", "text/plain", "Content-Type", "text/markdown"],
+            chunks: ["far too large"],
+          },
+        ]),
+      },
+    );
+    expect(observedValues).toEqual(["text/plain", "text/markdown"]);
+    expect(response.body.byteLength).toBe(0);
+  });
+
   test("rejects malformed Content-Length and aborted responses with focused faults", async () => {
     const request = (script: Script) =>
       requestPinnedHttp(
@@ -313,7 +399,9 @@ describe("direct Markdown network policy", () => {
       port: 0,
       fetch() {
         requests += 1;
-        return new Response("# Loopback");
+        return new Response("# Loopback", {
+          headers: { "content-type": "text/markdown" },
+        });
       },
     });
     try {
@@ -337,7 +425,7 @@ describe("direct Markdown network policy", () => {
         requests += 1;
         return new URL(request.url).pathname === "/start.md"
           ? new Response(null, { status: 302, headers: { location: "/final.md" } })
-          : new Response("# Final");
+          : new Response("# Final", { headers: { "content-type": "text/markdown" } });
       },
     });
     try {

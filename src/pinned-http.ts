@@ -8,6 +8,7 @@ export const DEFAULT_MAX_HEADER_BYTES = 16_384;
 
 export type PinnedHttpMethod = "GET" | "HEAD";
 export type PinnedHttpHeaders = ReadonlyMap<string, string>;
+export type PinnedHttpHeaderValues = ReadonlyMap<string, readonly string[]>;
 export type PinnedHttpRequestFactory = (
   protocol: "http:" | "https:",
   options: https.RequestOptions,
@@ -38,6 +39,7 @@ export class PinnedHttpFault extends Error {
 export interface PinnedHttpResponseMetadata {
   status: number;
   headers: PinnedHttpHeaders;
+  readonly pinnedHeaderValues: PinnedHttpHeaderValues;
 }
 
 export interface PinnedHttpRequestOptions {
@@ -71,8 +73,35 @@ function stableHeaders(input: http.IncomingHttpHeaders): PinnedHttpHeaders {
   return new Map(entries);
 }
 
+function stableHeaderValues(
+  response: http.IncomingMessage,
+  headers: PinnedHttpHeaders,
+): PinnedHttpHeaderValues {
+  const values = new Map<string, string[]>();
+  if (Array.isArray(response.rawHeaders)) {
+    for (let index = 0; index + 1 < response.rawHeaders.length; index += 2) {
+      const name = response.rawHeaders[index]!.toLowerCase();
+      const existing = values.get(name);
+      if (existing) existing.push(response.rawHeaders[index + 1]!);
+      else values.set(name, [response.rawHeaders[index + 1]!]);
+    }
+  } else {
+    for (const [name, value] of headers) values.set(name, [value]);
+  }
+  return new Map(
+    [...values].map(([name, fieldValues]) => [name, Object.freeze(fieldValues.slice())] as const),
+  );
+}
+
 export function pinnedHeader(headers: PinnedHttpHeaders, name: string): string | null {
   return headers.get(name.toLowerCase()) ?? null;
+}
+
+export function pinnedHeaderValues(
+  headers: PinnedHttpHeaderValues,
+  name: string,
+): readonly string[] | undefined {
+  return headers.get(name.toLowerCase());
 }
 
 function abortReason(signal: AbortSignal): Error {
@@ -113,8 +142,12 @@ export function requestPinnedHttp(
       callback();
     };
     const fail = (error: unknown) => finish(() => reject(error));
-    const complete = (status: number, headers: PinnedHttpHeaders, body: Uint8Array) =>
-      finish(() => resolve({ url: input.url.href, status, headers, body }));
+    const complete = (
+      status: number,
+      headers: PinnedHttpHeaders,
+      pinnedHeaderValues: PinnedHttpHeaderValues,
+      body: Uint8Array,
+    ) => finish(() => resolve({ url: input.url.href, status, headers, pinnedHeaderValues, body }));
     const abort = () => {
       const error = input.signal
         ? abortReason(input.signal)
@@ -151,12 +184,17 @@ export function requestPinnedHttp(
         }
         const status = response.statusCode ?? 0;
         const responseHeaders = stableHeaders(response.headers);
+        const responseHeaderValues = stableHeaderValues(response, responseHeaders);
         const mode =
           input.method === "HEAD" || status < 200 || status >= 300
             ? "discard"
-            : (input.bodyPolicy?.({ status, headers: responseHeaders }) ?? "read");
+            : (input.bodyPolicy?.({
+                status,
+                headers: responseHeaders,
+                pinnedHeaderValues: responseHeaderValues,
+              }) ?? "read");
         if (mode === "discard") {
-          complete(status, responseHeaders, new Uint8Array());
+          complete(status, responseHeaders, responseHeaderValues, new Uint8Array());
           response.destroy();
           return;
         }
@@ -199,7 +237,7 @@ export function requestPinnedHttp(
             body.set(chunk, offset);
             offset += chunk.byteLength;
           }
-          complete(status, responseHeaders, body);
+          complete(status, responseHeaders, responseHeaderValues, body);
         });
         response.once("error", () => fail(new PinnedHttpFault("request_failed")));
         response.once("aborted", () => fail(new PinnedHttpFault("response_aborted")));

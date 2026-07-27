@@ -657,7 +657,10 @@ describe("corpus capture security", () => {
 describe("browser-free and low-level session behavior", () => {
   test("direct Markdown, offline HTML, and invalid requests issue no browser command or close", async () => {
     const value = fixture();
-    const server = Bun.serve({ port: 0, fetch: () => new Response("# Direct") });
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response("# Direct", { headers: { "content-type": "text/markdown" } }),
+    });
     const direct = await fetchMarkdown(`http://127.0.0.1:${server.port}/readme.md`, {
       allowPrivateNetwork: true,
     });

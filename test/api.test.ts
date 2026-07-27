@@ -274,7 +274,10 @@ describe("public TypeScript API", () => {
     expect(envelopeExitCode(JSON.parse(JSON.stringify(denied)) as ExtractionEnvelope)).toBe(1);
   });
   test("direct Markdown envelope retains version 1 and classified limits", async () => {
-    const server = Bun.serve({ port: 0, fetch: () => new Response("12345") });
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response("12345", { headers: { "content-type": "text/markdown" } }),
+    });
     try {
       const envelope = (await fetchMarkdown(`http://127.0.0.1:${server.port}/page.md`, {
         envelope: true,
