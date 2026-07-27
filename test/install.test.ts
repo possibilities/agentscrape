@@ -27,13 +27,8 @@ const suiteTemporary: string[] = [];
 let suiteCheckoutParent = "";
 let suiteProductionTemplate = "";
 let suitePreviousCheckout = "";
-const suiteSnapshotTemplates: Array<{ kind: "current" | "previous"; sha: string; root: string }> =
-  [];
-const suiteFastSnapshotTemplates: Array<{
-  kind: "current" | "previous";
-  sha: string;
-  root: string;
-}> = [];
+const suiteSnapshotTemplates: Array<{ kind: "current"; sha: string; root: string }> = [];
+const suiteFastSnapshotTemplates: Array<{ kind: "current"; sha: string; root: string }> = [];
 
 function configuredAgentbuildsCheckout(): string | null {
   const configured = process.env.AGENTSCRAPE_AGENTBUILDS_ROOT;
@@ -236,14 +231,8 @@ function copyTree(source: string, destination: string): void {
   restoreCopiedDirectoryModes(source, destination);
 }
 
-function preseedSuiteSnapshots(
-  home: string,
-  includePrevious: boolean,
-  fullSnapshots: boolean,
-): void {
-  const templates = (fullSnapshots ? suiteSnapshotTemplates : suiteFastSnapshotTemplates).filter(
-    (template) => template.kind === "current" || includePrevious,
-  );
+function preseedSuiteSnapshots(home: string, fullSnapshots: boolean): void {
+  const templates = fullSnapshots ? suiteSnapshotTemplates : suiteFastSnapshotTemplates;
   if (!templates.length) return;
   const local = join(home, ".local");
   const stateParent = join(local, "state");
@@ -260,7 +249,6 @@ function installEnv(
   overrides: Record<string, string | undefined> = {},
   options: {
     preseedSnapshots?: boolean;
-    preseedPreviousSnapshot?: boolean;
     fastSnapshotVerification?: boolean;
     fullSnapshots?: boolean;
     persistent?: boolean;
@@ -500,8 +488,7 @@ esac
   const preseedSnapshots = options.preseedSnapshots !== false;
   const fullSnapshots =
     options.fullSnapshots === true || options.fastSnapshotVerification === false;
-  if (preseedSnapshots)
-    preseedSuiteSnapshots(home, options.preseedPreviousSnapshot === true, fullSnapshots);
+  if (preseedSnapshots) preseedSuiteSnapshots(home, fullSnapshots);
 
   const env: Record<string, string | undefined> = {
     HOME: home,
@@ -623,6 +610,9 @@ beforeAll(async () => {
     mkdirSync(dirname(destination), { recursive: true });
     cpSync(join(sourceRoot, relative), destination);
   }
+  // The checkout-backed predecessor predates immutable runtime snapshots. Its commit remains an
+  // ancestor of the current fixture, but it deliberately has no runtime helper to authenticate.
+  rmSync(join(checkout, "scripts/runtime-snapshot.ts"));
   const landed = await command(
     [
       "git",
@@ -651,7 +641,7 @@ beforeAll(async () => {
       "--quiet",
       "--allow-empty",
       "-m",
-      "land installer phase fixture",
+      "land helperless checkout predecessor",
     ],
     { cwd: checkout },
   );
@@ -680,6 +670,12 @@ beforeAll(async () => {
   expect(previousRemote.code, previousRemote.stderr).toBe(0);
   suitePreviousCheckout = realpathSync(suitePreviousCheckout);
 
+  cpSync(
+    join(sourceRoot, "scripts/runtime-snapshot.ts"),
+    join(root, "scripts/runtime-snapshot.ts"),
+  );
+  const currentAdd = await command(["git", "-C", root, "add", "scripts/runtime-snapshot.ts"]);
+  expect(currentAdd.code, currentAdd.stderr).toBe(0);
   const currentCommit = await command([
     "git",
     "-C",
@@ -690,9 +686,8 @@ beforeAll(async () => {
     "user.email=agentscrape-test@example.invalid",
     "commit",
     "--quiet",
-    "--allow-empty",
     "-m",
-    "advance current authority beyond legacy fixture",
+    "introduce runtime snapshot helper",
   ]);
   expect(currentCommit.code, currentCommit.stderr).toBe(0);
 
@@ -765,7 +760,7 @@ beforeAll(async () => {
       { cwd: stage },
     );
     expect(prepared.code, prepared.stderr).toBe(0);
-    const kind = name as "current" | "previous";
+    const kind = "current" as const;
     suiteSnapshotTemplates.push({ kind, sha, root: stage });
 
     // Most installer tests deliberately fake the authenticated verifier. They need only the
@@ -795,7 +790,6 @@ beforeAll(async () => {
     suiteFastSnapshotTemplates.push({ kind, sha, root: fastStage });
   };
   await buildSnapshotTemplate(root, "current");
-  await buildSnapshotTemplate(suitePreviousCheckout, "previous");
 });
 
 describe("installer", () => {
@@ -942,34 +936,47 @@ describe("installer", () => {
     ).toContain(join(share, "queue"));
   });
 
-  test("migrates an authorized checkout receipt", async () => {
-    const fixture = installEnv({}, { preseedPreviousSnapshot: true });
-    const prior = await previousCheckout();
-    await seedCheckoutInstallation(fixture, prior);
-    const migrated = await command(["bash", "scripts/install.sh"], { env: fixture.env });
-    expect(migrated.code, migrated.stderr).toBe(0);
-    const state = join(fixture.home, ".local/state/agentscrape");
-    const sha = text(join(state, "deployed-sha")).trim();
-    expect(text(join(state, "install-receipt"))).toContain(
-      `root=${realpathSync(state)}/runtime/${sha}`,
-    );
-  });
-
-  test("migration catchable failure restores normalized snapshot-backed prior state", async () => {
-    const fixture = installEnv({}, { preseedPreviousSnapshot: true, fullSnapshots: true });
+  test("migrates an authorized helperless checkout receipt", async () => {
+    const fixture = installEnv();
     const prior = await previousCheckout();
     await seedCheckoutInstallation(fixture, prior);
     const priorSha = text(join(fixture.home, ".local/state/agentscrape/deployed-sha")).trim();
+    const priorHelper = await command([
+      "git",
+      "-C",
+      prior,
+      "cat-file",
+      "-e",
+      `${priorSha}:scripts/runtime-snapshot.ts`,
+    ]);
+    expect(priorHelper.code).not.toBe(0);
+    const migrated = await command(["bash", "scripts/install.sh"], { env: fixture.env });
+    expect(migrated.code, migrated.stderr).toBe(0);
+    const state = realpathSync(join(fixture.home, ".local/state/agentscrape"));
+    const sha = text(join(state, "deployed-sha")).trim();
+    expect(text(join(state, "install-receipt"))).toContain(`root=${state}/runtime/${sha}`);
+    expect(existsSync(join(state, "runtime", priorSha))).toBeFalse();
+  });
+
+  test("migration catchable failure restores exact checkout-backed prior state", async () => {
+    const fixture = installEnv();
+    const prior = await previousCheckout();
+    await seedCheckoutInstallation(fixture, prior);
+    const state = realpathSync(join(fixture.home, ".local/state/agentscrape"));
+    const commandPath = join(fixture.home, ".local/bin/agentscrape");
+    const service = join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist");
+    const receipt = join(state, "install-receipt");
+    const deployed = join(state, "deployed-sha");
+    const priorSha = text(deployed).trim();
+    const before = [commandPath, service, receipt, deployed].map(text);
     const failed = await command(["bash", "scripts/install.sh"], {
       env: { ...fixture.env, AGENTSCRAPE_INSTALL_TEST_FAILPOINT: "after-command" },
     });
     expect(failed.code).not.toBe(0);
     expect(failed.stderr).toContain("restored previous owned state");
-    const state = realpathSync(join(fixture.home, ".local/state/agentscrape"));
-    expect(text(join(state, "install-receipt"))).toContain(`root=${state}/runtime/${priorSha}`);
-    expect(text(join(fixture.home, ".local/bin/agentscrape"))).toContain(
-      `# source-root: ${state}/runtime/${priorSha}`,
-    );
+    expect([commandPath, service, receipt, deployed].map(text)).toEqual(before);
+    expect(text(receipt)).toContain(`root=${prior}`);
+    expect(existsSync(join(state, "runtime", priorSha))).toBeFalse();
   });
 
   test("refuses malformed, foreign, and interrupted mixed states", async () => {
@@ -1099,10 +1106,32 @@ describe("installer", () => {
     expect(again.code, again.stderr).toBe(0);
   });
 
-  test("uninstalls exact current and legacy checkout receipts but refuses a foreign checkout", async () => {
+  test("helperless checkout uninstall fails closed without changing evidence", async () => {
+    const fixture = installEnv();
+    const prior = await previousCheckout();
+    await seedCheckoutInstallation(fixture, prior);
+    const paths = [
+      join(fixture.home, ".local/bin/agentscrape"),
+      join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist"),
+      join(fixture.home, ".local/state/agentscrape/install-receipt"),
+      join(fixture.home, ".local/state/agentscrape/deployed-sha"),
+    ];
+    const before = paths.map(text);
+    cpSync(join(root, "scripts/install.sh"), join(prior, "scripts/install.sh"));
+    chmodSync(join(prior, "scripts/install.sh"), 0o755);
+    const refused = await command(["bash", join(prior, "scripts/install.sh"), "--uninstall"], {
+      cwd: prior,
+      env: fixture.env,
+    });
+    expect(refused.code).not.toBe(0);
+    expect(refused.stderr).toContain("helper is outside current Git authority");
+    expect(paths.map(text)).toEqual(before);
+  });
+
+  test("uninstalls helper-bearing current and legacy checkout receipts", async () => {
     for (const format of ["current", "legacy"] as const) {
       const fixture = installEnv();
-      const prior = await previousCheckout();
+      const prior = await committedPhaseCheckout();
       await seedCheckoutInstallation(fixture, prior, format);
       const receipt = join(fixture.home, ".local/state/agentscrape/install-receipt");
       expect(text(receipt).trimEnd().split("\n")).toHaveLength(format === "current" ? 12 : 8);

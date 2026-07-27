@@ -74,7 +74,6 @@ PREINSTALL_STATE=""
 PREVIOUS_SERVICE_LOADED=0
 ROLLBACK_ENABLED=0
 DEPLOYMENT_PUBLISHED=0
-MIGRATION_NORMALIZED=0
 UNINSTALL_ROLLBACK=0
 UNINSTALL_WAS_LOADED=0
 UNINSTALL_TREE=""
@@ -449,13 +448,23 @@ load_receipt() {
   fi
 }
 
+resolve_commit_tree() {
+  local authority="$1" sha="$2" commit type tree
+  [[ "$sha" =~ ^[0-9a-f]{40}$ && -d "$authority" && ! -L "$authority" &&
+    "$(git -C "$authority" rev-parse --show-toplevel 2>/dev/null)" == "$authority" ]] || return 1
+  commit="$(git -C "$authority" rev-parse --verify "$sha^{commit}" 2>/dev/null)" || return 1
+  type="$(git -C "$authority" cat-file -t "$sha" 2>/dev/null)" || return 1
+  tree="$(git -C "$authority" rev-parse --verify "$sha^{tree}" 2>/dev/null)" || return 1
+  [[ "$commit" == "$sha" && "$type" == commit && "$tree" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$tree"
+}
+
 resolve_git_tree() {
   local authority="$1" sha="$2" tree entry mode type object path
-  [[ -d "$authority" && ! -L "$authority" && "$(git -C "$authority" rev-parse --show-toplevel 2>/dev/null)" == "$authority" ]] || return 1
-  tree="$(git -C "$authority" rev-parse --verify "$sha^{tree}" 2>/dev/null)" || return 1
+  tree="$(resolve_commit_tree "$authority" "$sha")" || return 1
   entry="$(git -C "$authority" ls-tree "$sha" -- scripts/runtime-snapshot.ts 2>/dev/null)" || return 1
   mode="${entry%% *}"; entry="${entry#* }"; type="${entry%% *}"; entry="${entry#* }"; object="${entry%%$'\t'*}"; path="${entry#*$'\t'}"
-  [[ "$tree" =~ ^[0-9a-f]{40}$ && ( "$mode" == 100644 || "$mode" == 100755 ) && "$type" == blob &&
+  [[ ( "$mode" == 100644 || "$mode" == 100755 ) && "$type" == blob &&
     "$object" =~ ^[0-9a-f]{40}$ && "$path" == scripts/runtime-snapshot.ts ]] || return 1
   printf '%s\n' "$tree"
 }
@@ -572,11 +581,9 @@ prepare_snapshot() {
 receipt_is_authorized() {
   local tree
   if [[ "$RECEIPT_KIND" == snapshot ]]; then verify_snapshot "$RECEIPT_ROOT" "$RECEIPT_SHA" "$RECEIPT_BUN"; return; fi
-  tree="$(resolve_git_tree "$ROOT_DIR" "$RECEIPT_SHA")" || return 1
-  [[ -f "$RECEIPT_BUN" && -x "$RECEIPT_BUN" ]] || return 1
-  if [[ -d "$RECEIPT_ROOT" && ! -L "$RECEIPT_ROOT" ]]; then
-    [[ "$(resolve_git_tree "$RECEIPT_ROOT" "$RECEIPT_SHA" 2>/dev/null)" == "$tree" ]] || return 1
-  fi
+  tree="$(resolve_commit_tree "$ROOT_DIR" "$RECEIPT_SHA")" || return 1
+  [[ -f "$RECEIPT_BUN" && -x "$RECEIPT_BUN" && -d "$RECEIPT_ROOT" && ! -L "$RECEIPT_ROOT" ]] || return 1
+  [[ "$(resolve_commit_tree "$RECEIPT_ROOT" "$RECEIPT_SHA" 2>/dev/null)" == "$tree" ]] || return 1
 }
 
 receipt_command_matches() { wrapper_matches_values "$COMMAND_PATH" "$RECEIPT_ROOT" "$RECEIPT_SHA" "$RECEIPT_BUN" "$RECEIPT_SOURCE" "$RECEIPT_SHARE"; }
@@ -722,21 +729,10 @@ publish_file() {
 }
 
 prepare_prior_snapshot_and_backups() {
-  local prior_tree="$DEPLOYED_TREE" prior_root prior_template
   if (( ! RECEIPT_PRESENT )); then return; fi
-  if [[ "$RECEIPT_KIND" == checkout ]]; then
-    prior_tree="$(resolve_git_tree "$ROOT_DIR" "$RECEIPT_SHA")" || fail "prior helper is absent from current Git authority"
-    prepare_snapshot "$RECEIPT_SHA" "$prior_tree" "$RECEIPT_BUN"
-    prior_root="$RUNTIME_DIR/$RECEIPT_SHA"; prior_template="$prior_root/plist/$LABEL.plist"
-    render_wrapper "$prior_root" "$RECEIPT_SHA" "$RECEIPT_BUN" "$prior_root/src/cli.ts" "$RECEIPT_SHARE" >"$COMMAND_BACKUP"
-    render_plist "$prior_template" "$RECEIPT_COMMAND" "$RECEIPT_SERVICE_PATH" "$RECEIPT_QUEUE" "$RECEIPT_LOG" >"$SERVICE_BACKUP"
-    render_receipt "$prior_root" "$prior_root/src/cli.ts" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SERVICE" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_LOG" "$RECEIPT_SERVICE_PATH" "$RECEIPT_SHA" >"$RECEIPT_BACKUP"
-    chmod 755 "$COMMAND_BACKUP"; chmod 600 "$SERVICE_BACKUP" "$RECEIPT_BACKUP"
-    fsync_path file "$COMMAND_BACKUP"; fsync_path file "$SERVICE_BACKUP"; fsync_path file "$RECEIPT_BACKUP"
-    MIGRATION_NORMALIZED=1
-  else
-    make_backup "$COMMAND_PATH" "$COMMAND_BACKUP"; make_backup "$SERVICE_DEST" "$SERVICE_BACKUP"; make_backup "$RECEIPT_PATH" "$RECEIPT_BACKUP"
-  fi
+  make_backup "$COMMAND_PATH" "$COMMAND_BACKUP"
+  make_backup "$SERVICE_DEST" "$SERVICE_BACKUP"
+  make_backup "$RECEIPT_PATH" "$RECEIPT_BACKUP"
   make_backup "$DEPLOYED_SHA_PATH" "$DEPLOYED_BACKUP"
 }
 
@@ -761,9 +757,9 @@ rollback_install() {
     inspect_service
     [[ "$LOADED_SERVICE_STATE" != owned ]] || "$LAUNCHCTL_BIN" bootout "$SERVICE_TARGET" >/dev/null 2>&1 || ok=0
     restore_one "$DEPLOYED_BACKUP" "$DEPLOYED_SHA_PATH" "$DEPLOYED_CHANGED" 600 || ok=0
-    restore_one "$RECEIPT_BACKUP" "$RECEIPT_PATH" "$((RECEIPT_CHANGED || MIGRATION_NORMALIZED))" 600 || ok=0
-    restore_one "$SERVICE_BACKUP" "$SERVICE_DEST" "$((SERVICE_CHANGED || MIGRATION_NORMALIZED))" 600 || ok=0
-    restore_one "$COMMAND_BACKUP" "$COMMAND_PATH" "$((COMMAND_CHANGED || MIGRATION_NORMALIZED))" 755 || ok=0
+    restore_one "$RECEIPT_BACKUP" "$RECEIPT_PATH" "$RECEIPT_CHANGED" 600 || ok=0
+    restore_one "$SERVICE_BACKUP" "$SERVICE_DEST" "$SERVICE_CHANGED" 600 || ok=0
+    restore_one "$COMMAND_BACKUP" "$COMMAND_PATH" "$COMMAND_CHANGED" 755 || ok=0
     fsync_path directory "$STATE_DIR" || ok=0; fsync_path directory "$LAUNCH_AGENTS_DIR" || ok=0; fsync_path directory "$BIN_DIR" || ok=0
     if (( PREVIOUS_SERVICE_LOADED )); then "$LAUNCHCTL_BIN" bootstrap "$DOMAIN" "$SERVICE_DEST" >/dev/null 2>&1 || ok=0; fi
     (( ok )) && printf 'agentscrape-install: restored previous owned state after failure\n' >&2 || printf 'agentscrape-install: rollback incomplete; manual cleanup required\n' >&2
