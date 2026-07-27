@@ -36,22 +36,25 @@ esac
 if [[ "${1-}" == "--" ]]; then
   shift
 fi
-test_args=("$@")
+has_test_args=0
+test_args=()
 
 script_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(CDPATH='' cd -- "$script_dir/.." && pwd -P)"
 cd -- "$repo_root"
 
 # Bun treats non-test-named fixture paths as filters unless an explicit relative path starts `./`.
-normalized_test_args=()
-for argument in "${test_args[@]}"; do
-  if [[ "$argument" != -* && "$argument" != /* && "$argument" != ./* && -f "$argument" ]]; then
-    normalized_test_args+=("./$argument")
-  else
-    normalized_test_args+=("$argument")
-  fi
-done
-test_args=("${normalized_test_args[@]}")
+# Guard empty array expansion for the Bash 3.2 still shipped by macOS.
+if (( $# > 0 )); then
+  has_test_args=1
+  for argument in "$@"; do
+    if [[ "$argument" != -* && "$argument" != /* && "$argument" != ./* && -f "$argument" ]]; then
+      test_args+=("./$argument")
+    else
+      test_args+=("$argument")
+    fi
+  done
+fi
 
 original_umask="$(umask)"
 umask 077
@@ -91,7 +94,11 @@ export HOME="$private_home"
 export PATH="$repo_root/node_modules/.bin:${PATH:-/usr/bin:/bin}"
 
 run_tests() {
-  bun test --parallel=1 --max-concurrency=1 --timeout 60000 "${test_args[@]}"
+  if (( has_test_args )); then
+    bun test --parallel=1 --max-concurrency=1 --timeout 60000 "${test_args[@]}"
+  else
+    bun test --parallel=1 --max-concurrency=1 --timeout 60000
+  fi
 }
 
 case "$mode" in
