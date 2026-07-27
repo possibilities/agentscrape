@@ -644,6 +644,12 @@ describe("CLI offline smoke suite", () => {
         "at most 100",
       ],
       [["reconcile-queue", "--limit", "0"], "at least 1"],
+      [
+        ["discover-feed", "--source-url", "https://blog.example.com/feed.xml", "--format", "human"],
+        "--format must be json or yaml",
+      ],
+      [["check-presets", "--format", "human"], "--format must be json or yaml"],
+      [["reconcile-queue", "--format", "human"], "--format must be json or yaml"],
       [["list-presets", "--format", "xml"], "--format"],
     ];
     for (const [argv, message] of cases) {
@@ -671,8 +677,17 @@ describe("CLI offline smoke suite", () => {
     const rootJson = (await command(["--help-json"])).stdout;
     const linksJson = (await command(["fetch-links", "--help-json"])).stdout;
     const feedJson = JSON.parse((await command(["discover-feed", "--help-json"])).stdout);
-    expect(() => JSON.parse(rootJson)).not.toThrow();
+    const rootHelp = JSON.parse(rootJson);
     expect(() => JSON.parse(linksJson)).not.toThrow();
+    expect(rootHelp.arguments.map((argument: any) => argument.name)).toEqual([
+      "--format",
+      "--help",
+      "--version",
+      "--help-json",
+      "--agent-help",
+      "--agent-teaser",
+    ]);
+    expect(rootHelp.commands).toHaveLength(14);
     expect(feedJson.arguments.find((argument: any) => argument.name === "file")).toMatchObject({
       positional: true,
       required: false,
@@ -680,6 +695,11 @@ describe("CLI offline smoke suite", () => {
     expect(
       feedJson.arguments.find((argument: any) => argument.name === "--source-url"),
     ).toMatchObject({ required: true });
+    expect(feedJson.arguments.find((argument: any) => argument.name === "--page")).toMatchObject({
+      type: "text",
+      value_count: 2,
+      repeatable: true,
+    });
     expect((await command(["discover-feed", "--help"])).stdout).toContain(
       "discover-feed [FILE] --source-url URL",
     );
@@ -700,6 +720,13 @@ describe("CLI offline smoke suite", () => {
     expect(
       markdownJson.arguments.find((argument: any) => argument.name === "--retain-artifacts"),
     ).toMatchObject({ type: "flag", required: false });
+    expect(
+      markdownJson.arguments.find((argument: any) => argument.name === "--media"),
+    ).toMatchObject({ type: "text", choices: ["light", "dark"] });
+    for (const name of ["--json", "--yaml", "--markdown", "--generic", "--envelope"])
+      expect(markdownJson.arguments.find((argument: any) => argument.name === name)).toMatchObject({
+        type: "flag",
+      });
     const captureHelp = (await command(["capture-corpus", "--help"])).stdout;
     const canaryHelp = (await command(["check-presets", "--help"])).stdout;
     expect(captureHelp).toContain("--allow-private-network");
@@ -723,6 +750,34 @@ describe("CLI offline smoke suite", () => {
       "--allow-private-network",
     ])
       expect(linksHelp).toContain(option);
+  });
+
+  test("hidden help path stays compatible, invisible, and side-effect free", async () => {
+    const rootHelp = await command(["help"]);
+    expect(rootHelp).toEqual(await command(["--help"]));
+
+    const targetHelp = await command(["help", "fetch-markdown"]);
+    expect(targetHelp).toEqual(await command(["fetch-markdown", "--help"]));
+    expect(targetHelp.code).toBe(0);
+    expect(targetHelp.stderr).toBe("");
+
+    const hiddenHelp = await command(["help", "--help"]);
+    expect(hiddenHelp.code).toBe(0);
+    expect(hiddenHelp.stdout).toStartWith("Usage: agentscrape help [COMMAND] [OPTIONS]");
+    const hiddenJson = JSON.parse((await command(["help", "--help-json"])).stdout);
+    expect(hiddenJson).toMatchObject({ name: "help" });
+
+    const rootJson = JSON.parse((await command(["--help-json"])).stdout);
+    expect(rootJson.commands.some((item: any) => item.name === "help")).toBeFalse();
+    for (const argv of [
+      ["help", "not-a-command"],
+      ["help", "fetch-links", "extra"],
+    ]) {
+      const result = await command(argv);
+      expect(result.code).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(argv.length > 2 ? "at most one command" : "unknown command");
+    }
   });
 
   test("recursive conversion skips symlinks and never clobbers destinations", async () => {
