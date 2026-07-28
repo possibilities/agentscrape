@@ -24,6 +24,7 @@ import {
   implementationHint,
   validateEnvelopeRequest,
   validateProviderFinalUrl,
+  validateRequestUrl,
 } from "./envelope";
 import {
   AgentscrapeArtifactError,
@@ -605,6 +606,14 @@ export async function fetchLinks(
   url: string,
   options: FetchLinksOptions = {},
 ): Promise<ScrapeResult<LinkList>> {
+  let requested: string;
+  try {
+    requested = validateRequestUrl(url);
+  } catch (error) {
+    if (error instanceof EnvelopeBuildError && error.failureClass === "invalid_request")
+      throw sanitizeErrorInPlace(new AgentscrapeUsageError(error.message));
+    throw sanitizeErrorInPlace(error);
+  }
   try {
     return await withBrowserArtifactRetention(false, () =>
       withBrowserNetworkPolicy(options.allowPrivateNetwork, () =>
@@ -651,7 +660,7 @@ export async function fetchLinks(
           const preset = options.preset
             ? registry.byName(options.preset)
             : !hasCallerSelector
-              ? matchPreset(url, registry.presets)
+              ? matchPreset(requested, registry.presets)
               : null;
           if (options.preset && !preset)
             throw new AgentscrapeUsageError(`preset '${options.preset}' not found`);
@@ -679,12 +688,12 @@ export async function fetchLinks(
           }
           result = await withBrowserSignal(options.signal, () =>
             withBrowserProfile(options.browserProfile ?? preset?.browser_profile, async () => {
-              if (preset) return scrapeWithPreset(url, preset, options);
+              if (preset) return scrapeWithPreset(requested, preset, options);
               let links: LinkItem[];
               try {
                 if (options.sectionSelector && options.categorySelector)
                   links = await scrapeNavLinks(
-                    url,
+                    requested,
                     options.sectionSelector,
                     options.categorySelector,
                     options.toggleSelector ?? undefined,
@@ -692,7 +701,7 @@ export async function fetchLinks(
                   );
                 else if (options.sectionSelector || options.categorySelector)
                   links = await scrapeLinks(
-                    url,
+                    requested,
                     options.sectionSelector ?? options.categorySelector!,
                     options.toggleSelector ?? undefined,
                     options,

@@ -176,7 +176,9 @@ Feed date parsing uses one closed, timezone-independent policy for feed entries,
 
 ## Routing and preset safety
 
-Routing policy is resolved before any provider dispatch, network fetch, or browser navigation. The system validates the URL and parameters first, then determines a single execution route:
+The high-level public `fetchMarkdown`, `fetchLinks`, and `captureCorpus` APIs and their `fetch-markdown`, `fetch-links`, and `capture-corpus` CLI commands validate the request URL before preset selection, provider dispatch, network fetch, or browser navigation. Trusted low-level `scrapeWithPreset` calls remain outside this request-routing authority.
+
+For `fetchMarkdown`, routing then selects one execution path:
 
 1. Explicit `--preset` wins (with name-based selection, not URL pattern validation)
 2. `--generic` forces browser fallback (conflicts with `--preset`)

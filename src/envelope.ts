@@ -63,11 +63,7 @@ function safeUrl(value: unknown): string {
   }
 }
 
-export function validateEnvelopeRequest(
-  url: unknown,
-  maxContentBytes: unknown,
-  maxRelations: unknown,
-): string {
+export function validateRequestUrl(url: unknown): string {
   if (typeof url !== "string" || !url)
     throw new EnvelopeBuildError("invalid_request", "URL must be a non-empty string");
   if (new TextEncoder().encode(url).byteLength > 4096)
@@ -77,11 +73,20 @@ export function validateEnvelopeRequest(
       "invalid_request",
       "URL must be an absolute HTTP or HTTPS URL without credentials or embedded secrets",
     );
+  return url;
+}
+
+export function validateEnvelopeRequest(
+  url: unknown,
+  maxContentBytes: unknown,
+  maxRelations: unknown,
+): string {
+  const requested = validateRequestUrl(url);
   if (!Number.isInteger(maxContentBytes) || (maxContentBytes as number) < 1)
     throw new EnvelopeBuildError("invalid_request", "max content bytes must be a positive integer");
   if (!Number.isInteger(maxRelations) || (maxRelations as number) < 0)
     throw new EnvelopeBuildError("invalid_request", "max relations must be a non-negative integer");
-  return url;
+  return requested;
 }
 
 export function validateProviderFinalUrl(value: unknown): string | null {

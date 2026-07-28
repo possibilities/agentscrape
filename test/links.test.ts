@@ -120,7 +120,26 @@ describe("link extraction parity", () => {
     expect(runAgentBrowser).not.toHaveBeenCalled();
   });
 
-  test("allows XTimeline links and timeline options through definition capabilities", async () => {
+  test("rejects unsafe request identities before browser effects, including injected HTML", async () => {
+    const html = readFileSync(join(import.meta.dir, "fixtures/x-timeline.html"), "utf8");
+    for (const invalid of [
+      "not a URL",
+      "file:///tmp/timeline.html",
+      "https://user:password@x.com/testuser",
+      "https://x.com/testuser?next=https%3A%2F%2Fother.example%2F%3Fapi_key%3Dnested-secret",
+      `https://x.com/testuser#${"a".repeat(4090)}`,
+      42,
+    ]) {
+      await expect(
+        fetchLinks(invalid as string, { preset: "x-timeline", html, session: "direct" }),
+      ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    }
+    expect(openPage).not.toHaveBeenCalled();
+    expect(runAgentBrowser).not.toHaveBeenCalled();
+  });
+
+  test("keeps an explicit preset name-based on a valid nonmatching URL", async () => {
+    // x-timeline deliberately declares no automatic URL patterns.
     const result = await fetchLinks("https://x.com/testuser", {
       preset: "x-timeline",
       html: readFileSync(join(import.meta.dir, "fixtures/x-timeline.html"), "utf8"),

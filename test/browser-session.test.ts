@@ -614,28 +614,24 @@ describe("browser network consent", () => {
 });
 
 describe("corpus capture security", () => {
-  test("captured failure metadata is redacted and sample paths are private", async () => {
+  test("captured failure metadata is safe and sample paths are private", async () => {
     const value = fixture();
     const root = join(value.root, "captured-corpus");
-    const sample = await captureCorpus(
-      "https://x.com/example/status/1?token=CORPUS-URL-SECRET#fragment-secret",
-      {
-        preset: "x-tweet",
-        expectFailure: "AgentscrapeError",
-        root,
-        allowPrivateNetwork: true,
-      },
-    );
+    const sample = await captureCorpus("https://x.com/example/status/1?page=1#fragment", {
+      preset: "x-tweet",
+      expectFailure: "AgentscrapeError",
+      root,
+      allowPrivateNetwork: true,
+    });
     expect(lstatSync(sample).mode & 0o077).toBe(0);
     for (const name of ["meta.yaml", "page.html"]) {
       expect(existsSync(join(sample, name))).toBeTrue();
       expect(lstatSync(join(sample, name)).mode & 0o077).toBe(0);
     }
     const text = readFileSync(join(sample, "meta.yaml"), "utf8");
-    expect(text).not.toContain("CORPUS-URL-SECRET");
-    expect(text).not.toContain("fragment-secret");
+    expect(text).not.toContain("#fragment");
     expect(parseYaml(text)).toMatchObject({
-      url: "https://x.com/example/status/1?token=%5BREDACTED%5D",
+      url: "https://x.com/example/status/1?page=1",
       failure: { type: "AgentscrapeError" },
     });
   });
@@ -673,6 +669,38 @@ describe("browser-free and low-level session behavior", () => {
       }),
     ).rejects.toThrow();
     await expect(fetchMarkdown("not a URL")).rejects.toThrow();
+    expect(events(value)).toEqual([]);
+  });
+
+  test("public link and corpus routes reject invalid URLs before sessions or publication", async () => {
+    const value = fixture();
+    const root = join(value.root, "invalid-corpus");
+    const invalidUrls = [
+      "not a URL",
+      "file:///tmp/page.html",
+      "https://user:password@example.com/page",
+      "https://example.com/page?next=https%3A%2F%2Fother.example%2F%3Fapi_key%3Dnested-secret",
+      `https://example.com/${"a".repeat(4090)}`,
+      42,
+    ];
+    for (const invalid of invalidUrls) {
+      await expect(
+        fetchLinks(invalid as string, {
+          preset: "x-timeline",
+          html: "<main>injected</main>",
+          allowPrivateNetwork: true,
+        }),
+      ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+      await expect(
+        captureCorpus(invalid as string, {
+          preset: "x-tweet",
+          expectFailure: "AgentscrapeError",
+          root,
+          allowPrivateNetwork: true,
+        }),
+      ).rejects.toBeInstanceOf(AgentscrapeUsageError);
+    }
+    expect(existsSync(root)).toBeFalse();
     expect(events(value)).toEqual([]);
   });
 
