@@ -111,7 +111,9 @@ async function command(
 const phaseFiles = [
   "scripts/install.sh",
   "scripts/runtime-snapshot.ts",
+  "src/api.ts",
   "src/corpus.ts",
+  "src/envelope.ts",
   "test/install.test.ts",
   "test/corpus.test.ts",
   "test/core.test.ts",

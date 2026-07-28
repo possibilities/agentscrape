@@ -30,12 +30,14 @@ import {
   runAgentBrowser,
   withBrowserNetworkPolicy,
 } from "./browser";
+import { EnvelopeBuildError, validateRequestUrl } from "./envelope";
 import {
   AgentscrapeAuthError,
   AgentscrapeError,
   AgentscrapeNetworkPolicyError,
   AgentscrapeRuntimeError,
   AgentscrapeUpstreamDownError,
+  AgentscrapeUsageError,
   AgentscrapeValueError,
   cancellationError,
   PresetConfigError,
@@ -48,7 +50,7 @@ import type { ScrapeResult } from "./handlers/types";
 import { offlineExtractLinks } from "./links";
 import { loadRegistry, matchPreset, type PresetConfig, scrapeWithPreset } from "./presets";
 import { resolveDataHome } from "./queue-paths";
-import { redactDiagnostic, redactUrl } from "./redaction";
+import { redactDiagnostic, redactUrl, sanitizeErrorInPlace } from "./redaction";
 import { type LinkItem, LinkList } from "./schemas";
 
 export const CORPUS_VERSION = 1;
@@ -914,6 +916,14 @@ export async function captureCorpus(
     allowPrivateNetwork?: boolean | undefined;
   } = {},
 ): Promise<string> {
+  let requested: string;
+  try {
+    requested = validateRequestUrl(url);
+  } catch (error) {
+    if (error instanceof EnvelopeBuildError && error.failureClass === "invalid_request")
+      throw sanitizeErrorInPlace(new AgentscrapeUsageError(error.message));
+    throw sanitizeErrorInPlace(error);
+  }
   return withBrowserNetworkPolicy(options.allowPrivateNetwork, async () => {
     if (options.expectFailure && !FAILURE_TYPES[options.expectFailure])
       throw new Error(
@@ -922,7 +932,7 @@ export async function captureCorpus(
     const registry = loadRegistry();
     const preset = options.preset
       ? registry.byName(options.preset)
-      : matchPreset(url, registry.presets);
+      : matchPreset(requested, registry.presets);
     if (!preset)
       throw new Error(
         options.preset
@@ -939,7 +949,7 @@ export async function captureCorpus(
     let rendered = "";
     try {
       throwIfAborted(options.signal);
-      result = await scrapeWithPreset(url, preset, { session, signal: options.signal });
+      result = await scrapeWithPreset(requested, preset, { session, signal: options.signal });
     } catch (error) {
       if (error instanceof AgentscrapeNetworkPolicyError) throw error;
       outcome = error;
@@ -967,7 +977,7 @@ export async function captureCorpus(
         version: 1,
         preset: preset.name,
         mode: preset.mode,
-        url: redactUrl(url),
+        url: redactUrl(requested),
         expect: "failure",
         failure: {
           type: options.expectFailure,
@@ -993,7 +1003,7 @@ export async function captureCorpus(
       version: 1,
       preset: preset.name,
       mode: preset.mode,
-      url: redactUrl(url),
+      url: redactUrl(requested),
       expect: "success",
       structured: plain(result.structured),
     };

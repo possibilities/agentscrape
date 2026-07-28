@@ -7,6 +7,7 @@ import {
   classifyFailure,
   EnvelopeBuildError,
   validateEnvelopeRequest,
+  validateRequestUrl,
 } from "../src/envelope";
 import {
   AgentscrapeAuthError,
@@ -88,12 +89,38 @@ describe("version 1 extraction envelope", () => {
     expect(envelope.extractor.name).toBe("agentscrape");
     expect(envelope.extractor.version).toBe(AGENTSCRAPE_VERSION);
   });
-  test("rejects invalid URL and bound requests", () => {
-    expect(() => validateEnvelopeRequest("file:///tmp/a", 100, 1)).toThrow("HTTP");
-    expect(() => validateEnvelopeRequest("https://user:pw@example.com", 100, 1)).toThrow(
-      "without credentials",
-    );
-    expect(() => validateEnvelopeRequest("https://example.com", 0, 1)).toThrow("positive integer");
+  test("shares exact URL validation while retaining envelope numeric checks and order", () => {
+    const valid = "https://example.com/%E2%98%83?q=kept#fragment";
+    expect(validateRequestUrl(valid)).toBe(valid);
+    expect(validateEnvelopeRequest(valid, 100, 1)).toBe(valid);
+    for (const invalid of [
+      "",
+      "not a URL",
+      "file:///tmp/a",
+      "https://user:pw@example.com",
+      "https://example.com/page?next=https%3A%2F%2Fother.example%2F%3Fapi_key%3Dnested-secret",
+      `https://example.com/${"a".repeat(4090)}`,
+      42,
+    ]) {
+      let direct: unknown;
+      let envelope: unknown;
+      try {
+        validateRequestUrl(invalid);
+      } catch (error) {
+        direct = error;
+      }
+      try {
+        validateEnvelopeRequest(invalid, 0, -1);
+      } catch (error) {
+        envelope = error;
+      }
+      expect(direct).toBeInstanceOf(EnvelopeBuildError);
+      expect((direct as EnvelopeBuildError).failureClass).toBe("invalid_request");
+      expect(envelope).toBeInstanceOf(EnvelopeBuildError);
+      expect((envelope as EnvelopeBuildError).failureClass).toBe("invalid_request");
+      expect((envelope as Error).message).toBe((direct as Error).message);
+    }
+    expect(() => validateEnvelopeRequest("https://example.com", 0, -1)).toThrow("positive integer");
     expect(() => validateEnvelopeRequest("https://example.com", 1, -1)).toThrow("non-negative");
   });
   test("enforces content and relation limits", () => {
