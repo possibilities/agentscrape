@@ -422,11 +422,12 @@ export async function runAgentBrowser(
   } catch (error) {
     throwIfAborted(selectedSignal);
     const value = asError(error);
-    const missingExecutable = /not found on PATH|ENOENT|no such file/i.test(value.message);
-    throw new AgentscrapeBrowserError(
-      `Failed to run agent-browser: ${value.message}`,
-      !missingExecutable,
-    );
+    // A missing agent-browser executable is absent extraction infrastructure, not a
+    // browser/page failure: report it as an unavailable dependency so queue owners
+    // can keep the request retryable until the dependency is installed.
+    if (/not found on PATH|ENOENT|no such file/i.test(value.message))
+      throw new AgentscrapeUpstreamDownError(`Failed to run agent-browser: ${value.message}`);
+    throw new AgentscrapeBrowserError(`Failed to run agent-browser: ${value.message}`);
   }
   throwIfAborted(selectedSignal);
   if (result.exitCode === 0) outageCache.delete(key);
@@ -738,8 +739,9 @@ export async function closeSession(session?: string | null, signal?: AbortSignal
     );
   } catch (error) {
     throwIfAborted(signal);
-    const missingExecutable = /not found on PATH|ENOENT|no such file/i.test(asError(error).message);
-    throw new AgentscrapeBrowserError("Failed to close browser session", !missingExecutable);
+    if (/not found on PATH|ENOENT|no such file/i.test(asError(error).message))
+      throw new AgentscrapeUpstreamDownError("Failed to close browser session");
+    throw new AgentscrapeBrowserError("Failed to close browser session");
   }
   throwIfAborted(signal);
   requireAgentBrowserSuccess(result, "Failed to close browser session");

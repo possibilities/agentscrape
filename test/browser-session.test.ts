@@ -31,6 +31,7 @@ import {
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
   AgentscrapeNetworkPolicyError,
+  AgentscrapeUpstreamDownError,
   AgentscrapeUsageError,
 } from "../src/errors";
 import { loadRegistry, scrapeWithPreset } from "../src/presets";
@@ -470,7 +471,7 @@ describe("strict browser session close", () => {
     expect(events(value)).toEqual([{ session: "successful-close", command: ["close"] }]);
   });
 
-  test("pre-cancellation wins and a missing executable is nonretryable", async () => {
+  test("pre-cancellation wins and a missing executable is an unavailable dependency", async () => {
     const value = fixture();
     const missing = join(value.root, "missing-agent-browser");
     process.env[AGENT_BROWSER_BIN_ENV] = missing;
@@ -487,8 +488,7 @@ describe("strict browser session close", () => {
     } catch (error) {
       observed = error;
     }
-    expect(observed).toBeInstanceOf(AgentscrapeBrowserError);
-    expect((observed as AgentscrapeBrowserError).retryable).toBeFalse();
+    expect(observed).toBeInstanceOf(AgentscrapeUpstreamDownError);
     expect((observed as Error).message).toBe("Failed to close browser session");
     expect((observed as Error).message).not.toContain(missing);
     expect(events(value)).toEqual([]);
