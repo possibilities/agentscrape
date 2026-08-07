@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
+import { join } from "node:path";
 import {
   AgentscrapeHttpError,
   AgentscrapeProviderError,
@@ -80,6 +82,45 @@ async function expectFixedProviderFailure(
 const markdownMimeFailure =
   "direct Markdown response did not provide an admissible Markdown Content-Type";
 const encodingFailure = "direct Markdown response used an unsupported content encoding";
+
+const PDF_BYTES = readFileSync(join(import.meta.dir, "fixtures", "pdf-probe.pdf"));
+
+describe("PDF extraction", () => {
+  test("a .pdf path extracts text through pdftotext", async () => {
+    const server = await rawServer(() => ({
+      headers: ["Content-Type: application/pdf"],
+      body: PDF_BYTES,
+    }));
+    try {
+      const envelope = (await fetchMarkdown(server.url("/paper.pdf"), {
+        envelope: true,
+        allowPrivateNetwork: true,
+      })) as ExtractionEnvelope;
+      expect(envelope.status).toBe("success");
+      expect(envelope.extractor.implementation).toBe("pdf");
+      expect(envelope.artifacts[0]?.content).toContain("Agentscrape PDF probe");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("a PDF served as text is refused rather than decoded as prose", async () => {
+    const server = await rawServer(() => ({
+      headers: ["Content-Type: text/plain"],
+      body: PDF_BYTES,
+    }));
+    try {
+      const envelope = (await fetchMarkdown(server.url("/paper.pdf"), {
+        envelope: true,
+        allowPrivateNetwork: true,
+      })) as ExtractionEnvelope;
+      expect(envelope.status).toBe("failure");
+      expect(envelope.failure?.failure_class).toBe("provider_error");
+    } finally {
+      await server.stop();
+    }
+  });
+});
 
 describe("direct Markdown MIME admission", () => {
   test("accepts exact Markdown media types, strict parameters, and empty bodies", async () => {

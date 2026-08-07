@@ -1,4 +1,6 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { prepareHtmlSidecars, writePreparedTextArtifacts } from "./artifacts";
@@ -77,6 +79,7 @@ import {
 } from "./presets";
 import { resolveQueuePaths } from "./queue-paths";
 import { sanitizeErrorInPlace } from "./redaction";
+import { findExecutable, runProcess } from "./subprocess";
 
 export {
   type ContentHandlerCapabilities,
@@ -226,16 +229,69 @@ function directMarkdownEncodingAdmitted(fieldValues: readonly string[] | undefin
   return value.slice(start, end).toLowerCase() === "identity";
 }
 
-async function directMarkdown(
+/** Exactly one `application/pdf` content-type, parameters ignored. */
+function pdfMimeAdmitted(fieldValues: readonly string[] | undefined): boolean {
+  if (fieldValues?.length !== 1) return false;
+  const essence = fieldValues[0]!.split(";", 1)[0]!.trim().toLowerCase();
+  return essence === "application/pdf";
+}
+
+/**
+ * Convert PDF bytes to Markdown with pdftotext.
+ *
+ * A browser renders a PDF into a viewer with no extractable DOM, so the generic
+ * route returns empty content for every PDF ever submitted. pdftotext reads the
+ * document itself. `-layout` preserves column and table structure, which is
+ * what makes the output readable rather than interleaved.
+ *
+ * The bytes go through a private temporary file, removed before returning:
+ * stdin carries a string, and a PDF does not survive being decoded as text. A
+ * PDF with no text layer — a scan — legitimately yields nothing, and that stays
+ * empty_content rather than being dressed up as a failure of the extractor.
+ */
+async function pdfToMarkdown(bytes: Uint8Array, signal?: AbortSignal): Promise<string> {
+  if (!findExecutable("pdftotext"))
+    throw new AgentscrapeUpstreamDownError(
+      "pdftotext not found on PATH — install poppler to extract PDFs",
+    );
+  const root = await mkdtemp(join(tmpdir(), "agentscrape-pdf-"));
+  try {
+    await chmod(root, 0o700);
+    const source = join(root, "document.pdf");
+    await writeFile(source, bytes, { mode: 0o600 });
+    const result = await runProcess(["pdftotext", "-layout", "-nopgbrk", source, "-"], {
+      timeoutMs: 60_000,
+      maxOutputBytes: 8_000_000,
+      ...(signal ? { signal } : {}),
+    });
+    if (result.timedOut) throw new AgentscrapeTimeoutError("PDF text extraction timed out");
+    if (result.truncated)
+      throw new EnvelopeBuildError(
+        "output_limit_exceeded",
+        "PDF text exceeds the extraction limit",
+      );
+    if (result.exitCode !== 0)
+      throw new AgentscrapeProviderError("pdftotext could not read the PDF", false);
+    return result.stdout
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function directFetch(
   url: string,
   options: FetchMarkdownOptions,
+  mode: "markdown" | "pdf" = "markdown",
 ): Promise<ScrapeResult<GenericPage>> {
+  const label = mode === "pdf" ? "direct PDF" : "direct Markdown";
   const limit = options.maxContentBytes ?? 1_000_000;
   const requested = validateEnvelopeRequest(url, limit, 0);
   const timeoutController = new AbortController();
   const timer = setTimeout(
-    () =>
-      timeoutController.abort(new DOMException("direct Markdown fetch timed out", "TimeoutError")),
+    () => timeoutController.abort(new DOMException(`${label} fetch timed out`, "TimeoutError")),
     30_000,
   );
   timer.unref();
@@ -257,10 +313,7 @@ async function directMarkdown(
         if (error instanceof NetworkPolicyFault)
           throw new AgentscrapeNetworkPolicyError("private_destination");
         if (error instanceof NetworkResolutionFault)
-          throw new AgentscrapeProviderError(
-            "direct Markdown destination could not be resolved",
-            true,
-          );
+          throw new AgentscrapeProviderError(`${label} destination could not be resolved`, true);
         throw error;
       }
       let response: PinnedHttpResponse;
@@ -282,9 +335,11 @@ async function directMarkdown(
             invalidContentEncoding = !directMarkdownEncodingAdmitted(
               pinnedHeaderValues(metadata.pinnedHeaderValues, "content-encoding"),
             );
-            invalidMarkdownMime = !directMarkdownMimeAdmitted(
-              pinnedHeaderValues(metadata.pinnedHeaderValues, "content-type"),
-            );
+            const contentType = pinnedHeaderValues(metadata.pinnedHeaderValues, "content-type");
+            invalidMarkdownMime =
+              mode === "pdf"
+                ? !pdfMimeAdmitted(contentType)
+                : !directMarkdownMimeAdmitted(contentType);
             return invalidContentEncoding || invalidMarkdownMime ? "discard" : "read";
           },
         });
@@ -295,72 +350,73 @@ async function directMarkdown(
               "output_limit_exceeded",
               `content exceeds the ${limit}-byte limit`,
             );
-          throw new AgentscrapeProviderError("direct Markdown request failed", true);
+          throw new AgentscrapeProviderError(`${label} request failed`, true);
         }
         throw error;
       }
       throwIfAborted(options.signal);
       if (timeoutController.signal.aborted)
-        throw new AgentscrapeTimeoutError("direct Markdown fetch timed out");
+        throw new AgentscrapeTimeoutError(`${label} fetch timed out`);
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = pinnedHeader(response.headers, "location");
         if (!location)
           throw new AgentscrapeHttpError(
-            `direct Markdown redirect has no Location header (HTTP ${response.status})`,
+            `${label} redirect has no Location header (HTTP ${response.status})`,
             response.status,
           );
         if (redirects >= 10)
-          throw new AgentscrapeProviderError("direct Markdown redirect limit exceeded", false);
+          throw new AgentscrapeProviderError(`${label} redirect limit exceeded`, false);
         let next: string;
         try {
           next = new URL(location, current).href;
         } catch {
           throw new EnvelopeBuildError(
             "malformed_provider_output",
-            "direct Markdown redirect URL is invalid",
+            `${label} redirect URL is invalid`,
           );
         }
         const validated = validateProviderFinalUrl(next) ?? next;
         if (currentUrl.protocol === "https:" && new URL(validated).protocol !== "https:")
-          throw new AgentscrapeProviderError(
-            "direct Markdown redirect to HTTP is not allowed",
-            false,
-          );
+          throw new AgentscrapeProviderError(`${label} redirect to HTTP is not allowed`, false);
         current = validated;
         continue;
       }
       if (response.status < 200 || response.status >= 300) {
         if ([401, 403].includes(response.status))
           throw new AgentscrapeAuthError(
-            `direct Markdown source requires authentication (HTTP ${response.status})`,
+            `${label} source requires authentication (HTTP ${response.status})`,
           );
         const retryable =
           response.status === 408 || response.status === 429 || response.status >= 500;
         throw new AgentscrapeHttpError(
-          `direct Markdown fetch failed (HTTP ${response.status})`,
+          `${label} fetch failed (HTTP ${response.status})`,
           response.status,
           retryable,
         );
       }
       if (invalidContentEncoding)
         throw new AgentscrapeProviderError(
-          "direct Markdown response used an unsupported content encoding",
+          `${label} response used an unsupported content encoding`,
           false,
         );
       if (invalidMarkdownMime)
         throw new AgentscrapeProviderError(
-          "direct Markdown response did not provide an admissible Markdown Content-Type",
+          `${label} response did not provide an admissible Markdown Content-Type`,
           false,
         );
       const finalUrl = validateProviderFinalUrl(current) ?? current;
       let markdown: string;
-      try {
-        markdown = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
-      } catch {
-        throw new EnvelopeBuildError(
-          "malformed_provider_output",
-          "direct Markdown response is not valid UTF-8",
-        );
+      if (mode === "pdf") {
+        markdown = await pdfToMarkdown(response.body, options.signal);
+      } else {
+        try {
+          markdown = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
+        } catch {
+          throw new EnvelopeBuildError(
+            "malformed_provider_output",
+            `${label} response is not valid UTF-8`,
+          );
+        }
       }
       const structured = new GenericPage(finalUrl, markdown);
       return {
@@ -374,12 +430,9 @@ async function directMarkdown(
   } catch (error) {
     if (options.signal?.aborted) throw cancellationError(options.signal);
     if (timeoutController.signal.aborted)
-      throw new AgentscrapeTimeoutError("direct Markdown fetch timed out");
+      throw new AgentscrapeTimeoutError(`${label} fetch timed out`);
     if (error instanceof AgentscrapeError || error instanceof EnvelopeBuildError) throw error;
-    throw new AgentscrapeProviderError(
-      "direct Markdown fetch failed at the network boundary",
-      true,
-    );
+    throw new AgentscrapeProviderError(`${label} fetch failed at the network boundary`, true);
   } finally {
     clearTimeout(timer);
   }
@@ -409,6 +462,7 @@ type MarkdownRoute =
   | { kind: "preset"; preset: NonNullable<ReturnType<typeof selectPreset>> }
   | { kind: "generic" }
   | { kind: "github" }
+  | { kind: "pdf" }
   | { kind: "markdown" };
 
 function markdownRoute(
@@ -419,6 +473,7 @@ function markdownRoute(
   if (preset) return { kind: "preset", preset };
   if (generic) return { kind: "generic" };
   if (parseGithubUrl(url)) return { kind: "github" };
+  if (new URL(url).pathname.endsWith(".pdf")) return { kind: "pdf" };
   if (new URL(url).pathname.endsWith(".md")) return { kind: "markdown" };
   return { kind: "generic" };
 }
@@ -535,12 +590,34 @@ export async function fetchMarkdown(
                 scrapePage(requested, options.selector, options),
               ),
             );
+            // A browser renders a PDF into a viewer with no extractable DOM, so
+            // a PDF served without a .pdf path — arxiv.org/pdf/ID is the common
+            // one — arrives here empty. Ask the network what it actually is
+            // rather than reporting nothing for a document that has text. Only
+            // an empty result triggers this, and only an application/pdf
+            // content-type answers it, so a genuinely empty page stays empty.
+            if (!result.markdown.trim()) {
+              try {
+                const asPdf = await directFetch(requested, options, "pdf");
+                if (asPdf.markdown.trim()) {
+                  hint = "pdf";
+                  browserUsed = false;
+                  result = asPdf;
+                }
+              } catch {
+                // Not a PDF, or unreadable as one: keep the empty page result,
+                // which reports empty_content exactly as before.
+              }
+            }
           } else if (route.kind === "github") {
             hint = "github";
             result = await fetchGithubIfApplicable(requested, options.signal);
+          } else if (route.kind === "pdf") {
+            hint = "pdf";
+            result = await directFetch(requested, options, "pdf");
           } else {
             hint = "direct-markdown";
-            result = await directMarkdown(requested, options);
+            result = await directFetch(requested, options);
           }
 
           if (!result) throw new AgentscrapeRuntimeError("selected route returned no result");
