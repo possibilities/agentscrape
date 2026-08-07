@@ -620,7 +620,7 @@ esac`,
     });
   });
 
-  test("marks a missing browser executable nonretryable", async () => {
+  test("marks a missing browser executable as an unavailable dependency", async () => {
     process.env.HOME = temp();
     process.env[AGENT_BROWSER_BIN_ENV] = join(temp(), "missing-agent-browser");
     resetBrowserUnavailableCache();
@@ -628,8 +628,12 @@ esac`,
       await runAgentBrowser(["eval", "null"]);
       throw new Error("missing executable unexpectedly ran");
     } catch (error) {
-      expect(error).toBeInstanceOf(AgentscrapeBrowserError);
-      expect((error as AgentscrapeBrowserError).retryable).toBeFalse();
+      expect(error).toBeInstanceOf(AgentscrapeUpstreamDownError);
+      expect(classifyFailure(error)).toEqual([
+        "upstream_unavailable",
+        true,
+        (error as Error).message,
+      ]);
     }
   });
 

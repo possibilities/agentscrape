@@ -6,6 +6,9 @@ import { AgentscrapeUsageError, PresetDriftError } from "../src/errors";
 import { offlineExtractLinks, scrapeLinks } from "../src/links";
 
 const actualBrowser = await import("../src/browser");
+// mock.module mutates the imported namespace in place, so snapshot the real
+// exports first; the afterAll restore below rebuilds the module from this copy.
+const realBrowserExports = { ...actualBrowser };
 const openPage = mock(async () => {});
 let snapshots: Array<Record<string, unknown>> = [];
 let labels: string[] = [];
@@ -37,7 +40,12 @@ beforeEach(() => {
   labels = [];
   snapshots = [];
 });
-afterAll(() => mock.restore());
+afterAll(() => {
+  // mock.restore() does not undo module mocks; restore the real browser module so
+  // later test files are not left with the always-successful stub.
+  mock.module("../src/browser", () => realBrowserExports);
+  mock.restore();
+});
 
 const link = (url: string, title: string, category = "") => ({ url, title, category });
 const snap = (...links: Array<{ url: string; title: string; category: string }>) => ({
