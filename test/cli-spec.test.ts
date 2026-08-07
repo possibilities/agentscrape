@@ -51,7 +51,7 @@ function expectInvalid(change: (spec: any) => void, message: string): void {
 }
 
 function renderedOptionNames(text: string, heading: "Options:" | "Global options:"): string[] {
-  const section = text.split(`${heading}\n`)[1];
+  const section = text.split(`${heading}\n`)[1]?.split("\n\n")[0];
   if (!section) throw new Error(`missing ${heading}`);
   return section
     .trimEnd()
