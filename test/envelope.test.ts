@@ -29,9 +29,7 @@ import {
 import { officialExtractorDefinitions } from "../src/extractors";
 import type { ScrapeResult } from "../src/handlers/types";
 import {
-  AnthropicBilling,
   ChatGPTConversation,
-  ClaudeBilling,
   ConversationTurn,
   DeepWikiCitation,
   DeepWikiQARound,
@@ -39,8 +37,6 @@ import {
   DeepWikiWikiPage,
   type FailureClass,
   GenericPage,
-  OpenAIBilling,
-  PerplexityBilling,
   ScrapeSchema,
   ScrapeWarning,
   TweetContent,
@@ -274,10 +270,6 @@ describe("version 1 extraction envelope", () => {
           rounds: [new DeepWikiQARound({ question: "Q", answer: "A", citations: [citation] })],
         }),
       ],
-      ["ClaudeBilling", new ClaudeBilling({ current_plan: 1 })],
-      ["AnthropicBilling", new AnthropicBilling("org", 0, false)],
-      ["OpenAIBilling", new OpenAIBilling("org", "Prepaid", 0, false)],
-      ["PerplexityBilling", new PerplexityBilling(0, 1, false)],
     ]);
     const dedicated = new Set(["TweetThread", "XArticle"]);
     expect(new Set([...values.keys(), ...dedicated])).toEqual(

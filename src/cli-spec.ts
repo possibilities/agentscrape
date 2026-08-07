@@ -163,7 +163,7 @@ When to use
 - You want a site's feed entries: discover-feed --source-url URL (live), or
   pass a recorded FILE for network-free parsing.
 - You want provider-structured output (X posts/articles, ChatGPT shares,
-  billing pages, DeepWiki): preset routes match automatically; list-presets
+  DeepWiki): preset routes match automatically; list-presets
   shows what exists, show-preset NAME shows one contract.
 
 Workflow

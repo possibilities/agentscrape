@@ -1,8 +1,0 @@
-name: anthropic-billing
-summary: "Anthropic platform billing and credit balance"
-domain: platform.claude.com
-mode: content
-url_patterns:
-  - '^https?://platform\.claude\.com/settings/billing/?(?:\?.*)?$'
-handler: anthropic_billing.scrape_anthropic_billing
-schema: AnthropicBilling

@@ -1,8 +1,0 @@
-name: claude-billing
-summary: "Claude.ai billing plan and invoice history"
-domain: claude.ai
-mode: content
-url_patterns:
-  - '^https?://claude\.ai/settings/billing/?(?:\?.*)?$'
-handler: claude_billing.scrape_claude_billing
-schema: ClaudeBilling

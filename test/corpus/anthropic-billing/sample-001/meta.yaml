@@ -1,9 +1,0 @@
-version: 1
-preset: anthropic-billing
-mode: content
-url: https://platform.claude.com/settings/billing
-expect: success
-structured:
-  organization: Possibilities
-  credit_balance: 16.3
-  auto_reload: false

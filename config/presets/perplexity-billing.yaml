@@ -1,8 +1,0 @@
-name: perplexity-billing
-summary: "Perplexity API billing and credit balance"
-domain: perplexity.ai
-mode: content
-url_patterns:
-  - '^https?://(?:www\.)?perplexity\.ai/account/api/billing/?(?:\?.*)?$'
-handler: perplexity_billing.scrape_perplexity_billing
-schema: PerplexityBilling
