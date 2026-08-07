@@ -1,11 +1,5 @@
 import * as cheerio from "cheerio";
 import { PresetConfigError } from "./errors";
-import {
-  scrapeAnthropicBilling,
-  scrapeClaudeBilling,
-  scrapeOpenAiBilling,
-  scrapePerplexityBilling,
-} from "./handlers/billing";
 import { scrapeConversation } from "./handlers/chatgpt";
 import { scrapeSearchConversation, scrapeWikiPage } from "./handlers/deepwiki";
 import type { ContentHandler, ScrapeResult } from "./handlers/types";
@@ -18,16 +12,12 @@ import {
   scrapeTweet,
 } from "./handlers/x";
 import {
-  AnthropicBilling,
   ChatGPTConversation,
-  ClaudeBilling,
   DeepWikiSearchConversation,
   DeepWikiWikiPage,
   type ExtractionEnvelope,
   type FailureClass,
   GenericPage,
-  OpenAIBilling,
-  PerplexityBilling,
   ScrapeSchema,
   TweetContent,
   TweetThread,
@@ -430,17 +420,6 @@ const projectSearchConversation: ExtractorProjector = (result, context) => {
   };
 };
 
-const projectBilling: ExtractorProjector = (result) => {
-  const content = result.structured.toMarkdown();
-  return {
-    content,
-    metadata: metadata("web_page", {
-      title: bounded(content.split("\n", 1)[0]!.replace(/^#{1,6}\s+/, ""), 500),
-    }),
-    relations: [],
-  };
-};
-
 function capabilities(values: Partial<ExtractorCapabilities> = {}): ExtractorCapabilities {
   return Object.freeze({
     browser: values.browser ?? true,
@@ -474,28 +453,12 @@ function officialDefinition(
 
 export const officialExtractorDefinitions = Object.freeze([
   officialDefinition({
-    handlerName: "anthropic_billing.scrape_anthropic_billing",
-    schemaName: "AnthropicBilling",
-    handler: scrapeAnthropicBilling,
-    schema: AnthropicBilling,
-    projector: projectBilling,
-    implementation: "anthropic-billing",
-  }),
-  officialDefinition({
     handlerName: "chatgpt.scrape_conversation",
     schemaName: "ChatGPTConversation",
     handler: scrapeConversation,
     schema: ChatGPTConversation,
     projector: projectConversation,
     implementation: "chatgpt-conversation",
-  }),
-  officialDefinition({
-    handlerName: "claude_billing.scrape_claude_billing",
-    schemaName: "ClaudeBilling",
-    handler: scrapeClaudeBilling,
-    schema: ClaudeBilling,
-    projector: projectBilling,
-    implementation: "claude-billing",
   }),
   officialDefinition({
     handlerName: "deepwiki.scrape_search_conversation",
@@ -512,22 +475,6 @@ export const officialExtractorDefinitions = Object.freeze([
     schema: DeepWikiWikiPage,
     projector: projectWikiPage,
     implementation: "deepwiki-wiki-page",
-  }),
-  officialDefinition({
-    handlerName: "openai_billing.scrape_openai_billing",
-    schemaName: "OpenAIBilling",
-    handler: scrapeOpenAiBilling,
-    schema: OpenAIBilling,
-    projector: projectBilling,
-    implementation: "openai-billing",
-  }),
-  officialDefinition({
-    handlerName: "perplexity_billing.scrape_perplexity_billing",
-    schemaName: "PerplexityBilling",
-    handler: scrapePerplexityBilling,
-    schema: PerplexityBilling,
-    projector: projectBilling,
-    implementation: "perplexity-billing",
   }),
   officialDefinition({
     handlerName: "x.scrape_article",

@@ -67,9 +67,9 @@ function treeHash(root: string): string {
 
 function installOverlaySample(dataHome: string): string {
   const overlay = join(dataHome, "corpus");
-  const destination = join(overlay, "anthropic-billing", "sample-001");
-  mkdirSync(join(overlay, "anthropic-billing"), { recursive: true, mode: 0o700 });
-  cpSync(join(shipped, "anthropic-billing", "sample-001"), destination, { recursive: true });
+  const destination = join(overlay, "deepwiki-wiki-page", "sample-001");
+  mkdirSync(join(overlay, "deepwiki-wiki-page"), { recursive: true, mode: 0o700 });
+  cpSync(join(shipped, "deepwiki-wiki-page", "sample-001"), destination, { recursive: true });
   makePrivate(dataHome);
   return overlay;
 }
@@ -98,11 +98,11 @@ describe("corpus overlay", () => {
 
     const result = await testCorpus();
     expect(result.failed).toBe(0);
-    expect(result.passed).toBe(28);
-    expect(result.lines).toContain("  PASS: anthropic-billing/sample-001");
-    expect(result.lines).toContain("  PASS: captured/anthropic-billing/sample-001");
-    expect(result.lines.indexOf("  PASS: anthropic-billing/sample-001")).toBeLessThan(
-      result.lines.indexOf("  PASS: captured/anthropic-billing/sample-001"),
+    expect(result.passed).toBe(20);
+    expect(result.lines).toContain("  PASS: deepwiki-wiki-page/sample-001");
+    expect(result.lines).toContain("  PASS: captured/deepwiki-wiki-page/sample-001");
+    expect(result.lines.indexOf("  PASS: deepwiki-wiki-page/sample-001")).toBeLessThan(
+      result.lines.indexOf("  PASS: captured/deepwiki-wiki-page/sample-001"),
     );
     expect(treeHash(shipped)).toBe(shippedBefore);
     expect(lstatSync(overlay).mode & 0o077).toBe(0);
@@ -115,7 +115,7 @@ describe("corpus overlay", () => {
     process.env.AGENTSCRAPE_DATA_HOME = dataHome;
     delete process.env.XDG_DATA_HOME;
 
-    const omitted = await testCorpus("anthropic-billing");
+    const omitted = await testCorpus("deepwiki-wiki-page");
     expect(omitted.failed).toBe(0);
     expect(omitted.passed).toBe(2);
     expect(existsSync(dataHome)).toBeFalse();
@@ -125,15 +125,15 @@ describe("corpus overlay", () => {
     const explicit = await testCorpus(undefined, overlay);
     expect(explicit.failed).toBe(0);
     expect(explicit.passed).toBe(1);
-    expect(explicit.lines).toEqual(["  PASS: anthropic-billing/sample-001"]);
+    expect(explicit.lines).toEqual(["  PASS: deepwiki-wiki-page/sample-001"]);
   });
 
   test("an explicit root keeps legacy symlink-ancestor and hardlink compatibility", async () => {
     const home = temp();
     const root = join(home, "real-corpus");
-    const sample = join(root, "anthropic-billing", "sample-001");
-    mkdirSync(join(root, "anthropic-billing"), { recursive: true });
-    cpSync(join(shipped, "anthropic-billing", "sample-001"), sample, { recursive: true });
+    const sample = join(root, "deepwiki-wiki-page", "sample-001");
+    mkdirSync(join(root, "deepwiki-wiki-page"), { recursive: true });
+    cpSync(join(shipped, "deepwiki-wiki-page", "sample-001"), sample, { recursive: true });
 
     const hardlinkSource = join(home, "expected-hardlink-source.md");
     writeFileSync(hardlinkSource, readFileSync(join(sample, "expected.md")));
@@ -147,7 +147,7 @@ describe("corpus overlay", () => {
     expect(result).toEqual({
       passed: 1,
       failed: 0,
-      lines: ["  PASS: anthropic-billing/sample-001"],
+      lines: ["  PASS: deepwiki-wiki-page/sample-001"],
     });
   });
 
@@ -156,7 +156,7 @@ describe("corpus overlay", () => {
     const dataHome = join(home, "data");
     mkdirSync(dataHome, { mode: 0o700 });
     const overlay = installOverlaySample(dataHome);
-    const oversized = join(overlay, "anthropic-billing", "sample-001", "page.html");
+    const oversized = join(overlay, "deepwiki-wiki-page", "sample-001", "page.html");
     writeFileSync(oversized, "x".repeat(CORPUS_ARTIFACT_MAX_BYTES + 1), { mode: 0o600 });
     makePrivate(dataHome);
     process.env.HOME = home;
@@ -180,10 +180,10 @@ describe("corpus overlay", () => {
       const dataHome = join(home, "data");
       mkdirSync(dataHome, { mode: 0o700 });
       const overlay = installOverlaySample(dataHome);
-      const expected = join(overlay, "anthropic-billing", "sample-001", "expected.md");
+      const expected = join(overlay, "deepwiki-wiki-page", "sample-001", "expected.md");
       if (violation === "symlink") {
         rmSync(expected);
-        symlinkSync(join(shipped, "anthropic-billing", "sample-001", "expected.md"), expected);
+        symlinkSync(join(shipped, "deepwiki-wiki-page", "sample-001", "expected.md"), expected);
       } else if (violation === "hardlink") {
         const source = join(home, "hardlink-source.md");
         writeFileSync(source, readFileSync(expected), { mode: 0o600 });
@@ -216,7 +216,7 @@ describe("corpus overlay", () => {
     controller.abort();
     await expect(
       captureCorpus("https://example.com", {
-        preset: "anthropic-billing",
+        preset: "deepwiki-wiki-page",
         signal: controller.signal,
       }),
     ).rejects.toThrow(/abort|cancel/i);
@@ -229,7 +229,7 @@ describe("corpus overlay", () => {
     const dataHome = join(home, "data");
     mkdirSync(dataHome, { mode: 0o700 });
     const overlay = installOverlaySample(dataHome);
-    const sample = join(overlay, "anthropic-billing", "sample-001");
+    const sample = join(overlay, "deepwiki-wiki-page", "sample-001");
     const replacement = join(home, "replacement-sample");
     cpSync(sample, replacement, { recursive: true });
     writeFileSync(join(replacement, "sentinel.txt"), "leave me alone\n", { mode: 0o600 });

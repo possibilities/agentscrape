@@ -164,7 +164,7 @@ before validating the effective `x-tweet` or `x-article` contract.
 Content handlers must return all artifact fields, non-empty Markdown, the
 declared structured schema, and Markdown identical to that schema's renderer.
 Missing provider structure raises typed drift rather than returning generic
-body text. Labeled zero balances remain valid for billing presets.
+body text.
 
 Local YAML presets remain data-only. Selector-based `links` and `nav-links`
 presets work directly in `./scrapers`; the CLI deliberately does not import
@@ -197,9 +197,15 @@ Registration is process-local, rejects built-in/name collisions, enforces the
 registered handler/schema pair, and returns an unregister function for test and
 lifecycle cleanup.
 
-Official presets cover Anthropic, Claude, OpenAI, and Perplexity billing;
-ChatGPT conversations; DeepWiki wiki/search pages; X posts, profiles,
-timelines, and articles; and generic documentation navigation.
+Official presets cover ChatGPT conversations; DeepWiki wiki/search pages; X
+posts, profiles, timelines, and articles; and generic documentation navigation.
+
+Declaring a `domain` claims that host: a URL on it that matches no preset fails
+rather than falling back to generic extraction. That is deliberate for hosts
+where generic output would be worthless — x.com serves login walls — so a claim
+is a statement that the listed presets cover everything worth extracting there.
+Do not add a narrow preset for one page on a host whose other pages should stay
+genericly extractable; the claim is host-wide, not path-scoped.
 
 ## Output contract
 

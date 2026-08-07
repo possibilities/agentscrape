@@ -51,21 +51,7 @@ import { redactDiagnostic, sanitizeErrorInPlace } from "./redaction";
 import type { ExtractionEnvelope } from "./schemas";
 
 const SCHEMA_FIELDS: Record<string, string[]> = {
-  AnthropicBilling: [
-    "organization: str (default='')",
-    "credit_balance: float | None (default=None)",
-    "auto_reload: bool | None (default=None)",
-  ],
   ChatGPTConversation: ["turns: list[ConversationTurn] (required)"],
-  ClaudeBilling: [
-    "plan_label: str (default='')",
-    "current_plan: int (default=0)",
-    "plan_details: str (default='')",
-    "renews_on: str (default='')",
-    "current_balance: float | None (default=None)",
-    "auto_reload: bool | None (default=None)",
-    "invoices: list[ClaudeInvoice] (default_factory)",
-  ],
   DeepWikiSearchConversation: [
     "url: str (default='')",
     "repository: str (default='')",
@@ -77,17 +63,6 @@ const SCHEMA_FIELDS: Record<string, string[]> = {
     "title: str (default='')",
     "markdown: str (default='')",
     "citations: list[DeepWikiCitation] (default_factory)",
-  ],
-  OpenAIBilling: [
-    "organization: str (default='')",
-    "plan_type: str (default='')",
-    "credit_balance: float | None (default=None)",
-    "auto_recharge: bool | None (default=None)",
-  ],
-  PerplexityBilling: [
-    "credit_balance: float | None (default=None)",
-    "usage_tier: int | None (default=None)",
-    "auto_reload: bool | None (default=None)",
   ],
   TweetThread: [
     "author_name: str (required)",

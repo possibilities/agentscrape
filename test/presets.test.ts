@@ -37,17 +37,13 @@ describe("strict preset registry", () => {
     const registry = loadRegistry();
     expect(registry.presets.map((item) => item.name)).toContain("deepwiki-wiki-page");
     expect(registry.presets.map((item) => item.name)).toContain("x-article");
-    expect(registry.presets).toHaveLength(13);
+    expect(registry.presets).toHaveLength(9);
   });
   test("publishes one immutable definition for every official content pair", () => {
     const expectedPairs = [
-      "anthropic_billing.scrape_anthropic_billing:AnthropicBilling",
       "chatgpt.scrape_conversation:ChatGPTConversation",
-      "claude_billing.scrape_claude_billing:ClaudeBilling",
       "deepwiki.scrape_search_conversation:DeepWikiSearchConversation",
       "deepwiki.scrape_wiki_page:DeepWikiWikiPage",
-      "openai_billing.scrape_openai_billing:OpenAIBilling",
-      "perplexity_billing.scrape_perplexity_billing:PerplexityBilling",
       "x.scrape_article:XArticle",
       "x.scrape_profile:XProfile",
       "x.scrape_timeline:XTimeline",
@@ -57,7 +53,7 @@ describe("strict preset registry", () => {
       (definition) => `${definition.handlerName}:${definition.schemaName}`,
     );
     expect(pairs).toEqual(expectedPairs);
-    expect(new Set(pairs).size).toBe(11);
+    expect(new Set(pairs).size).toBe(7);
     expect(Object.isFrozen(officialExtractorDefinitions)).toBeTrue();
     for (const definition of officialExtractorDefinitions) {
       expect(Object.isFrozen(definition), definition.schemaName).toBeTrue();
@@ -72,7 +68,7 @@ describe("strict preset registry", () => {
     }
 
     const contentPresets = loadRegistry().presets.filter((preset) => preset.mode === "content");
-    expect(contentPresets).toHaveLength(11);
+    expect(contentPresets).toHaveLength(7);
     for (const preset of contentPresets) {
       const definition = resolveContentDefinition(preset);
       expect(definition, preset.name).not.toBeNull();

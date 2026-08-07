@@ -507,53 +507,6 @@ export interface ClaudeInvoice {
   total: number | null;
   status: string;
 }
-export class ClaudeBilling extends ScrapeSchema {
-  plan_label: string;
-  current_plan: number;
-  plan_details: string;
-  renews_on: string;
-  current_balance: number | null;
-  auto_reload: boolean | null;
-  invoices: ClaudeInvoice[];
-  constructor(
-    data: {
-      plan_label?: string;
-      current_plan?: number;
-      plan_details?: string;
-      renews_on?: string;
-      current_balance?: number | null;
-      auto_reload?: boolean | null;
-      invoices?: ClaudeInvoice[];
-    } = {},
-  ) {
-    super();
-    this.plan_label = data.plan_label ?? "";
-    this.current_plan = data.current_plan ?? 0;
-    this.plan_details = data.plan_details ?? "";
-    this.renews_on = data.renews_on ?? "";
-    this.current_balance = data.current_balance ?? null;
-    this.auto_reload = data.auto_reload ?? null;
-    this.invoices = data.invoices ?? [];
-  }
-  toMarkdown(): string {
-    const parts = ["## Claude.ai Billing", `**Current plan**: ${this.current_plan}`];
-    if (this.plan_label) parts.push(`**Plan label**: ${this.plan_label}`);
-    if (this.plan_details) parts.push(`**Plan details**: ${this.plan_details}`);
-    if (this.renews_on) parts.push(`**Renews on**: ${this.renews_on}`);
-    if (this.current_balance !== null) parts.push(`**Current balance**: ${this.current_balance}`);
-    if (this.auto_reload !== null) parts.push(`**Auto-reload**: ${scalar(this.auto_reload)}`);
-    if (this.invoices.length) {
-      const rows = this.invoices.map(
-        (x) =>
-          `| ${x.date} | ${x.due} | ${x.total === null ? "" : `$${x.total.toFixed(2)}`} | ${x.status} |`,
-      );
-      parts.push(
-        `## Invoices\n\n| Date | Due | Total | Status |\n| --- | --- | --- | --- |\n${rows.join("\n")}`,
-      );
-    }
-    return parts.join("\n\n");
-  }
-}
 export class CodexUsage extends ScrapeSchema {
   plan: string;
   five_hour_remaining_pct: number | null;
@@ -588,65 +541,6 @@ export class CodexUsage extends ScrapeSchema {
     if (this.credits_remaining !== null)
       parts.push(`**Credits remaining**: ${this.credits_remaining}`);
     return parts.join("\n\n");
-  }
-}
-
-abstract class SimpleBilling extends ScrapeSchema {
-  protected markdown(title: string, values: [string, unknown][]): string {
-    const parts = [`## ${title}`];
-    for (const [label, value] of values)
-      if (value !== null && value !== "") parts.push(`**${label}**: ${scalar(value)}`);
-    return parts.join("\n\n");
-  }
-}
-export class PerplexityBilling extends SimpleBilling {
-  constructor(
-    public credit_balance: number | null = null,
-    public usage_tier: number | null = null,
-    public auto_reload: boolean | null = null,
-  ) {
-    super();
-  }
-  toMarkdown(): string {
-    return this.markdown("Perplexity API Billing", [
-      ["Credit balance", this.credit_balance],
-      ["Usage tier", this.usage_tier],
-      ["Auto-reload", this.auto_reload],
-    ]);
-  }
-}
-export class OpenAIBilling extends SimpleBilling {
-  constructor(
-    public organization = "",
-    public plan_type = "",
-    public credit_balance: number | null = null,
-    public auto_recharge: boolean | null = null,
-  ) {
-    super();
-  }
-  toMarkdown(): string {
-    return this.markdown("OpenAI Platform Billing", [
-      ["Organization", this.organization],
-      ["Plan", this.plan_type],
-      ["Credit balance", this.credit_balance],
-      ["Auto-recharge", this.auto_recharge],
-    ]);
-  }
-}
-export class AnthropicBilling extends SimpleBilling {
-  constructor(
-    public organization = "",
-    public credit_balance: number | null = null,
-    public auto_reload: boolean | null = null,
-  ) {
-    super();
-  }
-  toMarkdown(): string {
-    return this.markdown("Anthropic Platform Billing", [
-      ["Organization", this.organization],
-      ["Credit balance", this.credit_balance],
-      ["Auto-reload", this.auto_reload],
-    ]);
   }
 }
 

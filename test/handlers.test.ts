@@ -2,12 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AgentscrapeTimeoutError, AgentscrapeUsageError, PresetDriftError } from "../src/errors";
-import {
-  scrapeAnthropicBilling,
-  scrapeClaudeBilling,
-  scrapeOpenAiBilling,
-  scrapePerplexityBilling,
-} from "../src/handlers/billing";
 import { scrapeConversation } from "../src/handlers/chatgpt";
 import {
   parseDeepWikiSearch,
@@ -22,67 +16,6 @@ const corpus = join(import.meta.dir, "corpus");
 const fixture = (name: string) => readFileSync(join(fixtures, name), "utf8");
 const _corpusHtml = (preset: string, sample = "sample-001") =>
   readFileSync(join(corpus, preset, sample, "page.html"), "utf8");
-
-describe("official billing invariants", () => {
-  test("Anthropic accepts labeled zero and rejects a missing landmark", async () => {
-    const zero = await scrapeAnthropicBilling("https://platform.claude.com/settings/billing", {
-      html: fixture("preset-audit-anthropic-billing-zero.html"),
-    });
-    expect(zero.structured.credit_balance).toBe(0);
-    expect(
-      scrapeAnthropicBilling("https://platform.claude.com/settings/billing", {
-        html: fixture("preset-audit-anthropic-billing-missing-landmark.html"),
-      }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
-  });
-  test("Anthropic recognizes an authentication shell", async () => {
-    expect(
-      scrapeAnthropicBilling("https://platform.claude.com/settings/billing", {
-        html: fixture("preset-audit-anthropic-billing-login.html"),
-      }),
-    ).rejects.toThrow("authentication required");
-  });
-  test("OpenAI accepts labeled zero and rejects a missing landmark", async () => {
-    const zero = await scrapeOpenAiBilling(
-      "https://platform.openai.com/settings/organization/billing",
-      { html: fixture("preset-audit-openai-billing-zero.html") },
-    );
-    expect(zero.structured.credit_balance).toBe(0);
-    expect(
-      scrapeOpenAiBilling("https://platform.openai.com/settings/organization/billing", {
-        html: fixture("preset-audit-openai-billing-missing-landmark.html"),
-      }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
-  });
-  test("Perplexity accepts labeled zero and rejects a missing landmark", async () => {
-    const zero = await scrapePerplexityBilling("https://www.perplexity.ai/account/api/billing", {
-      html: fixture("preset-audit-perplexity-billing-zero.html"),
-    });
-    expect(zero.structured.credit_balance).toBe(0);
-    expect(
-      scrapePerplexityBilling("https://www.perplexity.ai/account/api/billing", {
-        html: fixture("preset-audit-perplexity-billing-missing-landmark.html"),
-      }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
-    expect(
-      scrapePerplexityBilling("https://www.perplexity.ai/account/api/billing", {
-        html: "",
-        media: "offline-sentinel",
-      }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
-  });
-  test("Claude accepts positive page-specific evidence and rejects a shell", async () => {
-    const zero = await scrapeClaudeBilling("https://claude.ai/settings/billing", {
-      html: fixture("preset-audit-claude-billing-zero.html"),
-    });
-    expect(zero.structured.current_balance).toBe(0);
-    expect(
-      scrapeClaudeBilling("https://claude.ai/settings/billing", {
-        html: fixture("preset-audit-claude-billing-missing-landmark.html"),
-      }),
-    ).rejects.toBeInstanceOf(PresetDriftError);
-  });
-});
 
 describe("conversation and social fail-closed handlers", () => {
   test("ChatGPT preserves adaptive code fences", async () => {
