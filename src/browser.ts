@@ -698,6 +698,15 @@ async function assertConduitSignedIn(requestedUrl: string, attached: string | nu
   if (attached !== null || !conduitConfigured()) return;
   const rule = await resolveOrigin(requestedUrl);
   if (rule === null || rule.escalation !== "human_signin") return;
+  // Naming which of the two it is matters: "no session" sends a reader looking
+  // for something to create, "expired" sends them to replace what is there.
+  if (rule.staleSession !== null) {
+    throw new AgentscrapeAuthError(
+      `${rule.origin} requires a signed-in browser and the stored session ` +
+        `'${rule.staleSession.sessionName}' has expired. ` +
+        `Replace it with: agentweb signin --origin ${rule.origin}`,
+    );
+  }
   throw new AgentscrapeAuthError(
     `${rule.origin} requires a signed-in browser and no session is stored. ` +
       `Capture one with: agentweb signin --origin ${rule.origin}`,

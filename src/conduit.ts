@@ -36,6 +36,8 @@ export interface OriginRule {
   signedInKind: SignedInKind;
   signedInValue: string | null;
   escalation: "none" | "human_signin";
+  /** Set when a session exists for this origin but the site stopped accepting it. */
+  staleSession: { sessionName: string; reason: string | null } | null;
 }
 
 /** Page facts an origin rule is evaluated against. */
@@ -94,6 +96,7 @@ interface ResolvePayload {
     } | null;
     session?: { sessionName?: unknown; origin?: unknown } | null;
     state?: unknown;
+    staleSession?: { sessionName?: unknown; reason?: unknown } | null;
   };
 }
 
@@ -142,6 +145,7 @@ export async function resolveOrigin(url: string): Promise<OriginRule | null> {
   const payload = await postResolve(url);
   const origin = payload?.data?.origin;
   if (!origin || typeof origin.origin !== "string") return null;
+  const stale = payload?.data?.staleSession;
   const kind = origin.signedInKind;
   if (kind !== "url_contains" && kind !== "text" && kind !== "selector" && kind !== "none")
     return null;
@@ -150,6 +154,13 @@ export async function resolveOrigin(url: string): Promise<OriginRule | null> {
     signedInKind: kind,
     signedInValue: typeof origin.signedInValue === "string" ? origin.signedInValue : null,
     escalation: origin.escalation === "human_signin" ? "human_signin" : "none",
+    staleSession:
+      stale && typeof stale.sessionName === "string"
+        ? {
+            sessionName: stale.sessionName,
+            reason: typeof stale.reason === "string" ? stale.reason : null,
+          }
+        : null,
   };
 }
 

@@ -138,6 +138,7 @@ describe("origin rule evaluation", () => {
     signedInKind: "url_contains",
     signedInValue: "/feed",
     escalation: "human_signin",
+    staleSession: null,
     ...over,
   });
 
@@ -186,5 +187,24 @@ describe("origin rule evaluation", () => {
   test("origin resolution returns null with no conduit reachable", async () => {
     delete process.env[CONDUIT_SOCKET_ENV];
     expect(await resolveOrigin("https://www.linkedin.com/jobs/view/1")).toBeNull();
+  });
+});
+
+describe("stale sessions are named as such", () => {
+  test("a stale session is reported distinctly from a missing one", () => {
+    // The remedy differs in kind: one creates a session, the other replaces it.
+    const missing: OriginRule = {
+      origin: "https://x.com",
+      signedInKind: "url_contains",
+      signedInValue: "/home",
+      escalation: "human_signin",
+      staleSession: null,
+    };
+    const stale: OriginRule = {
+      ...missing,
+      staleSession: { sessionName: "x-auth", reason: "the site no longer accepts it" },
+    };
+    expect(missing.staleSession).toBeNull();
+    expect(stale.staleSession?.sessionName).toBe("x-auth");
   });
 });
