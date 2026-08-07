@@ -1,4 +1,6 @@
-import { extname } from "node:path";
+import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
 import {
   AgentscrapeAuthError,
   AgentscrapeError,
@@ -371,6 +373,88 @@ async function fetchBlob(target: GithubTarget, context: GithubOperationContext):
   }
 }
 
+interface GistFile {
+  name: string;
+  content: string;
+}
+
+/** Assemble Gist files into one Markdown document. */
+function renderGist(files: GistFile[]): string {
+  const sections = files.map(({ name, content }) =>
+    name.endsWith(".md") && files.length === 1
+      ? content
+      : name.endsWith(".md")
+        ? `## ${name}\n\n${content}`
+        : `${files.length > 1 ? `## ${name}\n\n` : `**${name}**\n\n`}${fencedCodeBlock(content, language(name))}`,
+  );
+  return sections.join("\n\n---\n\n");
+}
+
+async function gistViaGh(id: string, context: GithubOperationContext): Promise<GistFile[]> {
+  const names = scanGistFiles(await gh(["gist", "view", id, "--files"], context), context);
+  const files: GistFile[] = [];
+  for (const name of names)
+    files.push({
+      name,
+      content: await gh(
+        ["gist", "view", id, ...(names.length > 1 ? ["-f", name] : []), "--raw"],
+        context,
+      ),
+    });
+  return files;
+}
+
+/**
+ * Read a Gist over git, which is what a Gist actually is.
+ *
+ * The clone is shallow, lands in a private temporary directory, and is removed
+ * before returning. Only regular files at the top level are read: a Gist has no
+ * subdirectories, so anything else — a symlink, a device node — is not Gist
+ * content and is skipped rather than followed. The same file-count and
+ * aggregate-byte budgets as the gh path apply, so a fallback cannot be a way to
+ * exceed them.
+ */
+async function gistViaGit(id: string, context: GithubOperationContext): Promise<GistFile[]> {
+  checkpoint(context);
+  if (!context.injectedRunner && !findExecutable("git"))
+    throw new AgentscrapeProviderError("git not found on PATH for the Gist fallback", false);
+  const root = await mkdtemp(join(tmpdir(), "agentscrape-gist-"));
+  try {
+    await chmod(root, 0o700);
+    const checkout = join(root, "gist");
+    const result = await context.runner(
+      ["git", "clone", "--quiet", "--depth", "1", `https://gist.github.com/${id}.git`, checkout],
+      {
+        timeoutMs: remainingTime(context),
+        maxOutputBytes: 1_000_000,
+        env: { GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null" },
+        ...(context.signal ? { signal: context.signal } : {}),
+      },
+    );
+    throwIfAborted(context.signal);
+    if (result.timedOut) throw new AgentscrapeTimeoutError(DEADLINE_MESSAGE);
+    if (result.exitCode !== 0)
+      throw new AgentscrapeProviderError("Gist git fallback could not clone the Gist", false);
+
+    const files: GistFile[] = [];
+    for (const entry of (await readdir(checkout, { withFileTypes: true }))
+      .filter((item) => item.isFile() && item.name !== ".git")
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      checkpoint(context);
+      if (files.length >= context.maxGistFiles)
+        throw new AgentscrapeProviderError(GIST_FILES_MESSAGE, false);
+      const bytes = await readFile(join(checkout, entry.name));
+      if (bytes.byteLength > context.remainingGhBytes)
+        throw new AgentscrapeProviderError(OUTPUT_MESSAGE, false);
+      context.remainingGhBytes -= bytes.byteLength;
+      files.push({ name: entry.name, content: bytes.toString("utf8") });
+    }
+    return files;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function scanGistFiles(output: string, context: GithubOperationContext): string[] {
   checkpoint(context);
   const files: string[] = [];
@@ -408,26 +492,20 @@ async function fetchTarget(target: GithubTarget, context: GithubOperationContext
       context,
     );
   if (target.type === "gist") {
-    const files = scanGistFiles(
-      await gh(["gist", "view", target.id!, "--files"], context),
-      context,
-    );
-    if (!files.length) throw new AgentscrapeError(`gist ${target.id} has no files`);
-    const sections: string[] = [];
-    for (const file of files) {
-      const content = await gh(
-        ["gist", "view", target.id!, ...(files.length > 1 ? ["-f", file] : []), "--raw"],
-        context,
-      );
-      sections.push(
-        file.endsWith(".md") && files.length === 1
-          ? content
-          : file.endsWith(".md")
-            ? `## ${file}\n\n${content}`
-            : `${files.length > 1 ? `## ${file}\n\n` : `**${file}**\n\n`}${fencedCodeBlock(content, language(file))}`,
-      );
+    let files: GistFile[];
+    try {
+      files = await gistViaGh(target.id!, context);
+    } catch (error) {
+      // A Gist is a git repository, so git serves one the API cannot. GitHub's
+      // API 5xxes on some Gists indefinitely while git and the web UI serve
+      // them fine, and without this that is a permanent failure for content
+      // that is plainly reachable. Only a retryable provider failure falls
+      // through: a 404 or a file-count refusal is an answer, not an outage.
+      if (!(error instanceof AgentscrapeProviderError) || !error.retryable) throw error;
+      files = await gistViaGit(target.id!, context);
     }
-    return sections.join("\n\n---\n\n");
+    if (!files.length) throw new AgentscrapeError(`gist ${target.id} has no files`);
+    return renderGist(files);
   }
   if (target.type === "profile") {
     const response = await gh(["api", "--", `users/${target.owner}`], context);

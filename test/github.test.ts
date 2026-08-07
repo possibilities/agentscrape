@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import MarkdownIt from "markdown-it";
@@ -173,6 +173,58 @@ printf 'offline issue'`);
     expect(process.calls.slice(1).every((call) => call.argv.includes("--raw"))).toBeTrue();
   });
 
+  test("a 5xx Gist falls back to git, which is what a Gist is", async () => {
+    const calls: string[][] = [];
+    const runProcess = async (argv: string[]) => {
+      calls.push(argv);
+      if (argv[0] === "gh")
+        return {
+          stdout: "",
+          stderr: "HTTP 502: Server Error (https://api.github.com/gists/abcdef)",
+          exitCode: 1,
+          timedOut: false,
+          truncated: false,
+        } as ProcessResult;
+      // Stand in for git clone by writing the Gist into the checkout path.
+      const checkout = argv.at(-1)!;
+      mkdirSync(checkout, { recursive: true });
+      writeFileSync(join(checkout, "notes.md"), "# Notes\n\nBody\n");
+      return {
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+        truncated: false,
+      } as ProcessResult;
+    };
+
+    const result = await fetchGithubIfApplicable("https://gist.github.com/user/abcdef", undefined, {
+      runProcess,
+    });
+
+    expect(result?.markdown).toContain("# Notes");
+    expect(calls.some((argv) => argv[0] === "git" && argv[1] === "clone")).toBeTrue();
+  });
+
+  test("a 404 Gist is an answer, not an outage, and never reaches git", async () => {
+    const calls: string[][] = [];
+    const runProcess = async (argv: string[]) => {
+      calls.push(argv);
+      return {
+        stdout: "",
+        stderr: "HTTP 404: Not Found (https://api.github.com/gists/abcdef)",
+        exitCode: 1,
+        timedOut: false,
+        truncated: false,
+      } as ProcessResult;
+    };
+
+    await expect(
+      fetchGithubIfApplicable("https://gist.github.com/user/abcdef", undefined, { runProcess }),
+    ).rejects.toMatchObject({ retryable: false });
+    expect(calls.every((argv) => argv[0] === "gh")).toBeTrue();
+  });
+
   test("classifies a 5xx as retryable in both gh error formats", async () => {
     // gh reports the same failure two ways: `gh api` parenthesises the status,
     // while `gh gist view` prefixes it and parenthesises the URL instead.
@@ -180,10 +232,12 @@ printf 'offline issue'`);
       "gh: Server Error (HTTP 502)",
       "HTTP 502: Server Error (https://api.github.com/gists/abcdef)",
     ];
+    // A non-Gist target, so the classification is observed without the Gist
+    // git fallback consuming it.
     for (const stderr of formats) {
       const process = sequence({ stdout: "", stderr, exitCode: 1 });
       await expect(
-        fetchGithubIfApplicable("https://gist.github.com/user/abcdef", undefined, {
+        fetchGithubIfApplicable("https://github.com/o/r/issues/1", undefined, {
           runProcess: process.runProcess,
         }),
       ).rejects.toMatchObject({
@@ -196,11 +250,11 @@ printf 'offline issue'`);
   test("a prefixed 404 stays permanent rather than reading the trailing URL", async () => {
     const process = sequence({
       stdout: "",
-      stderr: "HTTP 404: Not Found (https://api.github.com/gists/abcdef)",
+      stderr: "HTTP 404: Not Found (https://api.github.com/repos/o/r)",
       exitCode: 1,
     });
     await expect(
-      fetchGithubIfApplicable("https://gist.github.com/user/abcdef", undefined, {
+      fetchGithubIfApplicable("https://github.com/o/r/issues/1", undefined, {
         runProcess: process.runProcess,
       }),
     ).rejects.toMatchObject({ retryable: false });
