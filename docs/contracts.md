@@ -197,6 +197,16 @@ Registration is process-local, rejects built-in/name collisions, enforces the
 registered handler/schema pair, and returns an unregister function for test and
 lifecycle cleanup.
 
+PDFs are extracted with `pdftotext` (poppler), not the browser: a browser
+renders a PDF into a viewer with no extractable DOM, so every PDF returned
+empty content. A `.pdf` path routes there directly; a PDF served without one —
+`arxiv.org/pdf/ID` is the common case — is retried as a PDF only after the
+generic route comes back empty, and only an `application/pdf` content-type
+answers that retry, so a genuinely empty page stays empty. Bytes pass through a
+private temporary file because stdin carries a string. A scan with no text
+layer yields nothing and reports `empty_content`, which is the truth about the
+document rather than a failure of the extractor.
+
 A Gist whose API read fails with a retryable provider error is re-read over
 git, which is the protocol a Gist actually speaks. GitHub's API returns 5xx
 indefinitely for some Gists that git and the web UI serve normally, and without
