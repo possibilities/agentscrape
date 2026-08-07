@@ -156,6 +156,25 @@ function checkpoint(context: GithubOperationContext): void {
   remainingTime(context);
 }
 
+/**
+ * Read the HTTP status out of a gh failure.
+ *
+ * gh reports the same failure two ways depending on the subcommand: `gh api`
+ * writes "gh: Server Error (HTTP 502)", while `gh gist view` writes
+ * "HTTP 502: Server Error (https://api.github.com/...)". Reading only the
+ * parenthesised form left the second unparsed, so a transient 5xx fell through
+ * to the generic branch and was reported as permanent — the caller then never
+ * retried a failure that would have cleared on its own.
+ *
+ * The trailing parenthesis in the second form holds a URL, so the prefixed
+ * match must be anchored to the digits that follow "HTTP " directly.
+ */
+export function ghStatus(stderr: string): number {
+  const parenthesised = stderr.match(/\(HTTP (\d+)\)/)?.[1];
+  if (parenthesised !== undefined) return Number(parenthesised);
+  return Number(stderr.match(/(?:^|\s)HTTP (\d{3})\b/)?.[1]);
+}
+
 async function gh(args: string[], context: GithubOperationContext): Promise<string> {
   checkpoint(context);
   if (context.remainingGhBytes <= 0) throw new AgentscrapeProviderError(OUTPUT_MESSAGE, false);
@@ -187,7 +206,7 @@ async function gh(args: string[], context: GithubOperationContext): Promise<stri
   checkpoint(context);
 
   if (result.exitCode === 0) return result.stdout;
-  const status = Number(result.stderr.match(/\(HTTP (\d+)\)/)?.[1]);
+  const status = ghStatus(result.stderr);
   if (result.exitCode === 4 || status === 401)
     throw new AgentscrapeAuthError("GitHub authentication required — run `gh auth login`");
   if (status === 403 || status === 429)

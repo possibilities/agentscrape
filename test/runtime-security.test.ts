@@ -544,6 +544,54 @@ describe("envelope URL and diagnostic security", () => {
     }
   });
 
+  test("a secret-bearing final URL reports authentication, not malformed output", () => {
+    // Where a login redirect lands: a well-formed https URL whose OAuth state
+    // the secret check correctly refuses to record.
+    // Either as a sensitive parameter name, or nested inside an innocuous one
+    // like `next`, which is how v0.app arrives.
+    for (const url of [
+      "https://vercel.com/login?state=tBAJ2Fg1B45rWLF",
+      "https://vercel.com/login?next=%2Fapi%2Fvercel-auth%3Fstate%3DtBAJ2Fg1B45rWLF",
+    ]) {
+      let caught: unknown;
+      try {
+        validateProviderFinalUrl(url);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ failureClass: "authentication_required" });
+      // The refused URL is still never echoed.
+      expect(String(caught)).not.toContain("tBAJ2Fg1B45rWLF");
+    }
+  });
+
+  test("credentialed and secret-path final URLs stay malformed, not authentication", () => {
+    for (const url of [
+      "https://user:pw@example.com/final.md?next=token%3Dnested-secret",
+      "https://example.com/token/path-secret/page.md",
+    ]) {
+      let caught: unknown;
+      try {
+        validateProviderFinalUrl(url);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ failureClass: "malformed_provider_output" });
+    }
+  });
+
+  test("a final URL that is not http(s) stays malformed provider output", () => {
+    for (const value of ["chrome-error://chromewebdata/", "about:blank", "not a url"]) {
+      let caught: unknown;
+      try {
+        validateProviderFinalUrl(value);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ failureClass: "malformed_provider_output" });
+    }
+  });
+
   test("redacts credentials, nested names, path values, multiline payloads, and controls", () => {
     const envelope = buildFailureEnvelope(
       new Error(
