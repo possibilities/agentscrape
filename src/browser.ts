@@ -32,6 +32,14 @@ import { findExecutable, type ProcessResult, runProcess } from "./subprocess";
 
 export const AGENT_BROWSER_BIN_ENV = "AGENTSCRAPE_AGENT_BROWSER_BIN";
 export const AGENT_BROWSER_TIMEOUT_ENV = "AGENTSCRAPE_AGENT_BROWSER_TIMEOUT";
+/**
+ * Pins every otherwise-ephemeral operation to one operator-managed browser
+ * session. Sites that require authentication (X, and any other logged-in
+ * provider) need a session an operator has already signed in; a per-process
+ * throwaway session can never satisfy them. Agentscrape never creates, closes,
+ * or authenticates the pinned session — it only reuses it.
+ */
+export const AGENT_BROWSER_SESSION_ENV = "AGENTSCRAPE_BROWSER_SESSION";
 export const AGENT_BROWSER_TIMEOUT_PREFIX = "agent-browser timed out after ";
 export const UPSTREAM_DOWN_PREFIX = "upstream down: ";
 export const CLAUDE_APP_READY_SELECTOR = "[data-testid='account-settings'], main";
@@ -69,11 +77,18 @@ function context(): BrowserContext {
   );
 }
 
+/** A non-empty, bounded, shell-safe pinned session name, or null when unset. */
+export function pinnedSession(): string | null {
+  const value = (process.env[AGENT_BROWSER_SESSION_ENV] ?? "").trim();
+  return value.length > 0 && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
+    ? value
+    : null;
+}
 function defaultSession(): string {
-  return `agentscrape-${process.pid}`;
+  return pinnedSession() ?? `agentscrape-${process.pid}`;
 }
 function freshSession(): string {
-  return `agentscrape-${process.pid}-${randomUUID().replaceAll("-", "")}`;
+  return pinnedSession() ?? `agentscrape-${process.pid}-${randomUUID().replaceAll("-", "")}`;
 }
 function resolveBrowserSession(
   requested: string | null | undefined,
@@ -345,9 +360,13 @@ export async function withBrowserSession<T>(
       fn(active.session!, false),
     );
 
+  // A pinned session is operator-owned: reuse it, but never close it.
+  const pinned = pinnedSession();
   const scope: BrowserSessionScope = requested
     ? { name: requested, owned: false, used: false }
-    : { name: freshSession(), owned: true, used: false };
+    : pinned !== null
+      ? { name: pinned, owned: false, used: false }
+      : { name: freshSession(), owned: true, used: false };
   const owner = scope.owned;
   const capturedName = scope.name;
   try {

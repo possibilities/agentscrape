@@ -15,6 +15,7 @@ import { parse as parseYaml } from "yaml";
 import { fetchLinks, fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
+  AGENT_BROWSER_SESSION_ENV,
   closeSession,
   currentBrowserArtifactRetention,
   openPage,
@@ -770,5 +771,43 @@ describe("browser-free and low-level session behavior", () => {
       { session: secondName, command: ["eval", "window.location.href"] },
       { session: secondName, command: ["close"] },
     ]);
+  });
+});
+
+describe("operator-pinned browser session", () => {
+  const priorPinned = process.env[AGENT_BROWSER_SESSION_ENV];
+
+  afterEach(() => {
+    if (priorPinned === undefined) delete process.env[AGENT_BROWSER_SESSION_ENV];
+    else process.env[AGENT_BROWSER_SESSION_ENV] = priorPinned;
+  });
+
+  test("reuses the pinned session for implicit work and never closes it", async () => {
+    const value = fixture();
+    process.env[AGENT_BROWSER_SESSION_ENV] = "operator-x";
+
+    await withBrowserNetworkPolicy(true, () =>
+      withBrowserSession(null, async () => {
+        await runAgentBrowser(["eval", "null"]);
+      }),
+    );
+
+    expect(events(value).map((event) => event.session)).toEqual(["operator-x"]);
+    expect(events(value).some((event) => event.command[0] === "close")).toBeFalse();
+  });
+
+  test("rejects an unsafe pinned name and falls back to an owned ephemeral session", async () => {
+    const value = fixture();
+    process.env[AGENT_BROWSER_SESSION_ENV] = "bad name; rm -rf /";
+
+    await withBrowserNetworkPolicy(true, () =>
+      withBrowserSession(null, async () => {
+        await runAgentBrowser(["eval", "null"]);
+      }),
+    );
+
+    const sessions = events(value).map((event) => event.session);
+    expect(sessions[0]).toStartWith("agentscrape-");
+    expect(sessions).not.toContain("bad name; rm -rf /");
   });
 });
