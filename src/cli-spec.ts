@@ -775,7 +775,7 @@ export function renderHumanHelp(commandName?: string): string {
   const commands = CLI_SPEC.commands
     .map((command) => `  ${inventoryUsage(command).padEnd(35)} ${command.summary}`)
     .join("\n");
-  return `${CLI_SPEC.name} — ${CLI_SPEC.description}\n\nUsage: ${CLI_SPEC.name} [${optionSyntax(format, false)}] COMMAND [OPTIONS]\n\nCommands:\n${commands}\n\nGlobal options:\n${optionRows(CLI_SPEC.globalOptions)}\n`;
+  return `${CLI_SPEC.name} — ${CLI_SPEC.description}\n\nUsage: ${CLI_SPEC.name} [${optionSyntax(format, false)}] COMMAND [OPTIONS]\n\nCommands:\n${commands}\n\nGlobal options:\n${optionRows(CLI_SPEC.globalOptions)}\n\nRun ${CLI_SPEC.name} --agent-help for the agent runbook.\n`;
 }
 
 export interface JsonArgument {
