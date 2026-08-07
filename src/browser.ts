@@ -16,6 +16,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMap, parseDocument } from "yaml";
+import { attachSession, conduitConfigured, resolveSession } from "./conduit";
 import {
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
@@ -666,6 +667,19 @@ function reachedNavigationTarget(
   return before !== null && current !== before;
 }
 
+/**
+ * Best-effort attach of an operator-established session for this URL. Returns
+ * the session name when one was attached, or null when no conduit is
+ * configured, none is stored for the origin, or the daemon is unreachable.
+ */
+async function attachConduitSession(url: string, session?: string | null): Promise<string | null> {
+  if (!conduitConfigured()) return null;
+  const resolved = await resolveSession(url);
+  if (resolved === null) return null;
+  const attached = await attachSession(resolved, (args) => runAgentBrowser(args, session));
+  return attached ? resolved.sessionName : null;
+}
+
 export async function openPage(
   url: string,
   session?: string | null,
@@ -677,6 +691,11 @@ export async function openPage(
   if (!active.allowPrivateNetwork)
     throw new AgentscrapeNetworkPolicyError("browser_egress_unverifiable");
   await setMediaMode(media, session);
+  // Attach an operator-established session for this origin before navigating,
+  // when a conduit is configured and knows one. Best effort by contract: an
+  // absent or unreachable conduit means unauthenticated extraction, never a
+  // failed fetch.
+  await attachConduitSession(url, session);
   const before = await currentUrl(session);
   const opened = await runAgentBrowser(["open", url], session);
   throwUpstream(opened);
