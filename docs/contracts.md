@@ -197,6 +197,14 @@ Registration is process-local, rejects built-in/name collisions, enforces the
 registered handler/schema pair, and returns an unregister function for test and
 lifecycle cleanup.
 
+A Gist whose API read fails with a retryable provider error is re-read over
+git, which is the protocol a Gist actually speaks. GitHub's API returns 5xx
+indefinitely for some Gists that git and the web UI serve normally, and without
+the fallback that is a permanent failure for reachable content. The clone is
+shallow, private, top-level regular files only, and spends the same file-count
+and byte budgets as the API path. A 404 or a file-count refusal is an answer,
+not an outage, and never reaches git.
+
 Official presets cover ChatGPT conversations; DeepWiki wiki/search pages; X
 posts, profiles, timelines, and articles; and generic documentation navigation.
 
