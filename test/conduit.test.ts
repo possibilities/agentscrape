@@ -7,6 +7,9 @@ import {
   CONDUIT_SOCKET_ENV,
   CONDUIT_TOKEN_FILE_ENV,
   conduitConfigured,
+  evaluateSignedIn,
+  type OriginRule,
+  resolveOrigin,
   resolveSession,
 } from "../src/conduit";
 
@@ -128,3 +131,60 @@ function existsSyncSafe(path: string): boolean {
     return false;
   }
 }
+
+describe("origin rule evaluation", () => {
+  const rule = (over: Partial<OriginRule>): OriginRule => ({
+    origin: "https://www.linkedin.com",
+    signedInKind: "url_contains",
+    signedInValue: "/feed",
+    escalation: "human_signin",
+    ...over,
+  });
+
+  test("a login wall is detected as signed out", () => {
+    const wall = { url: "https://www.linkedin.com/login", text: "Sign in", selectorHits: 0 };
+    expect(evaluateSignedIn(rule({}), wall)).toBeFalse();
+    expect(
+      evaluateSignedIn(rule({ signedInKind: "text", signedInValue: "My jobs" }), wall),
+    ).toBeFalse();
+  });
+
+  test("a signed-in page passes each rule kind", () => {
+    expect(
+      evaluateSignedIn(rule({}), {
+        url: "https://www.linkedin.com/feed/",
+        text: "",
+        selectorHits: 0,
+      }),
+    ).toBeTrue();
+    expect(
+      evaluateSignedIn(rule({ signedInKind: "text", signedInValue: "My jobs" }), {
+        url: "",
+        text: "My jobs today",
+        selectorHits: 0,
+      }),
+    ).toBeTrue();
+    expect(
+      evaluateSignedIn(rule({ signedInKind: "selector", signedInValue: "[data-x]" }), {
+        url: "",
+        text: "",
+        selectorHits: 2,
+      }),
+    ).toBeTrue();
+  });
+
+  test("an origin without a rule is never treated as blocked", () => {
+    expect(
+      evaluateSignedIn(rule({ signedInKind: "none", signedInValue: null }), {
+        url: "https://www.linkedin.com/login",
+        text: "Sign in",
+        selectorHits: 0,
+      }),
+    ).toBeTrue();
+  });
+
+  test("origin resolution returns null with no conduit reachable", async () => {
+    delete process.env[CONDUIT_SOCKET_ENV];
+    expect(await resolveOrigin("https://www.linkedin.com/jobs/view/1")).toBeNull();
+  });
+});

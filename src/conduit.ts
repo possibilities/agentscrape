@@ -28,6 +28,35 @@ export interface ResolvedSession {
   state: string;
 }
 
+export type SignedInKind = "url_contains" | "text" | "selector" | "none";
+
+/** The conduit's rule for deciding whether a page is signed in. */
+export interface OriginRule {
+  origin: string;
+  signedInKind: SignedInKind;
+  signedInValue: string | null;
+  escalation: "none" | "human_signin";
+}
+
+/** Page facts an origin rule is evaluated against. */
+export interface PageProbe {
+  url: string;
+  text: string;
+  selectorHits: number;
+}
+
+/**
+ * Whether the probe shows a signed-in page. An origin with no rule cannot
+ * answer and reports signed in, so a site nobody has taught Agentweb about is
+ * never treated as blocked.
+ */
+export function evaluateSignedIn(rule: OriginRule, probe: PageProbe): boolean {
+  if (rule.signedInKind === "none" || rule.signedInValue === null) return true;
+  if (rule.signedInKind === "url_contains") return probe.url.includes(rule.signedInValue);
+  if (rule.signedInKind === "text") return probe.text.includes(rule.signedInValue);
+  return probe.selectorHits > 0;
+}
+
 function configuredSocket(): string | null {
   const value = (process.env[CONDUIT_SOCKET_ENV] ?? "").trim();
   return value.length > 0 ? value : null;
@@ -55,7 +84,21 @@ export function conduitConfigured(): boolean {
  * silent by design: a missing conduit means unauthenticated extraction, which
  * is the behavior that existed before the conduit.
  */
-export async function resolveSession(url: string): Promise<ResolvedSession | null> {
+interface ResolvePayload {
+  data?: {
+    origin?: {
+      origin?: unknown;
+      signedInKind?: unknown;
+      signedInValue?: unknown;
+      escalation?: unknown;
+    } | null;
+    session?: { sessionName?: unknown; origin?: unknown } | null;
+    state?: unknown;
+  };
+}
+
+/** One resolve call, or null on any failure. Never throws. */
+async function postResolve(url: string): Promise<ResolvePayload | null> {
   const socket = configuredSocket();
   const token = configuredToken();
   if (socket === null || token === null) return null;
@@ -68,18 +111,46 @@ export async function resolveSession(url: string): Promise<ResolvedSession | nul
       signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
     });
     if (!response.ok) return null;
-    const payload = (await response.json()) as {
-      data?: { session?: { sessionName?: unknown; origin?: unknown } | null; state?: unknown };
-    };
-    const session = payload.data?.session;
-    const state = payload.data?.state;
-    if (!session || typeof state !== "string" || state.length === 0) return null;
-    if (typeof session.sessionName !== "string" || typeof session.origin !== "string") return null;
-    if (Buffer.byteLength(state, "utf8") > MAX_STATE_BYTES) return null;
-    return { sessionName: session.sessionName, origin: session.origin, state };
+    return (await response.json()) as ResolvePayload;
   } catch {
     return null;
   }
+}
+
+/**
+ * The stored session for a URL, or null when there is no conduit, no origin
+ * rule, no stored session, or the daemon cannot be reached. Every failure is
+ * silent by design: a missing conduit means unauthenticated extraction, which
+ * is the behavior that existed before the conduit.
+ */
+export async function resolveSession(url: string): Promise<ResolvedSession | null> {
+  const payload = await postResolve(url);
+  const session = payload?.data?.session;
+  const state = payload?.data?.state;
+  if (!session || typeof state !== "string" || state.length === 0) return null;
+  if (typeof session.sessionName !== "string" || typeof session.origin !== "string") return null;
+  if (Buffer.byteLength(state, "utf8") > MAX_STATE_BYTES) return null;
+  return { sessionName: session.sessionName, origin: session.origin, state };
+}
+
+/**
+ * The origin rule for a URL, independent of whether a session is stored. This
+ * is what lets a fetch notice it is looking at a login wall even when no
+ * session exists to attach.
+ */
+export async function resolveOrigin(url: string): Promise<OriginRule | null> {
+  const payload = await postResolve(url);
+  const origin = payload?.data?.origin;
+  if (!origin || typeof origin.origin !== "string") return null;
+  const kind = origin.signedInKind;
+  if (kind !== "url_contains" && kind !== "text" && kind !== "selector" && kind !== "none")
+    return null;
+  return {
+    origin: origin.origin,
+    signedInKind: kind,
+    signedInValue: typeof origin.signedInValue === "string" ? origin.signedInValue : null,
+    escalation: origin.escalation === "human_signin" ? "human_signin" : "none",
+  };
 }
 
 /** Runs one agent-browser command; supplied by the browser module to avoid a cycle. */
