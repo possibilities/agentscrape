@@ -15,7 +15,7 @@ import {
 } from "./errors";
 import { EnvelopeBuildError, type ExtractorDefinition, projectScrapeResult } from "./extractors";
 import type { ScrapeResult } from "./handlers/types";
-import { isSecureHttpUrl, redactDiagnostic, redactUrl } from "./redaction";
+import { isSecureHttpUrl, isSensitiveName, redactDiagnostic, redactUrl } from "./redaction";
 import type { ExtractionEnvelope, FailureClass } from "./schemas";
 import { AGENTSCRAPE_VERSION } from "./version";
 
@@ -93,9 +93,49 @@ export function validateProviderFinalUrl(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > 4096)
     throw new EnvelopeBuildError("malformed_provider_output", "extractor final URL is invalid");
-  if (!isSecureHttpUrl(value))
+  if (!isSecureHttpUrl(value)) {
+    // Landing on a sign-in page is not malformed output: the redirect target
+    // carries the OAuth state the secret check exists to keep out of the
+    // envelope. Reporting that as malformed sends the caller looking for an
+    // extractor defect instead of for the credentials the page wants.
+    //
+    // Only secret-looking *query* names qualify. Embedded userinfo or a secret
+    // in the path is a credentialed URL, which is unsafe provider output
+    // whatever produced it. The URL is never echoed in either case.
+    if (isSignInRedirect(value))
+      throw new EnvelopeBuildError(
+        "authentication_required",
+        "extraction landed on a sign-in redirect",
+      );
     throw new EnvelopeBuildError("malformed_provider_output", "extractor final URL is invalid");
+  }
   return value;
+}
+
+/**
+ * True when the query or fragment is the only reason the URL was refused.
+ *
+ * A sign-in redirect carries its secret there — sometimes as a sensitive
+ * parameter name, sometimes nested inside an innocuous one like `next`, which
+ * is how v0.app arrives. Rather than restate the secret rules, this strips the
+ * query and fragment and asks whether what remains would have been accepted.
+ * Embedded userinfo or a secret in the path survives that strip and stays
+ * malformed, because a credentialed URL is unsafe output whatever produced it.
+ */
+function isSignInRedirect(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (!["http:", "https:"].includes(url.protocol)) return false;
+  if (url.username || url.password) return false;
+  if (!url.search && !url.hash) return false;
+  const stripped = new URL(url.toString());
+  stripped.search = "";
+  stripped.hash = "";
+  return isSecureHttpUrl(stripped.toString());
 }
 
 export function buildSuccessEnvelope(

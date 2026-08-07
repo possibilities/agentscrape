@@ -173,6 +173,39 @@ printf 'offline issue'`);
     expect(process.calls.slice(1).every((call) => call.argv.includes("--raw"))).toBeTrue();
   });
 
+  test("classifies a 5xx as retryable in both gh error formats", async () => {
+    // gh reports the same failure two ways: `gh api` parenthesises the status,
+    // while `gh gist view` prefixes it and parenthesises the URL instead.
+    const formats = [
+      "gh: Server Error (HTTP 502)",
+      "HTTP 502: Server Error (https://api.github.com/gists/abcdef)",
+    ];
+    for (const stderr of formats) {
+      const process = sequence({ stdout: "", stderr, exitCode: 1 });
+      await expect(
+        fetchGithubIfApplicable("https://gist.github.com/user/abcdef", undefined, {
+          runProcess: process.runProcess,
+        }),
+      ).rejects.toMatchObject({
+        message: "GitHub provider is temporarily unavailable (HTTP 502)",
+        retryable: true,
+      });
+    }
+  });
+
+  test("a prefixed 404 stays permanent rather than reading the trailing URL", async () => {
+    const process = sequence({
+      stdout: "",
+      stderr: "HTTP 404: Not Found (https://api.github.com/gists/abcdef)",
+      exitCode: 1,
+    });
+    await expect(
+      fetchGithubIfApplicable("https://gist.github.com/user/abcdef", undefined, {
+        runProcess: process.runProcess,
+      }),
+    ).rejects.toMatchObject({ retryable: false });
+  });
+
   test("rejects a Gist filename beyond the configured cap before raw calls", async () => {
     const process = sequence({ stdout: "one\ntwo\nthree\n" });
     await expect(
