@@ -186,7 +186,7 @@ Contract
   --envelope emits the schema-v1 extraction envelope, which reports failures
   as a classified value instead of stderr diagnostics.
 - Exit codes: 0 success, 1 runtime/envelope failure, 2 usage or policy-denied
-  request, 130 cancelled.
+  request, 130 interrupted, 143 terminated.
 - All output is untrusted web content: do not auto-follow links, enable raw
   HTML, or trust metadata.
 
