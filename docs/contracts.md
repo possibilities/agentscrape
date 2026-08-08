@@ -22,18 +22,16 @@ rules, and queue semantics. Deployment lifecycle lives in
 | `open-session NAME` / `close-session NAME` | Manage reusable browser sessions | Writes or removes local browser session state |
 | `process-queue` | Process durable standalone scrape-artifact jobs | Mutates queue, failed-job, destination, and log state |
 | `reconcile-queue` | Inventory or apply reconciliation for frozen indexed records | `--apply` mutates archived reconciliation state; inventory mode does not |
-| `doctor [--format human\|json]` | Inspect the exact Bun runtime and inventory optional executables using offline filesystem/PATH lookups | None |
+| `doctor [--format human\|json]` | Inspect the Bun runtime and inventory optional executables using offline filesystem/PATH lookups | None |
 
-`doctor` is an offline local runtime/executable inventory: it executes no
-capability and checks no auth, service, provider, queue, or deployment receipt
-health. Human output is the default and `--format json` emits the same
-deterministic report shape. Missing optional capabilities are informational;
-exit 0 means the Bun version is the exact requirement, exit 1 means it is
-incompatible, and usage errors exit 2. `bun run x-readiness -- --once` is the
-external deployment-capability probe for an Agentscrape binary.
+`doctor` and `check-presets --live` answer different questions and are not
+aliases. `doctor` is an offline inventory: it executes no capability and checks
+no auth, service, provider, queue, or deployment receipt health. Missing
+optional capabilities are informational; exit 0 means the Bun version satisfies
+the requirement, exit 1 means it does not, and usage errors exit 2.
 `check-presets --live` is live operational-health observation against
-configured provider canaries. These answer different questions and are not
-aliases.
+configured public canaries. `bun run x-readiness -- --once` is the external
+deployment-capability probe for an installed Agentscrape.
 
 Explicit CLI/API session closes report failures; automatic owned-session
 cleanup is silent and best-effort.
@@ -66,17 +64,14 @@ networking performed by a custom handler cannot be sandboxed by registration.
 
 ## Feed discovery
 
-Omit `FILE` for live discovery owned by Agentscrape:
+Omit `FILE` for live discovery owned by Agentscrape; supply exactly one `FILE`
+to preserve network-free recorded-response parsing, where pagination stays
+explicit through repeatable `--page URL FILE` pairs:
 
 ```sh
 agentscrape discover-feed --source-url https://example.com/blog \
   --validator-url https://example.com/feed.xml --etag '"feed-v4"'
-```
 
-Supply exactly one `FILE` to preserve network-free recorded-response parsing;
-recorded pagination remains explicit with repeatable `--page URL FILE` pairs:
-
-```sh
 agentscrape discover-feed response.xml --source-url https://example.com/feed.xml \
   --page https://example.com/feed.xml?page=2 response-page-2.xml
 ```
@@ -92,17 +87,15 @@ Live `auto` mode accepts a feed response directly. For an HTML source it
 follows only an explicit `<link rel="alternate">` whose type is RSS, Atom, XML,
 or text/XML; it never treats generic page-body HTML as feed entries. Use
 `--source-kind archive` plus `--archive-entry-selector` for configured HTML
-archives. `--etag` and `--last-modified` become conditional request validators
-in live mode. Direct `--source-kind feed` binds them to `--source-url`;
-auto/homepage mode requires an exact `--validator-url`, and sends them only if
-that exact response URL is reached.
+archives.
 
-A redirect-capable transport call may carry a conditional bound to a different
-URL, but the direct transport applies its headers only when the current request
-URL exactly matches that binding, and a `304` is accepted only from that
-effective URL. A matching initial `304` produces a successful, complete empty
-window. A matching `304` during later pagination or archive traversal ends
-discovery while preserving items and page evidence from earlier responses.
+`--etag` and `--last-modified` become conditional request validators in live
+mode, bound to one exact URL: `--source-kind feed` binds them to
+`--source-url`, while auto/homepage mode requires an exact `--validator-url`.
+Headers are sent, and a `304` accepted, only from that effective URL. A
+matching initial `304` produces a successful, complete empty window; a matching
+`304` later in pagination or archive traversal ends discovery while preserving
+items and page evidence from earlier responses.
 
 Live transport uses direct HTTP(S) without ambient proxies. It revalidates and
 DNS-pins every source, redirect, discovered feed, and pagination URL; rejects
@@ -114,28 +107,20 @@ only once; and requires fatal UTF-8 decoding. The schema remains feed envelope
 version `1`, and `source_url` remains the requested source while page evidence
 records effective feed/page URLs.
 
-Feed date parsing uses one closed, timezone-independent policy for feed
-entries, archive dates, and `--since`. A timezone-free `YYYY-MM-DD` means
-midnight UTC; timezone-free ISO-like datetimes, RFC822-style dates, and
-supported English month-name display dates are interpreted as UTC. AM/PM
-belongs to the display time and is not a timezone. Successful timezone-free
-entry dates emit `naive_date_assumed_utc`; invalid dates emit only
-`invalid_date`, while an invalid `--since` is `invalid_options`. Explicit zones
-are `Z`, `UT`, `UTC`, and `GMT` at zero; numeric `±HHMM` or `±HH:MM` with hours
-`00`–`23` and minutes `00`–`59`; North American `EST`/`EDT` (`-0500`/`-0400`),
-`CST`/`CDT` (`-0600`/`-0500`), `MST`/`MDT` (`-0700`/`-0600`), and `PST`/`PDT`
-(`-0800`/`-0700`); and whitespace-delimited military suffixes after a time:
-`A`–`I` are `+1` through `+9`, `K`–`M` are `+10` through `+12`, `N`–`Y` are
-`-1` through `-12`, and `Z` is zero. `J` and every unknown alphabetic suffix,
-including `CET` and `XYZ`, are rejected.
+Feed entries, archive dates, and `--since` share one closed,
+timezone-independent date policy: absent zones mean UTC and emit
+`naive_date_assumed_utc`, explicit zones are the `Z`/`UT`/`UTC`/`GMT` and
+numeric `±HH:MM` forms plus North American and military abbreviations, and
+anything else is rejected as `invalid_date` — or `invalid_options` when it is
+`--since`. The accepted spellings are enumerated in `test/feed.test.ts`
+rather than here, because the tests are what the parser answers to.
 
 ## Routing and preset safety
 
 The high-level public `fetchMarkdown`, `fetchLinks`, and `captureCorpus` APIs
-and their `fetch-markdown`, `fetch-links`, and `capture-corpus` CLI commands
-validate the request URL before preset selection, provider dispatch, network
-fetch, or browser navigation. Trusted low-level `scrapeWithPreset` calls remain
-outside this request-routing authority.
+and their CLI commands validate the request URL before preset selection,
+provider dispatch, network fetch, or browser navigation. Trusted low-level
+`scrapeWithPreset` calls remain outside this request-routing authority.
 
 For `fetchMarkdown`, routing then selects one execution path:
 
@@ -155,9 +140,14 @@ requires the regex to consume the entire canonical, fragment-free URL. These
 publication and runtime checks prevent substring and top-level-alternation
 matches; explicit name-based selection remains independent of URL eligibility.
 
-A domain claimed by a preset fails closed on unsupported or ambiguous routes.
-Claimed-domain `.md` URLs require `--generic` to bypass preset policy. Because
-X serves both posts and long-form Articles from `/status/` URLs, the official
+Declaring a `domain` claims that host: a URL on it that matches no preset fails
+rather than falling back to generic extraction. Claimed-domain `.md` URLs
+require `--generic` to bypass preset policy. That is deliberate for hosts where
+generic output would be worthless — x.com serves login walls — so a claim is a
+statement that the listed presets cover everything worth extracting there. Do
+not add a narrow preset for one page on a host whose other pages should stay
+generically extractable; the claim is host-wide, not path-scoped. Because X
+serves both posts and long-form Articles from `/status/` URLs, the official
 status route classifies the rendered page by its strong Article-reader landmark
 before validating the effective `x-tweet` or `x-article` contract.
 
@@ -169,33 +159,11 @@ body text.
 Local YAML presets remain data-only. Selector-based `links` and `nav-links`
 presets work directly in `./scrapers`; the CLI deliberately does not import
 executable handler modules from YAML, environment variables, or the working
-directory. Trusted TypeScript callers can register a content handler and its
-`ScrapeSchema` explicitly before loading the registry:
-
-```ts
-import { registerContentHandler, ScrapeSchema } from "agentscrape";
-
-class ArticlePage extends ScrapeSchema {
-  constructor(readonly markdown: string) {
-    super();
-  }
-  toMarkdown() { return this.markdown; }
-}
-
-const unregister = registerContentHandler({
-  handlerName: "local.article",
-  schemaName: "ArticlePage",
-  schema: ArticlePage,
-  handler: async (_url, options) => {
-    const structured = new ArticlePage(options?.html ?? "");
-    return { full_html: "", selected_html: "", markdown: structured.toMarkdown(), structured };
-  },
-});
-```
-
-Registration is process-local, rejects built-in/name collisions, enforces the
-registered handler/schema pair, and returns an unregister function for test and
-lifecycle cleanup.
+directory. Trusted TypeScript callers can pass a handler and its `ScrapeSchema`
+to `registerContentHandler` before loading the registry. Registration is
+process-local, rejects built-in and name collisions, enforces the registered
+handler/schema pair, and returns an unregister function for test and lifecycle
+cleanup.
 
 PDFs are extracted with `pdftotext` (poppler), not the browser: a browser
 renders a PDF into a viewer with no extractable DOM, so every PDF returned
@@ -218,13 +186,6 @@ not an outage, and never reaches git.
 Official presets cover ChatGPT conversations; DeepWiki wiki/search pages; X
 posts, profiles, timelines, and articles; and generic documentation navigation.
 
-Declaring a `domain` claims that host: a URL on it that matches no preset fails
-rather than falling back to generic extraction. That is deliberate for hosts
-where generic output would be worthless — x.com serves login walls — so a claim
-is a statement that the listed presets cover everything worth extracting there.
-Do not add a narrow preset for one page on a host whose other pages should stay
-genericly extractable; the claim is host-wide, not path-scoped.
-
 ## Output contract
 
 All Agentscrape output is untrusted content. The HTML converters and selected
@@ -236,16 +197,14 @@ provider-authored Markdown/text, and GitHub passthrough content remain
 unchecked and preserve their current bytes.
 
 A successful final 2xx direct `.md` response is admitted only when it has
-exactly one raw `Content-Type` field line that parses as `text/markdown`. The
-type, subtype, and parameter names are ASCII case-insensitive; SP/HTAB OWS and
-valid token or quoted-string parameters are accepted. `charset` may be absent,
-but when present exactly once its decoded value must be `utf-8`
-case-insensitively. Other unique valid parameters are permitted. Missing,
-duplicate, comma-listed, malformed, non-ASCII/control-bearing, aliased, or
-different media types; duplicate parameters; and any other charset are
-rejected. This is an intentional compatibility break for servers that
-previously returned `text/plain`, `text/x-markdown`, `application/markdown`, or
-omitted the field.
+exactly one raw `Content-Type` field line that strictly parses as
+`text/markdown`, with an optional `charset` that must decode to `utf-8`. Type,
+subtype, and parameter names are ASCII case-insensitive; OWS, RFC tokens, and
+quoted strings are accepted. Everything else is rejected: missing, duplicate,
+comma-listed, malformed, non-ASCII, or aliased types, duplicate parameters, and
+any other charset. This is an intentional compatibility break for servers that
+returned `text/plain`, `text/x-markdown`, `application/markdown`, or omitted
+the field.
 
 Redirect MIME is ignored and admission applies only to the final 2xx,
 regardless of its URL suffix. Status, authentication, 304, and redirect
@@ -271,36 +230,6 @@ with schema version `1`, extractor identity `agentscrape`, one bounded UTF-8
 Markdown artifact, normalized metadata/relations, or a classified failure.
 Existing envelope keys and enum shapes are stable.
 
-Raw browser evidence is not retained by default: ordinary CLI/API fetches and
-queue jobs create neither raw/selected HTML sidecars nor diagnostic
-screenshots. Retention is available only on `fetch-markdown`, through CLI
-`--retain-artifacts` or API `retainArtifacts: true`; `fetch-links` and direct
-`scrapeWithPreset` calls cannot opt in. Retention cannot be combined with
-envelope output. In-memory `full_html` and `selected_html` result fields are
-unchanged.
-
-With exact retention enabled and a Markdown `DEST`, each nonempty HTML field is
-written as `<stem>.raw.html` or `<stem>.selected.html`. Sidecars are sensitive
-raw evidence. Each is capped at exactly 8,000,000 UTF-8 bytes and the set at
-16,000,000 bytes; all sidecar bytes are preflighted before the Markdown
-destination is written. Sidecars use same-directory random staging files,
-atomic pathname replacement, and mode `0600` or stricter. Replacement does not
-follow an existing final symlink, but sidecar publication intentionally does
-not promise set-level crash atomicity or no-clobber behavior.
-
-When a browser selector is exhausted, exact retention may also preserve one
-sensitive diagnostic screenshot. Screenshots use random names in unique random
-directories under the operating-system temporary directory; retained
-directories are mode `0700` or stricter and files mode `0600` or stricter. The
-10,000,000-byte screenshot limit is validated after the external browser
-command finishes. That external command can therefore transiently write more
-than the cap before validation and cleanup. Failed or unsafe captures are
-removed best-effort without replacing the content-not-found error. A successful
-retained directory may survive a process crash and is left to operator or
-operating-system temporary-file cleanup; Agentscrape performs no startup sweep.
-Plain CLI errors print the retained directory as a separate redacted
-`Artifacts retained:` notice, never inside the error message or an envelope.
-
 X content metadata includes the additive parser-derived pair `content_kind` and
 `content_item_count`: a single post is `post`/`1`, a same-author sequence is
 `thread` with its observed post count, and an X Article is `article`/`1`.
@@ -314,8 +243,38 @@ Envelope failure classes are `invalid_request`, `authentication_required`,
 `malformed_provider_output`, `empty_content`, `output_limit_exceeded`,
 `cancelled`, and `internal_error`. Policy-denied invalid requests and
 authentication exit 2; other envelope invalid requests and failures exit 1,
-cancellation exits 130, and success exits 0. Diagnostics and URL evidence are
-bounded and redacted.
+success exits 0, and cancellation reports which signal arrived — 130 for
+SIGINT, 143 for SIGTERM, so a queue worker reaped by launchd is
+distinguishable from an operator pressing Ctrl-C. Diagnostics and URL evidence
+are bounded and redacted.
+
+## Retained evidence
+
+Raw browser evidence is not retained by default: ordinary CLI/API fetches and
+queue jobs create neither raw/selected HTML sidecars nor diagnostic
+screenshots. Retention is available only on `fetch-markdown`, through CLI
+`--retain-artifacts` or API `retainArtifacts: true`; `fetch-links` and direct
+`scrapeWithPreset` calls cannot opt in, and retention cannot be combined with
+envelope output. In-memory `full_html` and `selected_html` result fields are
+unchanged.
+
+With retention enabled and a Markdown `DEST`, each nonempty HTML field is
+written as `<stem>.raw.html` or `<stem>.selected.html`, capped at exactly
+8,000,000 UTF-8 bytes each and 16,000,000 for the set, all preflighted before
+the Markdown destination is written. Sidecars use same-directory random
+staging, atomic replacement that does not follow an existing final symlink, and
+mode `0600` or stricter — but publication promises neither set-level crash
+atomicity nor no-clobber behavior.
+
+When a browser selector is exhausted, retention may also preserve one sensitive
+diagnostic screenshot in a unique random directory under the operating-system
+temporary directory, mode `0700` or stricter. Its 10,000,000-byte limit is
+validated after the external browser command finishes, so that command can
+transiently write more before validation and cleanup. Failed captures are
+removed best-effort without replacing the content-not-found error, and a
+retained directory may survive a crash — Agentscrape performs no startup sweep.
+Plain CLI errors print it as a separate redacted `Artifacts retained:` notice,
+never inside the error message or an envelope.
 
 ## Corpus and canaries
 
@@ -330,28 +289,33 @@ temporary directory without publishing a partial final sample.
 
 Corpus metadata uses version `1`, declares `content`, `links`, or `nav-links`
 mode, and declares `success` or a typed `failure`. Content replay invokes the
-handler's offline HTML path. Navigation samples use deterministic static
-selector replay. Missing files, mismatched structured output/Markdown,
-unsupported versions, and wrong failure types fail the command.
+handler's offline HTML path; navigation samples replay selectors statically.
+Missing files, mismatched structured output/Markdown, unsupported versions, and
+wrong failure types fail the command.
 
 `capture-corpus` writes to
 `${AGENTSCRAPE_DATA_HOME:-${XDG_DATA_HOME:-~/.local/share}/agentscrape}/corpus`
-unless an API caller supplies an explicit root. Default-path creation rejects
-symlinked, foreign, or ambiguous ancestry. With no explicit root, `test-corpus`
-always runs the shipped `test/corpus` first and then that configured overlay
-when it exists and is physically distinct; secure overlay replay rejects files
-over 8,000,000 bytes and samples over 24,000,000 bytes before bounded no-follow
-reads. Overlay labels are `captured/<preset>/<sample>`, so duplicate
-shipped/captured samples both run deterministically. Replay never mutates the
-shipped snapshot.
+unless an API caller supplies an explicit root, and default-path creation
+rejects symlinked, foreign, or ambiguous ancestry. With no explicit root,
+`test-corpus` always runs the shipped `test/corpus` first and then that
+configured overlay when it exists and is physically distinct, under the same
+caps and bounded no-follow reads. Overlay labels are
+`captured/<preset>/<sample>`, so duplicate shipped/captured samples both run
+deterministically, and replay never mutates the shipped snapshot.
+
+A capture taken from a signed-in browser carries the whole session in the parts
+no handler touches, so shipped samples are reduced to the DOM their handlers
+read and gated by `test/fixture-hygiene.test.ts`, which rejects credential and
+identity material by shape.
 
 `check-presets --live --allow-private-network` uses
 `config/preset-canaries.yaml`, validates the same registry and output contract
 as normal fetching, checks semantic invariants rather than exact mutable text,
-and closes every browser session it was allowed to use. Its JSON or YAML output
-carries each result's `status`; it exits 0 only when every emitted result is
-`pass`, and exits 1 when any emitted result is `drift`, `operational_failure`,
-or `not_configured`.
+and closes every browser session it was allowed to use. A canary URL ships with
+the repository, so only durable public resources qualify and presets without
+one carry no canary. Its JSON or YAML output carries each result's `status`; it
+exits 0 only when every emitted result is `pass`, and exits 1 when any emitted
+result is `drift`, `operational_failure`, or `not_configured`.
 
 ## Queue
 
@@ -361,19 +325,20 @@ configured frontmatter/summary changes. Programmatic `submitScrapeJob()` calls
 and workers share the same queue root and exact precedence:
 `AGENTSCRAPE_DATA_HOME/queue` when that explicit root is set, otherwise
 `${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`.
+
 New jobs contain `url`, `destination`, optional `summarize`, optional
-`frontmatter`, and optional strict boolean `allow_private_network`.
-`submitScrapeJob(..., { allowPrivateNetwork })` writes that field only when
-supplied; workers pass the exact true/false value into the complete scrape
-operation, and frozen/retry envelopes preserve the original record bytes. A
-network-policy denial is permanent rather than an upstream retry.
-Reconciliation may inventory the consent field but never executes network
-policy or `agentbrain` because of it. Indexed submissions are rejected. Legacy
-indexed records are drained into immutable `frozen/` envelopes for
-reconciliation. Browser-host outages are captured as immutable, policy-pinned
-`retry/` envelopes and revisited by the LaunchAgent's 60-second interval;
-malformed and permanent failures are published without clobbering existing
-`failed/` evidence.
+`frontmatter`, and optional strict boolean `allow_private_network`, which
+`submitScrapeJob(..., { allowPrivateNetwork })` writes only when supplied.
+Workers pass the exact true/false value into the scrape operation, frozen and
+retry envelopes preserve the original record bytes, and a network-policy denial
+is permanent rather than an upstream retry. Reconciliation may inventory the
+consent field but never executes network policy or `agentbrain` because of it.
+
+Indexed submissions are rejected, and legacy indexed records are drained into
+immutable `frozen/` envelopes for reconciliation. Browser-host outages become
+immutable, policy-pinned `retry/` envelopes revisited by the LaunchAgent's
+60-second interval; malformed and permanent failures are published without
+clobbering existing `failed/` evidence.
 
 `process-queue` and `reconcile-queue --apply` share private, durable, per-name
 generation claims. A live owner makes peers skip while leaving the public
@@ -383,10 +348,11 @@ failed records, and archives use fsynced no-clobber publication. Retirement
 removes only the snapshotted inode and preserves a concurrently replaced
 pathname. There is a narrow conditional gap between the final identity check
 and the private UUID rename; a generation captured in that gap is retained in
-the private retirement quarantine rather than unlinked. Queue processing is at
-least once: a crash after a provider succeeds (or destination/output is
-published) but before source retirement can repeat that provider/output work on
-recovery.
+the private retirement quarantine rather than unlinked.
+
+Queue processing is at least once: a crash after a provider succeeds (or
+destination/output is published) but before source retirement can repeat that
+provider/output work on recovery.
 
 Reconciliation is inventory-only unless `--apply` is given and admits imports
 through explicit `agentbrain` argv with a bounded timeout. A valid existing

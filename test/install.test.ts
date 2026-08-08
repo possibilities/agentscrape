@@ -118,7 +118,7 @@ const phaseFiles = [
   "test/corpus.test.ts",
   "test/core.test.ts",
   "README.md",
-  "docs/migration/standalone.md",
+  "docs/contracts.md",
 ] as const;
 
 async function committedPhaseCheckout(): Promise<string> {

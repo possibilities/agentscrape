@@ -1,42 +1,45 @@
 # Agentscrape operations
 
 The operator lifecycle of the supported macOS standalone deployment: what the
-installer requires and mutates, how snapshots are garbage collected, and how
-cutover, rollback, readiness, and CI behave. The behavioral contracts of the
-commands themselves live in [contracts.md](contracts.md).
+installer requires and mutates, what the environment controls, and how
+rollback, GC, and readiness behave. The behavioral contracts of the commands
+themselves live in [contracts.md](contracts.md); the claimed security boundary
+lives in the [threat model](threat-model.md).
 
 ## Runtime requirements
 
 | Component | Requirement | Used for |
 | --- | --- | --- |
-| Bun | **Always exactly 1.3.14**, matching `package.json` `engines.bun` | CLI and trusted TypeScript source execution |
+| Bun | **At least 1.3.14**, matching `package.json` `engines.bun` | CLI and trusted TypeScript source execution |
 | Production JavaScript dependencies | **Always** the frozen production dependency set; the standalone installer copies and seals it into the snapshot | Parsing, conversion, and extraction |
 | `agent-browser` | Optional | JavaScript-rendered pages, browser sessions, and live canaries. Agentscrape invokes `agent-browser`, which delegates to `browserctl`; Agentscrape does not invoke `browserctl` directly. |
 | `gh` | Optional | GitHub and Gist routes |
+| `pdftotext` (poppler) | Optional | PDF extraction |
 | `pandoc` | Optional | Conversion of GitHub `.rst` content, including repository READMEs and blob routes |
 | `summaryctl` | Optional | Queue jobs whose record requests `summarize` |
 | `agentbrain` | Optional | `reconcile-queue --apply` only |
 | Trusted Git checkout plus `git`, `tar`, Bash, and core operating-system tools | Install/deploy only | Resolve and archive the exact commit, prepare the snapshot, and publish owned files |
 | macOS `launchctl` and `plutil` | Supported standalone install only | Validate and manage the user LaunchAgent |
 
-Agentbuilds is commonly the trusted deployment orchestrator, but it is not a
-production runtime dependency. Python and shellcheck are CI validation tools
-only, not installer or Agentscrape runtime requirements.
+Several of these are unpublished local tools; see the README for what
+Agentscrape does without them. Agentbuilds is commonly the trusted deployment
+orchestrator but is not a production runtime dependency, and Python and
+shellcheck are CI validation tools only.
 
 ## Distribution and version identity
 
-`package.json` remains `private: true`. The supported end-user distribution is
-the macOS standalone command installed as a sealed, effectively immutable
-snapshot from trusted Git, usually through Agentbuilds. Sealing detects ordinary
-mutation; it is not protection from malicious code with the same UID.
-
+The supported end-user distribution is the macOS standalone command, installed
+as a sealed, effectively immutable snapshot from trusted Git. Sealing detects
+ordinary mutation; it is not protection from malicious code with the same UID.
 The package exports are trusted Bun TypeScript source contracts for repository
-and linked-package use. There is no npm publication, transpiled JavaScript
-distribution, general Node.js compatibility, or stability promise for undeclared
-deep imports. The package semantic version is the compatibility line reported by
-the CLI, doctor, and extraction envelopes. A standalone deployment is identified
-more narrowly by the exact Git SHA recorded in its receipt and verified snapshot
-manifest; semantic-version equality does not establish deployment-byte identity.
+and linked-package use — there is no npm publication, transpiled JavaScript
+distribution, general Node.js compatibility, or stability promise for
+undeclared deep imports.
+
+The package semantic version is the compatibility line reported by the CLI,
+doctor, and extraction envelopes. A standalone deployment is identified more
+narrowly by the exact Git SHA in its receipt and verified snapshot manifest;
+semantic-version equality does not establish deployment-byte identity.
 
 ## Environment
 
@@ -58,6 +61,10 @@ manifest; semantic-version equality does not establish deployment-byte identity.
 | `XDG_STATE_HOME` | Installer state defaults to `$XDG_STATE_HOME/agentscrape`, otherwise `$HOME/.local/state/agentscrape`. The HOME-scoped installer lock remains under `$HOME/.local/state/.agentscrape-installer`. |
 | Installer overrides | The approved deployment overrides are `AGENTSCRAPE_INSTALL_BIN_DIR`, `AGENTSCRAPE_INSTALL_LAUNCH_AGENTS_DIR`, `AGENTSCRAPE_INSTALL_STATE_DIR`, `AGENTSCRAPE_INSTALL_SHARE_DIR`, `AGENTSCRAPE_INSTALL_BUN`, `AGENTSCRAPE_INSTALL_LAUNCHCTL`, and `AGENTSCRAPE_INSTALL_PLUTIL`. |
 
+Queue resolution is explicit and shared by `submitScrapeJob()` and every
+worker: `AGENTSCRAPE_DATA_HOME/queue` when that root is set, otherwise
+`${XDG_DATA_HOME}/agentscrape/queue`, then `~/.local/share/agentscrape/queue`.
+
 Retry delay is exponential, `min(effective maximum, initial × 2^(completed
 failures - 1))`. The policy is captured when a retry chain begins, so later
 environment changes do not rewrite an existing chain.
@@ -69,26 +76,27 @@ interactive-shell XDG, retry, or browser overrides. Interactive invocations of
 the wrapper still inherit their calling shell except for the wrapper-fixed data
 home.
 
-## Install
+Parser and option mistakes exit 2, separate from the runtime failures that exit
+1; the full exit-code contract is in [contracts.md](contracts.md).
+
+## Install and uninstall
 
 ```sh
-./scripts/install.sh
+./scripts/install.sh              # install or upgrade
+./scripts/install.sh --uninstall  # idempotent removal
 ```
 
-The installer:
-
-- resolves `HEAD^{commit}` and its exact tree once, requires the runtime verifier in that commit, archives only that commit (never helper or application bytes from the worktree), rejects tracked symlinks/gitlinks, and installs production dependencies in a private stage with `bun install --frozen-lockfile --production --ignore-scripts --backend=copyfile`
-- publishes the verified, sealed stage with a native atomic no-replace rename as `~/.local/state/agentscrape/runtime/<sha>`; files are `0400`/`0500`, directories are `0500`, and a hashed manifest records the commit/tree and complete inventory, including the verifier
-- requires `HOME` and installer-created private directories to have the current uid without group/other write or special bits, and serializes every state override that shares a HOME with one fail-closed `~/.local/state/.agentscrape-installer` owner lock held through classification and mutation
-- creates private queue data under `${AGENTSCRAPE_INSTALL_SHARE_DIR:-${XDG_DATA_HOME:-~/.local/share}/agentscrape}/{queue,failed}`; workers create private `frozen` and `retry` state alongside it
-- installs an owned executable at `~/.local/bin/agentscrape`, pointing to the sealed snapshot rather than the checkout
-- renders the LaunchAgent from the snapshot's tracked plist and loads `~/Library/LaunchAgents/agentscrape.process-queue.plist`
-- exports the exact installed queue root through `AGENTSCRAPE_DATA_HOME` in the owned wrapper so interactive and LaunchAgent runs keep using the same queue path even if later shell `XDG_DATA_HOME` differs
-- refuses unrelated artifacts, malformed snapshots/locks, or unrelated loaded services, and rolls back to a previously snapshotted owned deployment if cutover fails
-
-Snapshot sealing and repeated no-follow hash verification detect ordinary
-corruption and unsafe metadata. They are not an immutability boundary against
-malicious processes running as the same UID.
+The installer resolves `HEAD^{commit}` and its exact tree once, archives only
+that commit rather than worktree bytes, rejects tracked symlinks and gitlinks,
+installs production dependencies in a private stage, and publishes the
+verified, sealed result with an atomic no-replace rename as
+`~/.local/state/agentscrape/runtime/<sha>` — files `0400`/`0500`, directories
+`0500`, with a hashed manifest recording the commit, tree, and complete
+inventory. It then installs an owned `~/.local/bin/agentscrape` wrapper
+pointing at that snapshot, creates private queue data, and loads
+`~/Library/LaunchAgents/agentscrape.process-queue.plist`. Every state override
+sharing a HOME is serialized by one fail-closed
+`~/.local/state/.agentscrape-installer` owner lock.
 
 Verify after install:
 
@@ -100,137 +108,75 @@ launchctl print "gui/$(id -u)/agentscrape.process-queue"
 The loaded service should reference `~/.local/bin/agentscrape`, the
 installer-resolved queue directory, and the installer-rendered `PATH`.
 
-## Uninstall
+Uninstall requires an exactly inspectable `launchctl` state plus correlated
+command, plist, receipt, and deployed-SHA bytes; `<snapshot>/scripts/install.sh
+--uninstall` stays usable after the source checkout is removed. It unloads the
+service, removes only revalidated files, and fsyncs their parents under the
+same lock. Ambiguous or foreign evidence is retained rather than deleted. Queue
+files, failed jobs, browser/session data, logs, corpus captures, and every
+published runtime snapshot survive uninstall; removing them is a separate
+explicit operation.
 
-```sh
-./scripts/install.sh --uninstall
-```
+## Rollback, cutover, and runtime GC
 
-Uninstall is idempotent and requires an exactly inspectable `launchctl` state
-plus correlated command, plist, receipt, and deployed-SHA bytes. Snapshot
-receipts use a bounded no-follow manifest/helper preflight and then the sealed
-helper's full inventory verification, so `<snapshot>/scripts/install.sh
---uninstall` remains usable after the source checkout is removed and rollback
-publication does not depend on Git. Exact 8- or 12-line checkout receipts can
-migrate only while their exact source checkout and commit tree remain available
-and agree with the current checkout's Git authority. The new installer
-uninstalls a checkout-backed receipt only from that same checkout when its
-commit also contains the authenticated runtime helper; helperless predecessors
-fail closed without changing public evidence. It unloads the service, removes
-only revalidated files, and fsyncs their parent directories under the
-HOME-scoped lock. Catchable failures attempt a conservative no-replace restore
-when the affected pathname is still absent or unchanged; ambiguous evidence is
-retained. Queue files, failed jobs, browser/session data, logs, corpus
-captures, and every published runtime snapshot are preserved by uninstall;
-runtime cleanup is a separate explicit operation.
+Cutover preflight classifies the public state into mutually exclusive cases:
+first publication, an authenticated prior deployment, one recognized incomplete
+state that retry can finish, and fully current. Expected-absent slots use
+no-replace publication; expected-present slots are replaced only after the
+destination still matches its classified device/inode immediately before
+rename. Catchable failures make a conservative best-effort restoration, and the
+deployed-SHA rename with a state-directory fsync is last.
 
-## Runtime snapshot garbage collection
+There is no automatic recovery after process death or power loss. Any other
+interrupted mixed state fails closed on the next run and requires an explicit
+rerun or manual cleanup; the installer never deletes foreign or ambiguous
+evidence.
+
+To cut over from any predecessor deployment: stop new submissions, let the
+active worker drain or archive its state, run `./scripts/install.sh`, verify
+the two commands above, then resume submissions into the installed queue.
 
 Runtime GC is never run by install or uninstall. Quiesce interactive commands
-and workers that may still be using an old snapshot, then run:
-
-```sh
-./scripts/install.sh --gc-runtime
-```
-
-The command takes the same HOME-scoped installer lock before classifying public
-state and holds it through deletion and the runtime-parent fsync. Its accepted
-states and helper authority are:
-
-| Public state | Helper authority | Protection and result |
-| --- | --- | --- |
-| Exactly installed: owned regular command, plist, current 12-line snapshot receipt, and deployed SHA all agree; `launchd` is exactly owned or absent | Authenticated `HEAD` helper from the invoking Git checkout; if that checkout is gone, the fully preflighted and verified protected receipt helper when invoked from that installed snapshot | Preserve the receipt SHA and delete every other verified snapshot |
-| Exactly uninstalled: all four public artifacts and the service are absent | Authenticated `HEAD` helper from a trusted Git checkout only | Protect nothing and delete every verified snapshot |
-| Checkout-backed, incomplete, mismatched, foreign, or ambiguous | None | Refuse without deletion |
-
-Before deleting anything, the helper requires an owned plain mode-`0700`
-runtime parent, at most 64 immediate children, canonical lowercase 40-hex owned
-mode-`0500` snapshot directories, the protected root when one is declared, and
-complete manifest verification of every root. A stale root's helper is
-inventory only and is never executed. Verified stale roots are reverified and
-removed deterministically with manifest-driven no-follow unlink/rmdir
-operations; the runtime directory itself remains, so repeat GC is idempotent.
-
-GC does not inspect process liveness: operator quiescence is required. There is
-no rollback after deletion starts. If GC is interrupted after opening a root
-for deletion, that partial/noncanonical root makes a later GC fail closed for
-manual inspection. As elsewhere, active malicious same-UID namespace races are
-outside the claimed boundary.
-
-## Rollback and cutover
-
-Preflight classifies mutually exclusive A (first publication), B (authenticated
-prior deployment), C (exact current command/plist/receipt with an absent or
-safe noncurrent deployed SHA), and D (fully current). C is the one recognized
-incomplete state: retry publishes the current deployed SHA, while a catchable
-failed attempt restores the prior deployed bytes or absence. D avoids replacing
-already-current public files. Expected-absent public slots use native
-no-replace publication. Expected-present slots are replaced only after the
-destination still matches its classified device/inode immediately before
-rename. A same-UID malicious process can still exchange that pathname in the
-tiny check-to-rename instruction gap; active same-UID namespace attacks are
-outside the claimed boundary. Catchable cutover failures make a conservative
-best-effort restoration. During an authorized helperless checkout migration,
-this restores the exact correlated checkout-backed public bytes captured before
-cutover; it does not fabricate a snapshot for a commit that predates the
-runtime helper. The final deployed-SHA rename and state-directory fsync are
-last.
-
-There is no automatic recovery after process death or power loss. An
-interrupted mixed public state other than conservative C fails closed on the
-next run and requires explicit rerun or manual cleanup; the installer never
-deletes foreign or ambiguous evidence.
-
-For an operator cutover from any predecessor deployment, use this generic
-sequence:
-
-1. Stop new queue submissions and any external schedulers.
-2. Let the currently active worker drain, or archive/export its state outside this repository.
-3. Install this checkout with `./scripts/install.sh`.
-4. Verify `agentscrape --help` and `launchctl print "gui/$(id -u)/agentscrape.process-queue"`.
-5. Resume submissions into the installed queue directory.
+and workers first, then run `./scripts/install.sh --gc-runtime`. It takes the
+same HOME-scoped lock, accepts only a fully correlated current installation
+(preserving that receipt's SHA) or a fully absent public state (preserving
+nothing), and refuses anything checkout-backed, incomplete, mismatched,
+foreign, or ambiguous. It verifies every candidate snapshot's manifest before
+deleting any, never executes a stale root's helper, and keeps the runtime
+parent so repeat GC is idempotent. GC does not inspect process liveness and has
+no rollback once deletion starts; an interruption can leave a partial root that
+makes a later GC fail closed for manual inspection.
 
 ## Deployment readiness
 
 `bun run x-readiness -- --once` probes the PATH-resolved Agentscrape executable
 for both X presets and the timeline cursor flag. Each subprocess has a
-five-second deadline and bounded output. Each completed status check prints one
+five-second deadline and bounded output, and each completed check prints one
 JSON object; exit 0 means ready, 1 means the binary is present but a required
 capability is missing or unhealthy, and 2 means the binary is missing or a
 probe/configuration error occurred. Without `--once`, use `--interval SECONDS`
 and optional `--timeout SECONDS` to watch.
 
-Under a responsive event loop, a subprocess timeout, cancellation, output
-overflow, or capture/wait terminal event is followed by at most a fixed 100 ms
-teardown grace, using local stdout/stderr cancellation rather than waiting
-indefinitely for pipe EOF. A requested timeout therefore settles in `timeoutMs`
-plus up to 100 ms plus event-loop scheduling. The runner sends `SIGKILL` to the
-original detached process group, but arbitrary descendants that create a new
-session with `setsid` may survive; those processes are outside containment and
-are not claimed as killed.
+Subprocess timeout, cancellation, or output overflow is followed by at most a
+fixed 100 ms teardown grace using local stdout/stderr cancellation rather than
+waiting for pipe EOF. The runner sends `SIGKILL` to the original detached
+process group, but descendants that create a new session with `setsid` may
+survive and are not claimed as killed.
 
 ## Tests, coverage, and CI
 
-The offline suite covers handler fixtures, corpus replay, preset invariants,
-envelope projection, recorded and fake-transport live feed discovery, output
-formatting, and command smoke tests. It makes no live internet calls.
-
-`bun run check` is the contributor and CI default. Before typecheck, lint, and
-serial bounded tests, it replaces `HOME` with a private temporary directory and
-removes inherited Agentscrape, XDG config/data/state, and Bun/Node
+`bun run check` is the contributor and CI default: typecheck, lint, then the
+serial bounded suite. Before any of that it replaces `HOME` with a private
+temporary directory and removes inherited Agentscrape, XDG, and Bun/Node
 process-option state; `bun run test` and `bun run coverage` use the same
-isolated boundary. Tests intentionally use loopback networking, so this is not
-an external-network sandbox.
+boundary. The suite makes no live internet calls, but it does use loopback
+networking, so this is an isolation boundary rather than an external-network
+sandbox.
 
-`bun run coverage` runs the full serial suite with text and LCOV reporters,
-strictly aggregates each LCOV record's `LF`/`LH` line and `FNF`/`FNH` function
-summaries, and requires at least 70% aggregate coverage for both lines and
-functions. Missing, malformed, incomplete, or zero-denominator LCOV fails
-closed. This floor is a gate, not a claim of comprehensive coverage; work in
-spawned CLI subprocesses is not necessarily attributed to the parent report.
-After a successful Linux gate, CI uploads `coverage/lcov.info` as
-`coverage-lcov-ubuntu-24.04` for seven days.
-
-CI runs the check on Ubuntu 24.04 and macOS 26, validates the shell installer
-and plist, and rejects whitespace errors or any tracked, staged, or untracked
-worktree changes.
+`bun run coverage` adds text and LCOV reporters and requires at least 70%
+aggregate line and function coverage, failing closed on missing, malformed, or
+zero-denominator LCOV. That floor is a gate, not a claim of comprehensive
+coverage; work in spawned CLI subprocesses is not necessarily attributed to the
+parent report. CI runs the same check on Ubuntu and macOS, validates the shell
+installer and plist, and rejects whitespace errors or any worktree change —
+`.github/workflows/ci.yml` is the authority on the matrix and steps.
