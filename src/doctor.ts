@@ -1,7 +1,7 @@
 import { basename, dirname, join, normalize } from "node:path";
 import { findAgentBrowserExecutable } from "./browser";
 import { findExecutable } from "./subprocess";
-import { AGENTSCRAPE_VERSION, REQUIRED_BUN_VERSION } from "./version";
+import { AGENTSCRAPE_VERSION, BUN_ENGINE_RANGE, satisfiesMinimumBunVersion } from "./version";
 
 export interface DoctorSourceIdentity {
   kind: "managed_snapshot" | "source";
@@ -58,7 +58,7 @@ export function detectDoctorSource(sourceRoot: string): DoctorSourceIdentity {
 
 /** Build a deterministic report using only injected, side-effect-free observations. */
 export function buildDoctorReport(inputs: DoctorReportInputs): DoctorReport {
-  const runtimeStatus = inputs.bunVersion === REQUIRED_BUN_VERSION ? "pass" : "incompatible";
+  const runtimeStatus = satisfiesMinimumBunVersion(inputs.bunVersion) ? "pass" : "incompatible";
   const capabilities = CAPABILITIES.map(
     ([feature, executable]): DoctorCapability => ({
       feature,
@@ -76,7 +76,7 @@ export function buildDoctorReport(inputs: DoctorReportInputs): DoctorReport {
     source: detectDoctorSource(inputs.sourceRoot),
     runtime: {
       name: "bun",
-      expected: REQUIRED_BUN_VERSION,
+      expected: BUN_ENGINE_RANGE,
       actual: inputs.bunVersion,
       status: runtimeStatus,
     },

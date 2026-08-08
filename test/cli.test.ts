@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { CanaryResult } from "../src/canary";
 import { checkPresetResultsExitCode } from "../src/cli";
-import { AGENTSCRAPE_VERSION, REQUIRED_BUN_VERSION } from "../src/version";
+import { AGENTSCRAPE_VERSION, BUN_ENGINE_RANGE } from "../src/version";
 
 const root = join(import.meta.dir, "..");
 const temporary: string[] = [];
@@ -158,7 +158,7 @@ describe("CLI offline smoke suite", () => {
     expect(human.stdout).toContain("agentscrape doctor\nstatus: pass");
     expect(human.stdout).toContain(`version: ${AGENTSCRAPE_VERSION}`);
     expect(human.stdout).toContain(
-      `runtime: bun actual=${REQUIRED_BUN_VERSION} expected=${REQUIRED_BUN_VERSION} status=pass`,
+      `runtime: bun actual=${Bun.version} expected=${BUN_ENGINE_RANGE} status=pass`,
     );
     expect(human.stdout).toContain("  reconciliation: agentbrain available");
     expect(human.stdout).not.toContain(directory);
@@ -173,8 +173,8 @@ describe("CLI offline smoke suite", () => {
       source: { kind: "source", sha: null },
       runtime: {
         name: "bun",
-        expected: REQUIRED_BUN_VERSION,
-        actual: REQUIRED_BUN_VERSION,
+        expected: BUN_ENGINE_RANGE,
+        actual: Bun.version,
         status: "pass",
       },
       capabilities: [

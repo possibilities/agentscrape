@@ -201,7 +201,8 @@ describe("CI workflow contract", () => {
       "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     ]);
     for (const step of actionSteps) expect(step.uses).toMatch(/@[0-9a-f]{40}$/);
-    expect(actionSteps[1]?.with).toEqual({ "bun-version": "1.3.14" });
+    // CI proves the floor holds against current Bun, not against one pinned release.
+    expect(actionSteps[1]?.with).toEqual({ "bun-version": "latest" });
 
     const lines = commandLines(job.steps);
     expect(lines).toContain("bun install --frozen-lockfile");

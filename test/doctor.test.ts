@@ -9,7 +9,12 @@ import {
   renderDoctorJson,
   renderDoctorReport,
 } from "../src/doctor";
-import { AGENTSCRAPE_VERSION, REQUIRED_BUN_VERSION } from "../src/version";
+import {
+  AGENTSCRAPE_VERSION,
+  BUN_ENGINE_RANGE,
+  MINIMUM_BUN_VERSION,
+  satisfiesMinimumBunVersion,
+} from "../src/version";
 
 const sourceRoot = "/work/agentscrape";
 const missing = () => null;
@@ -17,14 +22,15 @@ const missing = () => null;
 describe("offline doctor report", () => {
   test("uses the validated package version and Bun engine authorities", () => {
     expect(AGENTSCRAPE_VERSION).toBe(packageManifest.version);
-    expect(REQUIRED_BUN_VERSION).toBe(packageManifest.engines.bun);
+    expect(BUN_ENGINE_RANGE).toBe(packageManifest.engines.bun);
+    expect(BUN_ENGINE_RANGE).toBe(`>=${MINIMUM_BUN_VERSION}`);
   });
 
   test("emits the exact stable shape and capability order without extra lookups", () => {
     const executableLookups: string[] = [];
     let browserLookups = 0;
     const report = buildDoctorReport({
-      bunVersion: REQUIRED_BUN_VERSION,
+      bunVersion: MINIMUM_BUN_VERSION,
       sourceRoot,
       findAgentBrowserExecutable() {
         browserLookups += 1;
@@ -43,8 +49,8 @@ describe("offline doctor report", () => {
       source: { kind: "source", sha: null },
       runtime: {
         name: "bun",
-        expected: REQUIRED_BUN_VERSION,
-        actual: REQUIRED_BUN_VERSION,
+        expected: BUN_ENGINE_RANGE,
+        actual: MINIMUM_BUN_VERSION,
         status: "pass",
       },
       capabilities: [
@@ -60,19 +66,32 @@ describe("offline doctor report", () => {
     expect(doctorExitCode(report)).toBe(0);
   });
 
-  test("fails only an exact Bun mismatch while optional absence remains nonfatal", () => {
-    const compatible = buildDoctorReport({
-      bunVersion: REQUIRED_BUN_VERSION,
-      sourceRoot,
-      findAgentBrowserExecutable: missing,
-      findExecutable: missing,
-    });
-    expect(compatible.status).toBe("pass");
-    expect(compatible.capabilities.every(({ available }) => !available)).toBeTrue();
-    expect(doctorExitCode(compatible)).toBe(0);
+  test("fails only below the Bun floor while optional absence remains nonfatal", () => {
+    const [major = 0, minor = 0, patch = 0] = MINIMUM_BUN_VERSION.split(".").map(Number);
+    for (const version of [
+      MINIMUM_BUN_VERSION,
+      `${major}.${minor}.${patch + 1}`,
+      `${major}.${minor + 1}.0`,
+      `${major + 1}.0.0`,
+      `${MINIMUM_BUN_VERSION}-canary.1`,
+    ]) {
+      const compatible = buildDoctorReport({
+        bunVersion: version,
+        sourceRoot,
+        findAgentBrowserExecutable: missing,
+        findExecutable: missing,
+      });
+      expect(compatible.status, version).toBe("pass");
+      expect(compatible.capabilities.every(({ available }) => !available)).toBeTrue();
+      expect(doctorExitCode(compatible)).toBe(0);
+    }
+
+    // An unparseable version is below the floor, not above it.
+    for (const version of [`${major}.${minor}.${patch - 1}`, "0.9.9", "not-a-version", ""])
+      expect(satisfiesMinimumBunVersion(version), version).toBeFalse();
 
     const incompatible = buildDoctorReport({
-      bunVersion: `${REQUIRED_BUN_VERSION}-different`,
+      bunVersion: "1.0.0",
       sourceRoot,
       findAgentBrowserExecutable: () => "/tools/agent-browser",
       findExecutable: (name) => `/tools/${name}`,
@@ -81,8 +100,8 @@ describe("offline doctor report", () => {
       status: "fail",
       runtime: {
         name: "bun",
-        expected: REQUIRED_BUN_VERSION,
-        actual: `${REQUIRED_BUN_VERSION}-different`,
+        expected: BUN_ENGINE_RANGE,
+        actual: "1.0.0",
         status: "incompatible",
       },
     });
@@ -117,7 +136,7 @@ describe("offline doctor report", () => {
     expect(lookups).toEqual([configured]);
 
     const report = buildDoctorReport({
-      bunVersion: REQUIRED_BUN_VERSION,
+      bunVersion: MINIMUM_BUN_VERSION,
       sourceRoot,
       findAgentBrowserExecutable: () => browser,
       findExecutable: missing,
@@ -132,7 +151,7 @@ describe("offline doctor report", () => {
 
   test("renders deterministic human and JSON output without resolved paths", () => {
     const report = buildDoctorReport({
-      bunVersion: REQUIRED_BUN_VERSION,
+      bunVersion: MINIMUM_BUN_VERSION,
       sourceRoot,
       findAgentBrowserExecutable: () => "/private/bin/agent-browser",
       findExecutable: (name) => (name === "gh" ? `/private/bin/${name}` : null),
@@ -142,7 +161,7 @@ describe("offline doctor report", () => {
       "status: pass",
       `version: ${AGENTSCRAPE_VERSION}`,
       "source: source",
-      `runtime: bun actual=${REQUIRED_BUN_VERSION} expected=${REQUIRED_BUN_VERSION} status=pass`,
+      `runtime: bun actual=${MINIMUM_BUN_VERSION} expected=${BUN_ENGINE_RANGE} status=pass`,
       "capabilities:",
       "  browser: agent-browser available",
       "  github: gh available",
