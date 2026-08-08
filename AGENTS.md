@@ -60,10 +60,9 @@ installed deployment, not just this repo.
 
 `skills/scrape/SKILL.md` is the canonical deep runbook for this CLI. Funk's
 skills scanner installs it globally — `npx skills add` against this checkout,
-discovering nested `skills/<name>/SKILL.md` — so every Claude Code, Codex,
-OpenCode, and Pi session lists its name and frontmatter description without
-loading the body. That description is all most sessions ever see; it has to
-route on its own. `--agent-help` stays in the binary as the fallback for a
+discovering nested `skills/<name>/SKILL.md` — so every Claude Code, Codex, and
+Pi session lists its name and frontmatter description without loading the body.
+That description is all most sessions ever see; it has to route on its own. `--agent-help` stays in the binary as the fallback for a
 session without the skill and points at it.
 
 The skill states version-pinned behavior as fact, so a CLI behavior change is
