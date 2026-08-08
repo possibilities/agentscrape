@@ -55,3 +55,20 @@ updated in the same change:
 `AGENTSCRAPE_CONDUIT_SOCKET` and `AGENTSCRAPE_CONDUIT_TOKEN_FILE` are set by
 agentbrain's worker plist and asserted by funk; renaming them breaks an
 installed deployment, not just this repo.
+
+## The skill is the advertised runbook
+
+`skills/scrape/SKILL.md` is the canonical deep runbook for this CLI. Funk's
+skills scanner installs it globally — `npx skills add` against this checkout,
+discovering nested `skills/<name>/SKILL.md` — so every Claude Code, Codex,
+OpenCode, and Pi session lists its name and frontmatter description without
+loading the body. That description is all most sessions ever see; it has to
+route on its own. `--agent-help` stays in the binary as the fallback for a
+session without the skill and points at it.
+
+The skill states version-pinned behavior as fact, so a CLI behavior change is
+not finished until its claims are re-verified against the live CLI — routing
+tiers, consent denials, exit codes, flag names, and the error strings it quotes.
+Trust the binary over the prose. The skill directory must stay self-contained:
+the installer ships only that directory, so a `../` reference to `docs/` or
+`README.md` resolves to nothing on an installed copy.

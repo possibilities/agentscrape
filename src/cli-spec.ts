@@ -191,6 +191,8 @@ Contract
   HTML, or trust metadata.
 
 Discovery
+- The scrape agent skill is the full runbook; this text is the in-binary
+  fallback for a session without it.
 - agentscrape --agent-teaser lists every command with its summary.
 - agentscrape COMMAND --help-json is machine-readable per-command help.`;
 

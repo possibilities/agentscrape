@@ -1,0 +1,6 @@
+interface:
+  display_name: "Scrape"
+  short_description: "Fetch a specific URL and get its content as Markdown"
+  default_prompt: "Use $scrape to fetch this URL's content."
+policy:
+  allow_implicit_invocation: true
