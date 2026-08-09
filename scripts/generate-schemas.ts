@@ -1,270 +1,226 @@
 #!/usr/bin/env bun
+// Emits the three config/*.schema.json files from the zod schemas in
+// src/config-schemas.ts — the same schemas the loaders validate with, so the
+// published files cannot drift from what the CLI accepts. Regenerate with
+// `bun run generate:schemas`; test/schemas.test.ts fails when a checked-in
+// file drifts from this source.
+//
+// Every rewrite below is assert-then-rewrite: it demands the exact vacuous
+// zod emission it flattens and throws otherwise, so a real constraint can
+// never be silently erased to keep the published bytes stable.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CORPUS_VERSION, FAILURE_TYPES } from "../src/corpus";
+import { z } from "zod";
 import {
-  COMMON,
-  MODE_FIELDS,
-  PRESET_MODES,
-  type PresetMode,
-  REQUIRED_FIELDS,
-  STRING_FIELDS,
-} from "../src/presets";
+  ANCHORED_PATTERN,
+  CORPUS_FAILURE_TYPE_NAMES,
+  canariesFileSchema,
+  corpusMetaSchema,
+  presetFileSchema,
+} from "../src/config-schemas";
+import { FAILURE_TYPES } from "../src/corpus";
 
 const DRAFT = "http://json-schema.org/draft-07/schema#";
-const ANCHORED_PATTERN = "^\\^[\\s\\S]*\\$$";
 
-// Every field the preset validator knows, in the order it composes them.
-const PRESET_FIELDS = [
-  ...new Set([...COMMON, ...Object.values(MODE_FIELDS).flatMap((set) => [...set])]),
-];
+type Schema = Record<string, unknown>;
 
-// Which of a mode's fields the validator demands rather than merely permits. The permitted set
-// lives in MODE_FIELDS; this split exists only inside problems() in src/presets.ts.
-const MODE_REQUIRED: Record<PresetMode, string[]> = {
-  content: ["handler", "schema"],
-  links: ["selector"],
-  "nav-links": ["section_selector", "category_selector"],
-};
-
-const PRESET_DESCRIPTIONS: Record<string, string> = {
-  name: "Registry identity for this preset. `--preset NAME` selects it, and the name must be unique among the official presets and among the local `scrapers/` presets.",
-  summary: "One-line description of what the preset extracts, shown by `list-presets`.",
-  domain:
-    'Host this preset claims, or "*" to match any host. Declaring a domain claims the entire host: a URL on it that matches no preset fails rather than falling back to generic extraction.',
-  mode: "Extraction strategy. `content` runs a registered handler, `links` collects anchors under one selector, and `nav-links` walks a two-level navigation.",
-  aliases:
-    "Further hosts claimed on the same terms as `domain`, such as twitter.com alongside x.com.",
-  browser_profile:
-    "Browser profile the scrape runs under when the caller supplies none, for pages that need a signed-in session.",
-  url_patterns:
-    "JavaScript regular expressions matched against the canonicalized URL. Each must carry a visible `^` start anchor and `$` end anchor, and no two presets may declare the same pattern.",
-  handler:
-    "Registered content extractor to run, named `module.function`. The CLI never loads local executable code, so the handler must already be registered through the package API.",
-  schema:
-    "Name of the ScrapeSchema class the handler returns. It must be registered together with `handler`.",
-  selector: "CSS selector for the anchors to collect.",
-  section_selector: "CSS selector for the top-level section links to visit.",
-  category_selector: "CSS selector for the links to collect on each section page that was visited.",
-  toggle_selector:
-    "CSS selector for expander controls to click before links are collected, such as collapsed navigation sections.",
-};
-
-function describe(descriptions: Record<string, string>, field: string): string {
-  const description = descriptions[field];
-  if (!description) throw new Error(`no schema description for field '${field}'`);
-  return description;
+function isObject(value: unknown): value is Schema {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function presetProperty(field: string): Record<string, unknown> {
-  const description = describe(PRESET_DESCRIPTIONS, field);
-  if (field === "mode") return { type: "string", enum: [...PRESET_MODES], description };
-  if (STRING_FIELDS.has(field)) return { type: "string", description };
-  // The validator's only non-string fields are its two lists of strings.
-  const items =
-    field === "url_patterns"
-      ? { type: "string", pattern: ANCHORED_PATTERN }
-      : { type: "string" as const };
-  return { type: "array", items, description };
+/**
+ * The "input" io mode is deliberate: these schemas describe what a human may
+ * write on disk, where every optional field is omittable. The default "output"
+ * mode would mark defaulted fields required. `unrepresentable: "any"` admits
+ * the z.custom presence-only fields of the corpus meta schema, whose emitted
+ * node is entirely their meta annotation.
+ */
+function emit(schema: z.ZodType, options: { unrepresentable?: "any" } = {}): Schema {
+  const generated = z.toJSONSchema(schema, {
+    target: "draft-7",
+    io: "input",
+    ...options,
+  }) as Schema;
+  if (generated.$schema !== DRAFT)
+    throw new Error(`zod emitted an unexpected dialect: ${String(generated.$schema)}`);
+  return generated;
 }
 
-function presetSchema(): Record<string, unknown> {
+function properties(node: unknown, name: string): Schema {
+  if (!isObject(node)) throw new Error(`schema node "${name}" is not an object`);
+  const props = node.properties;
+  if (!isObject(props)) throw new Error(`schema node "${name}" has no properties`);
+  return props;
+}
+
+/**
+ * The preset loader tolerates null wherever a string is expected (problems()
+ * has always let it through), so those fields parse as string-or-null; the
+ * published schema keeps its historical claim of plain strings. Refuses to
+ * flatten anything but that exact union — `mode` keeps its enum members.
+ */
+function flattenNullTolerant(props: Schema, field: string): void {
+  const node = props[field];
+  const complaint = `preset field "${field}" is no longer the string-or-null union`;
+  if (!isObject(node) || !Array.isArray(node.anyOf) || node.anyOf.length !== 2)
+    throw new Error(complaint);
+  const [text, nullBranch] = node.anyOf as [unknown, unknown];
+  if (!isObject(text) || !isObject(nullBranch)) throw new Error(complaint);
+  if (nullBranch.type !== "null" || Object.keys(nullBranch).length !== 1)
+    throw new Error(complaint);
+  const { anyOf: _branches, ...annotations } = node;
+  if (text.type === "string" && Object.keys(text).length === 1) {
+    props[field] = { type: "string", ...annotations };
+    return;
+  }
+  if (text.type === "string" && Array.isArray(text.enum) && Object.keys(text).length === 2) {
+    props[field] = { type: "string", enum: text.enum, ...annotations };
+    return;
+  }
+  throw new Error(complaint);
+}
+
+/** Openness: zod says `additionalProperties: {}`, the published files say `true`. */
+function openTrue(node: Schema, name: string): void {
+  const additional = node.additionalProperties;
+  const open =
+    additional === true || (isObject(additional) && Object.keys(additional).length === 0);
+  if (!open) throw new Error(`"${name}" additionalProperties grew a real constraint; keep it`);
+  node.additionalProperties = true;
+}
+
+/** z.int() emits a vacuous MAX_SAFE_INTEGER ceiling; the published schema never had one. */
+function dropVacuousIntegerCeiling(props: Schema, name: string, field: string): void {
+  const node = props[field];
+  if (!isObject(node) || node.type !== "integer")
+    throw new Error(`"${name}.${field}" is no longer an integer schema`);
+  const { maximum, ...rest } = node;
+  if (maximum !== Number.MAX_SAFE_INTEGER)
+    throw new Error(`"${name}.${field}" maximum is a real constraint; keep it`);
+  props[field] = rest;
+}
+
+/** Cosmetic: the published nodes put description right after type. */
+function hoistDescription(node: Schema, name: string): Schema {
+  const { type, description, ...rest } = node;
+  if (typeof description !== "string") throw new Error(`schema node "${name}" has no description`);
+  return { type, description, ...rest };
+}
+
+/** The schema is the config surface's documentation; every key must carry it. */
+function assertDocumented(props: Schema, section: string): void {
+  for (const [key, value] of Object.entries(props)) {
+    const description = isObject(value) ? value.description : undefined;
+    if (typeof description !== "string" || description.length === 0)
+      throw new Error(`schema property "${section}${key}" has no description`);
+  }
+}
+
+function presetJsonSchema(): Schema {
+  const generated = emit(presetFileSchema);
+  const props = properties(generated, "preset");
+  for (const field of [
+    "name",
+    "summary",
+    "domain",
+    "mode",
+    "browser_profile",
+    "handler",
+    "schema",
+    "selector",
+    "toggle_selector",
+    "section_selector",
+    "category_selector",
+  ])
+    flattenNullTolerant(props, field);
+  const patterns = props.url_patterns;
+  if (
+    !isObject(patterns) ||
+    !isObject(patterns.items) ||
+    patterns.items.pattern !== ANCHORED_PATTERN
+  )
+    throw new Error("preset url_patterns no longer documents anchored string items");
+  if (generated.additionalProperties !== false)
+    throw new Error("the preset schema is no longer strict");
+  if (!Array.isArray(generated.required) || !Array.isArray(generated.allOf))
+    throw new Error("the preset schema lost its required list or mode conditionals");
+  assertDocumented(props, "");
   return {
     $schema: DRAFT,
     title: "Agentscrape preset",
     description:
       "A preset in `config/presets/` or a project's `scrapers/` directory: the routing rule and extraction strategy for one kind of page.",
     type: "object",
-    required: [...REQUIRED_FIELDS],
+    required: generated.required,
     additionalProperties: false,
-    properties: {
-      $schema: {
-        type: "string",
-        description: "Path to this schema, for editor completion. The preset loader ignores it.",
-      },
-      ...Object.fromEntries(PRESET_FIELDS.map((field) => [field, presetProperty(field)])),
-    },
-    allOf: PRESET_MODES.map((mode) => {
-      const applicable = new Set([...COMMON, ...MODE_FIELDS[mode]]);
-      const forbidden = PRESET_FIELDS.filter((field) => !applicable.has(field));
-      return {
-        if: { properties: { mode: { const: mode } }, required: ["mode"] },
-        // biome-ignore lint/suspicious/noThenProperty: draft-07 names this conditional keyword.
-        then: {
-          required: MODE_REQUIRED[mode],
-          properties: Object.fromEntries(forbidden.map((field) => [field, false])),
-        },
-      };
-    }),
+    properties: props,
+    allOf: generated.allOf,
   };
 }
 
-function canariesSchema(): Record<string, unknown> {
+function canariesJsonSchema(): Schema {
+  const generated = emit(canariesFileSchema);
+  const props = properties(generated, "canaries");
+  const entry = generated.additionalProperties;
+  if (!isObject(entry) || entry.type !== "object")
+    throw new Error("the canary entry is no longer an object schema");
+  const entryProps = properties(entry, "canary entry");
+  const invariants = entryProps.invariants;
+  if (!isObject(invariants)) throw new Error("the canary invariants node is missing");
+  const invariantProps = properties(invariants, "canary invariants");
+  for (const field of ["min_markdown_chars", "min_rounds", "min_citations"])
+    dropVacuousIntegerCeiling(invariantProps, "invariants", field);
+  openTrue(invariants, "canary invariants");
+  entryProps.invariants = hoistDescription(invariants, "canary invariants");
+  openTrue(entry, "canary entry");
+  const publishedEntry = hoistDescription(entry, "canary entry");
+  assertDocumented(props, "");
+  assertDocumented(entryProps, "entry.");
+  assertDocumented(invariantProps, "entry.invariants.");
   return {
     $schema: DRAFT,
     title: "Agentscrape preset canaries",
     description:
       "Public URLs and semantic invariants for `agentscrape check-presets --live`. A canary URL is published with the repository, so it must be a durable public resource rather than a page the operator happens to have open. Presets with nothing that qualifies carry no canary; check-presets only probes what is listed here.",
     type: "object",
-    properties: {
-      $schema: {
-        type: "string",
-        description: "Path to this schema, for editor completion. The canary loader ignores it.",
-      },
-    },
-    additionalProperties: {
-      type: "object",
-      description:
-        "Canary for the preset named by this key. A preset with no canary is reported as `not_configured` rather than probed.",
-      properties: {
-        url: {
-          type: "string",
-          format: "uri",
-          description:
-            "Durable public page to scrape with the preset. Omitting it reports the preset as `not_configured`.",
-        },
-        invariants: {
-          type: "object",
-          description:
-            "Semantic floors the live result must clear. A result that parses but falls short is reported as drift, not as an operational failure.",
-          properties: {
-            min_markdown_chars: {
-              type: "integer",
-              minimum: 1,
-              description: "Shortest acceptable rendered markdown, in characters.",
-            },
-            require_title: {
-              type: "boolean",
-              description:
-                "When true, the structured result's `title` must be present and nonblank.",
-            },
-            min_rounds: {
-              type: "integer",
-              minimum: 1,
-              description: "Fewest acceptable entries in the structured result's `rounds` list.",
-            },
-            min_citations: {
-              type: "integer",
-              minimum: 1,
-              description: "Fewest acceptable entries in the structured result's `citations` list.",
-            },
-          },
-          additionalProperties: true,
-        },
-      },
-      additionalProperties: true,
-    },
+    properties: props,
+    additionalProperties: publishedEntry,
   };
 }
 
-function corpusMetaSchema(): Record<string, unknown> {
+function corpusMetaJsonSchema(): Schema {
+  if (JSON.stringify(Object.keys(FAILURE_TYPES)) !== JSON.stringify([...CORPUS_FAILURE_TYPE_NAMES]))
+    throw new Error(
+      "FAILURE_TYPES and CORPUS_FAILURE_TYPE_NAMES disagree; realign src/corpus.ts with src/config-schemas.ts",
+    );
+  const generated = emit(corpusMetaSchema, { unrepresentable: "any" });
+  const props = properties(generated, "corpus meta");
+  const version = props.version;
+  if (!isObject(version) || version.type !== "number" || version.const !== 1)
+    throw new Error("the corpus meta version is no longer the literal 1");
+  const { type: _numeric, ...bareConst } = version;
+  props.version = bareConst;
+  openTrue(generated, "corpus meta");
+  if (!Array.isArray(generated.required))
+    throw new Error("the corpus meta schema lost its required list");
+  assertDocumented(props, "");
   return {
     $schema: DRAFT,
     title: "Agentscrape corpus sample metadata",
     description:
       "The `meta.json` beside a captured sample under `test/corpus/`: what the sample was captured from and what replaying it must produce.",
     type: "object",
-    required: ["version", "preset", "mode", "url", "expect"],
+    required: generated.required,
     additionalProperties: true,
-    properties: {
-      version: {
-        const: CORPUS_VERSION,
-        description:
-          "Sample contract version. A sample declaring any other version is rejected rather than replayed.",
-      },
-      preset: {
-        type: "string",
-        description:
-          "Preset that captured the sample. It must match the corpus directory the sample lives in.",
-      },
-      mode: {
-        type: "string",
-        enum: [...PRESET_MODES],
-        description: "Extraction mode to replay. It must match the preset's mode in the registry.",
-      },
-      url: {
-        type: "string",
-        description: "Redacted URL the sample was captured from, replayed as the request URL.",
-      },
-      expect: {
-        type: "string",
-        enum: ["success", "failure"],
-        description:
-          "Whether replay must succeed and match the recorded output, or must raise the recorded failure.",
-      },
-      structured: {
-        description:
-          "Structured payload the content-mode handler must return, compared as deeply equal. Absent means the payload is not asserted.",
-      },
-      links: {
-        type: "array",
-        description:
-          "Links the `links` or `nav-links` replay must return, compared as deeply equal. Required for a successful sample in either mode.",
-      },
-      failure: {
-        type: "object",
-        description: "Failure a sample with `expect: failure` must raise.",
-        properties: {
-          type: {
-            type: "string",
-            enum: Object.keys(FAILURE_TYPES),
-            description: "Error class the replay must throw, matched with `instanceof`.",
-          },
-          contains: {
-            type: "string",
-            description: "Substring the thrown error's message must contain.",
-          },
-          message_captured: {
-            type: "string",
-            description:
-              "Redacted message recorded when the sample was captured. It documents the capture and is not asserted.",
-          },
-        },
-      },
-      assertions: {
-        type: "object",
-        description: "Substring checks against the markdown a successful replay renders.",
-        properties: {
-          contains: {
-            type: "array",
-            items: { type: "string" },
-            description: "Substrings the rendered markdown must contain.",
-          },
-          not_contains: {
-            type: "array",
-            items: { type: "string" },
-            description: "Substrings the rendered markdown must not contain.",
-          },
-        },
-      },
-      category_pages: {
-        type: "array",
-        description:
-          "Captured second-level pages for a `nav-links` replay, one per section link followed.",
-        items: {
-          type: "object",
-          required: ["section_url", "page"],
-          properties: {
-            section_url: {
-              type: "string",
-              description: "Section link whose page this fixture stands in for.",
-            },
-            page: {
-              type: "string",
-              description: "Filename of the captured page, relative to the sample directory.",
-            },
-          },
-        },
-      },
-    },
+    properties: props,
   };
 }
 
 export function buildSchemas(): Record<string, Record<string, unknown>> {
   return {
-    "preset.schema.json": presetSchema(),
-    "preset-canaries.schema.json": canariesSchema(),
-    "corpus-meta.schema.json": corpusMetaSchema(),
+    "preset.schema.json": presetJsonSchema(),
+    "preset-canaries.schema.json": canariesJsonSchema(),
+    "corpus-meta.schema.json": corpusMetaJsonSchema(),
   };
 }
 

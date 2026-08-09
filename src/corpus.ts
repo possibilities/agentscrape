@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, parse as parsePath, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type { z } from "zod";
 import {
   type PreparedTextArtifact,
   preflightTextArtifacts,
@@ -29,6 +30,7 @@ import {
   runAgentBrowser,
   withBrowserNetworkPolicy,
 } from "./browser";
+import { CORPUS_META_VERSION, corpusMetaSchema } from "./config-schemas";
 import { EnvelopeBuildError, validateRequestUrl } from "./envelope";
 import {
   AgentscrapeAuthError,
@@ -52,7 +54,7 @@ import { resolveDataHome } from "./queue-paths";
 import { redactDiagnostic, redactUrl, sanitizeErrorInPlace } from "./redaction";
 import { type LinkItem, LinkList } from "./schemas";
 
-export const CORPUS_VERSION = 1;
+export const CORPUS_VERSION = CORPUS_META_VERSION;
 export const CORPUS_ARTIFACT_MAX_BYTES = 8_000_000;
 export const CORPUS_AGGREGATE_MAX_BYTES = 24_000_000;
 const ROOT = join(import.meta.dir, "../test/corpus");
@@ -348,6 +350,30 @@ function readCorpusText(path: string, security?: SecureSampleContext): string | 
   }
 }
 
+/**
+ * One message for the first fault in the sample's historical precedence:
+ * contract version, then missing required fields in declaration order, then
+ * the mode and expect enums. Rendered from the raw values so the prose keeps
+ * naming what the file actually says.
+ */
+function corpusMetaProblem(
+  issues: readonly z.core.$ZodIssue[],
+  data: Record<string, unknown>,
+): string {
+  const flagged = new Set(
+    issues.map((issue) => issue.path[0]).filter((f) => typeof f === "string"),
+  );
+  if (flagged.has("version"))
+    return `unsupported sample contract version ${String(data.version)} (expected ${CORPUS_VERSION})`;
+  for (const field of ["preset", "mode", "url", "expect"])
+    if (flagged.has(field) && !(field in data)) return `meta.json missing required field: ${field}`;
+  if (flagged.has("mode")) return `meta.json has unsupported mode: '${String(data.mode)}'`;
+  if (flagged.has("expect"))
+    return `meta.json 'expect' must be 'success' or 'failure', got '${String(data.expect)}'`;
+  // Unreachable while the schema constrains only the five fields above; fail loudly regardless.
+  return `meta.json failed validation: ${issues[0]?.message ?? "unknown problem"}`;
+}
+
 function loadMeta(directory: string, security?: SecureSampleContext): Meta {
   const path = join(directory, "meta.json");
   const text = readCorpusText(path, security);
@@ -361,18 +387,10 @@ function loadMeta(directory: string, security?: SecureSampleContext): Meta {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new CorpusError("meta.json must be a JSON object");
   const data = value as Record<string, unknown>;
-  if (data.version !== CORPUS_VERSION)
-    throw new CorpusError(
-      `unsupported sample contract version ${String(data.version)} (expected ${CORPUS_VERSION})`,
-    );
-  for (const field of ["preset", "mode", "url", "expect"])
-    if (!(field in data)) throw new CorpusError(`meta.json missing required field: ${field}`);
-  if (!["content", "links", "nav-links"].includes(data.mode as string))
-    throw new CorpusError(`meta.json has unsupported mode: '${String(data.mode)}'`);
-  if (!["success", "failure"].includes(data.expect as string))
-    throw new CorpusError(
-      `meta.json 'expect' must be 'success' or 'failure', got '${String(data.expect)}'`,
-    );
+  // The zod schema is the gate; the raw object is what replay consumes, so unknown
+  // keys and unjudged field values pass through exactly as written.
+  const parsed = corpusMetaSchema.safeParse(data);
+  if (!parsed.success) throw new CorpusError(corpusMetaProblem(parsed.error.issues, data));
   return data as unknown as Meta;
 }
 function rootHtml(directory: string, security?: SecureSampleContext): string {

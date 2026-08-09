@@ -5,6 +5,7 @@ import {
   currentBrowserNetworkPolicy,
   withBrowserNetworkPolicy,
 } from "./browser";
+import { canariesValuesSchema } from "./config-schemas";
 import { classifyFailure } from "./envelope";
 import { AgentscrapeNetworkPolicyError, cancellationError, throwIfAborted } from "./errors";
 import { loadRegistry, scrapeWithPreset, validateContentResult } from "./presets";
@@ -65,7 +66,10 @@ export async function checkPresets(
   return withBrowserNetworkPolicy(options.allowPrivateNetwork, async () => {
     const path = options.canaryPath ?? join(import.meta.dir, "../config/preset-canaries.json");
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    // The zod gate holds the file to what it always had to be: a JSON object. Entry
+    // shapes stay unjudged at load — a malformed entry degrades to its per-preset
+    // result below instead of refusing the whole run.
+    if (!canariesValuesSchema.safeParse(parsed).success)
       throw new Error("preset-canaries.json must be a JSON object mapping preset name to config");
     // Every remaining key is a preset name, so the editor "$schema" pointer cannot stay.
     const { $schema: _schema, ...canaries } = parsed as Record<string, Canary>;

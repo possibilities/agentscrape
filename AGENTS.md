@@ -16,6 +16,19 @@ about in time.
 - Coverage is gated at 70% aggregate lines and functions, failing closed on
   unparseable LCOV.
 
+## Config surfaces are zod-first
+
+`src/config-schemas.ts` is the single source of truth for the three
+user-editable surfaces: presets, `preset-canaries.json`, and corpus
+`meta.json`. The loaders validate with those zod schemas at load, and
+`bun run generate:schemas` regenerates the three `config/*.schema.json`
+files from them — never hand-edit one; `test/schemas.test.ts` fails on
+drift. Adding a config key means declaring and describing it there, and the
+loader and published schema both follow. The parse quirks are deliberate
+and pinned by `test/config-validation.test.ts`: preset string fields
+tolerate null, `$schema` is ignored whatever its value, canary entries are
+never judged at load, and error prose still names the offending key.
+
 ## Preset domain claims are host-wide
 
 Declaring `domain:` in a preset claims the entire host. A URL on that host

@@ -1,6 +1,16 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import type { z } from "zod";
 import { withBrowserNetworkPolicy, withBrowserSignal } from "./browser";
+import {
+  COMMON,
+  MODE_FIELDS,
+  PRESET_FIELD_NAMES,
+  PRESET_MODES,
+  type PresetMode,
+  presetValuesSchema,
+  REQUIRED_FIELDS,
+} from "./config-schemas";
 import { cssSelectorProblem } from "./css-selector";
 import { PresetConfigError, PresetOutputError, PresetSelectionError } from "./errors";
 import {
@@ -14,13 +24,19 @@ import type { HandlerOptions, ScrapeResult } from "./handlers/types";
 import { LinkList, type ScrapeSchema } from "./schemas";
 
 export {
+  COMMON,
+  MODE_FIELDS,
+  PRESET_MODES,
+  type PresetMode,
+  REQUIRED_FIELDS,
+} from "./config-schemas";
+export {
   type ContentHandlerCapabilities,
   type ContentHandlerRegistration,
   registerContentHandler,
   type ScrapeSchemaConstructor,
 } from "./extractors";
 
-export type PresetMode = "content" | "links" | "nav-links";
 export interface PresetConfig {
   name: string;
   summary: string;
@@ -38,15 +54,8 @@ export interface PresetConfig {
   source: "official" | "local";
 }
 
-export const PRESET_MODES = ["content", "links", "nav-links"] as const;
-export const REQUIRED_FIELDS = ["name", "summary", "domain", "mode"] as const;
-export const COMMON = new Set(["name", "summary", "domain", "mode", "aliases", "browser_profile"]);
-export const MODE_FIELDS: Record<PresetMode, Set<string>> = {
-  content: new Set(["url_patterns", "handler", "schema"]),
-  links: new Set(["selector", "toggle_selector"]),
-  "nav-links": new Set(["section_selector", "category_selector", "toggle_selector"]),
-};
-const ALL_FIELDS = new Set([...COMMON, ...Object.values(MODE_FIELDS).flatMap((set) => [...set])]);
+const ALL_FIELDS = new Set(PRESET_FIELD_NAMES);
+/** Fields whose problems() message class is "must be a string" (null tolerated). */
 export const STRING_FIELDS = new Set([
   "name",
   "summary",
@@ -99,28 +108,50 @@ export function canonicalMatchUrl(value: unknown): string | null {
 function problems(data: Record<string, unknown>, label: string): string[] {
   const result: string[] = [];
   // "$schema" points editors at the generated JSON Schema; it is not part of the preset model.
-  const keys = Object.keys(data).filter((key) => key !== "$schema");
-  const unknown = keys.filter((key) => !ALL_FIELDS.has(key)).sort();
-  if (unknown.length) result.push(`${label}: unknown keys: ${unknown.join(", ")}`);
+  const { $schema: _schema, ...values } = data;
+  const keys = Object.keys(values);
+  // The zod schema is the structural gate: unknown keys, required presence, field
+  // types, the mode enum, and url_pattern anchors all come from its verdict. The
+  // issues are rendered here (grouped per field, message text derived from the
+  // raw values) so the historical prose and accumulation survive.
+  const parsed = presetValuesSchema.safeParse(values);
+  const issuesByField = new Map<string, z.core.$ZodIssue[]>();
+  const unknownKeys: string[] = [];
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      if (issue.code === "unrecognized_keys") {
+        unknownKeys.push(...issue.keys);
+        continue;
+      }
+      const field = issue.path[0];
+      if (typeof field !== "string") continue;
+      issuesByField.set(field, [...(issuesByField.get(field) ?? []), issue]);
+    }
+  }
+  if (unknownKeys.length) result.push(`${label}: unknown keys: ${unknownKeys.sort().join(", ")}`);
   for (const field of REQUIRED_FIELDS) {
-    if (!(field in data)) result.push(`${label}: missing required field: ${field}`);
+    if (issuesByField.has(field) && !(field in values))
+      result.push(`${label}: missing required field: ${field}`);
   }
-  for (const [name, value] of Object.entries(data)) {
-    if (STRING_FIELDS.has(name) && value !== null && typeof value !== "string") {
-      result.push(`${label}: field '${name}' must be a string`);
-    }
+  for (const name of keys) {
+    if (!STRING_FIELDS.has(name) || !issuesByField.has(name)) continue;
+    // A string-valued mode fails only the enum, reported below with the allowed values.
+    if (name === "mode" && typeof values.mode === "string") continue;
+    result.push(`${label}: field '${name}' must be a string`);
   }
-  for (const name of ["aliases", "url_patterns"]) {
-    const value = data[name];
-    if (
-      value !== undefined &&
-      (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
-    ) {
-      result.push(`${label}: field '${name}' must be a list of strings`);
-    }
+  for (const name of ["aliases", "url_patterns"] as const) {
+    const value = values[name];
+    const flagged = issuesByField.get(name);
+    if (!flagged || !(name in values)) continue;
+    const listProblem = flagged.some(
+      (issue) =>
+        issue.path.length === 1 ||
+        (Array.isArray(value) && typeof value[issue.path[1] as number] !== "string"),
+    );
+    if (listProblem) result.push(`${label}: field '${name}' must be a list of strings`);
   }
-  const mode = data.mode;
-  if (typeof mode === "string" && !(PRESET_MODES as readonly string[]).includes(mode)) {
+  const mode = values.mode;
+  if (typeof mode === "string" && issuesByField.has("mode")) {
     result.push(`${label}: invalid mode: '${mode}' (must be one of ${PRESET_MODES.join(", ")})`);
   }
   if ((PRESET_MODES as readonly unknown[]).includes(mode)) {
@@ -129,9 +160,16 @@ function problems(data: Record<string, unknown>, label: string): string[] {
     if (invalid.length)
       result.push(`${label}: fields not valid for mode '${mode}': ${invalid.join(", ")}`);
   }
-  for (const pattern of Array.isArray(data.url_patterns) ? data.url_patterns : []) {
+  const patterns = Array.isArray(values.url_patterns) ? values.url_patterns : [];
+  const unanchored = new Set(
+    (issuesByField.get("url_patterns") ?? [])
+      .map((issue) => issue.path[1])
+      .filter((index): index is number => typeof index === "number")
+      .filter((index) => typeof patterns[index] === "string"),
+  );
+  for (const [index, pattern] of patterns.entries()) {
     if (typeof pattern !== "string") continue;
-    if (!pattern.startsWith("^") || !pattern.endsWith("$")) {
+    if (unanchored.has(index)) {
       result.push(
         `${label}: url_pattern '${pattern}' must have visible start (^) and end ($) anchors`,
       );
