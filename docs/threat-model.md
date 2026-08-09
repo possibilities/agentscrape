@@ -10,11 +10,11 @@ security properties and which are conveniences that happen to look like one.
 
 Agentscrape handles or mutates provider URLs, fetched content, account-visible
 data, browser profiles and session state; Markdown destinations, frontmatter,
-summaries, raw HTML, screenshots, and corpus captures; queue records, retry,
-failure and frozen envelopes, reconciliation receipts, claims, and archives;
-the installed command, plist, deployed-SHA marker, receipt, sealed snapshots
-and manifests; and local configuration, environment values, and diagnostics
-that may contain paths or secrets.
+summaries, raw HTML, screenshots, and corpus captures; queue records, retry
+envelopes, failure evidence, and claims; the installed command, plist,
+deployed-SHA marker, receipt, sealed snapshots and manifests; and local
+configuration, environment values, and diagnostics that may contain paths or
+secrets.
 
 The goals are to keep accidental secrets out of bounded diagnostics and
 structured failure output, refuse unsafe network destinations where the
@@ -85,9 +85,8 @@ Browser profiles, extensions, and browserctl are part of the trusted external
 browser boundary.
 
 **External tools** — `gh` owns GitHub authentication and transport;
-`summaryctl` and `agentbrain` do their own external work when their narrow
-commands run; trusted custom handlers can perform arbitrary unsandboxed
-networking. Live canaries intentionally contact configured public providers.
+`summaryctl` does its own external work when its narrow command runs; trusted
+custom handlers can perform arbitrary unsandboxed networking. Live canaries intentionally contact configured public providers.
 Recorded feed parsing, corpus replay, HTML conversion, and `doctor` are offline
 with respect to Agentscrape-owned behavior.
 
@@ -99,7 +98,6 @@ with respect to Agentscrape-owned behavior.
 | `pdftotext` | PDF extraction only | Document fidelity or recovery of scans with no text layer |
 | `pandoc` | GitHub `.rst` conversion only | General document conversion service |
 | `summaryctl` | Only queue records with `summarize` | Local-only processing or provider behavior inside that tool |
-| `agentbrain` | `reconcile-queue --apply` only | Exactly-once remote acceptance without its idempotency contract |
 | `git`, `tar`, Bash, and core OS tools | Trusted install/deploy path | Runtime extraction dependencies |
 | macOS `launchctl` and `plutil` | Standalone service install, inspection, and removal | Cross-platform service management |
 
@@ -120,15 +118,12 @@ durable queue and install transitions. Those properties hold for the named
 operations; they are not a universal transactional filesystem or a power-loss
 guarantee.
 
-Queue transitions preserve captured source bytes in retry, failure, frozen, or
-reconciliation evidence before retiring the proven source inode, and
-per-generation claims coordinate workers and recover dead owners. Queue
-processing is at least once, and reconciliation can resubmit after a crash
-between external acceptance and durable local receipt; correctness there
-depends on `agentbrain` idempotency.
+Queue transitions preserve captured source bytes in retry or failure evidence
+before retiring the proven source inode, and per-generation claims coordinate
+workers and recover dead owners. Queue processing is at least once.
 
-Destinations, corpus captures, queue processing, reconciliation, browser
-sessions, installation, and runtime GC all mutate local state deliberately.
+Destinations, corpus captures, queue processing, browser sessions,
+installation, and runtime GC all mutate local state deliberately.
 "Agentscrape never writes back to providers" is not a claim of local read-only
 behavior.
 
@@ -147,7 +142,7 @@ Agentscrape does not claim:
 - trustworthiness, prompt safety, or global Markdown/HTML sanitization of output, provider content, or raw evidence;
 - domain authorization or egress safety from recognized-link destination filtering;
 - trustworthiness or safety of direct-Markdown content admitted by the strict final-2xx MIME policy;
-- exactly-once provider, destination, summary, or reconciliation effects;
+- exactly-once provider, destination, or summary effects;
 - containment of trusted custom handlers or escaped external-command descendants;
 - provider availability, authentication health, or optional-tool health from doctor;
 - manifest, receipt, service, or deployed-byte verification from doctor's source label;

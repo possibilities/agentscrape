@@ -29,7 +29,6 @@ const visibleInventory = [
   ["open-session", "Pre-warm a browser session"],
   ["close-session", "Close a browser session"],
   ["process-queue", "Process standalone artifact jobs"],
-  ["reconcile-queue", "Inventory or reconcile frozen queue records"],
   ["doctor", "Inspect offline runtime readiness and optional capabilities"],
 ] as const;
 
@@ -246,7 +245,7 @@ describe("CLI syntax specification", () => {
     expect(parsed.values.get("--etag")?.at(-1)).toBe("last");
     expect(parsed.values.get("--page")).toEqual(["https://example.com/2", "page-2.xml"]);
 
-    for (const command of ["discover-feed", "check-presets", "reconcile-queue"])
+    for (const command of ["discover-feed", "check-presets"])
       expect(() => parseArgs(command, ["--format", "human"])).not.toThrow();
     expect(() => parseArgs("fetch-markdown", ["--format", "xml"])).toThrow(
       "--format must be json, yaml, or human",

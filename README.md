@@ -34,8 +34,8 @@ Several routes delegate to local tools that are not published. Agentscrape degra
 | --- | --- |
 | Direct `.md` over bounded, DNS-pinned HTTP | Any browser-rendered page — generic extraction and every X, ChatGPT, and DeepWiki preset (`agent-browser`) |
 | PDFs, when `pdftotext` from poppler is on `PATH` | Reusing a signed-in browser session for authenticated pages (`agentweb`, through the conduit env vars) |
-| GitHub and Gist reads, when `gh` is installed and authenticated | Queue reconciliation imports, `reconcile-queue --apply` (`agentbrain`) |
-| Recorded feed parsing, corpus replay, HTML conversion, preset inspection, `doctor` | Queue records that request `summarize` (`summaryctl`) |
+| GitHub and Gist reads, when `gh` is installed and authenticated | Queue records that request `summarize` (`summaryctl`) |
+| Recorded feed parsing, corpus replay, HTML conversion, preset inspection, `doctor` | — |
 
 `agentscrape doctor` reports which of these are present. Missing optional tools are informational: routes that need them fail closed with a classified error rather than silently returning worse content.
 

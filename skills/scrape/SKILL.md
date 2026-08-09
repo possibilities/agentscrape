@@ -55,7 +55,6 @@ whether a provider is up. Exit 0 means the runtime is satisfied.
 | `github` | `gh` | GitHub and Gist routes |
 | `github-rst` | `pandoc` | GitHub `.rst` content, including reStructuredText READMEs |
 | `queue-summary` | `summaryctl` | Queue jobs that request a summary |
-| `reconciliation` | `agentbrain` | `reconcile-queue --apply` |
 
 A missing capability is informational. Routes that need it fail closed
 with a classified error rather than quietly returning worse content. PDF
@@ -348,10 +347,9 @@ Not ordinary fetching — reach for these only when asked.
 - `check-presets --live` runs configured public canaries against real
   providers. It observes operational health — unlike `doctor` it costs
   real navigations, so don't run it speculatively.
-- `process-queue` / `reconcile-queue` are the standalone artifact-job
-  path, and agentbrain's extraction pipeline runs through them. A
-  LaunchAgent drives `process-queue`; `reconcile-queue` is inventory-only
-  unless `--apply`.
+- `process-queue` drains the durable standalone artifact-job queue,
+  driven by a LaunchAgent. A record it cannot validate is published to
+  `failed/` unchanged; a browser-host outage becomes a `retry/` envelope.
 - `--retain-artifacts` keeps raw/selected HTML sidecars beside a Markdown
   `DEST` — sensitive unsanitized evidence, `fetch-markdown` only,
   incompatible with `--envelope`.

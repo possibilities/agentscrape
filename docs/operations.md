@@ -17,7 +17,6 @@ lives in the [threat model](threat-model.md).
 | `pdftotext` (poppler) | Optional | PDF extraction |
 | `pandoc` | Optional | Conversion of GitHub `.rst` content, including repository READMEs and blob routes |
 | `summaryctl` | Optional | Queue jobs whose record requests `summarize` |
-| `agentbrain` | Optional | `reconcile-queue --apply` only |
 | Trusted Git checkout plus `git`, `tar`, Bash, and core operating-system tools | Install/deploy only | Resolve and archive the exact commit, prepare the snapshot, and publish owned files |
 | macOS `launchctl` and `plutil` | Supported standalone install only | Validate and manage the user LaunchAgent |
 
@@ -48,7 +47,7 @@ semantic-version equality does not establish deployment-byte identity.
 | `HOME` | Supplies the default data home, managed `~/.local/bin/agent-browser` candidate, browserctl advisory-state location, and installer-owned user paths. The installer requires a normalized absolute, safely owned home. |
 | `PATH` | Resolves Bun at install time and optional runtime executables. For `agent-browser`, a valid explicit override wins, then `$HOME/.local/bin/agent-browser`, then `PATH`. |
 | `TMPDIR` | Influences the operating-system temporary directory used for explicitly retained diagnostic screenshots; those artifacts are not moved into the data home. |
-| `AGENTSCRAPE_DATA_HOME` | Non-empty absolute runtime data root. It wins exactly and contains `queue/`, `retry/`, `failed/`, `frozen/`, `reconciliation/`, and the captured-corpus overlay. |
+| `AGENTSCRAPE_DATA_HOME` | Non-empty absolute runtime data root. It wins exactly and contains `queue/`, `retry/`, `failed/`, the private `private/` coordination root, and the captured-corpus overlay. |
 | `XDG_DATA_HOME` | Non-empty absolute fallback; runtime data becomes `$XDG_DATA_HOME/agentscrape`. Without either data variable, the fallback is `$HOME/.local/share/agentscrape`. The installer uses the same XDG fallback for its share directory. |
 | `AGENTSCRAPE_AGENT_BROWSER_BIN` | A non-empty explicit `agent-browser` command/path. Runtime preserves an invalid configured value so spawn produces the normal missing-command classification; doctor reports it unavailable and does not fall back. |
 | `AGENTSCRAPE_AGENT_BROWSER_TIMEOUT` | Positive finite seconds for browser commands; default 30 seconds. Missing, nonnumeric, zero, or negative values use the default. |

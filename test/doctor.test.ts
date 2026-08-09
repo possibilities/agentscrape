@@ -38,7 +38,7 @@ describe("offline doctor report", () => {
       },
       findExecutable(executable) {
         executableLookups.push(executable);
-        return executable === "gh" || executable === "agentbrain" ? `/tools/${executable}` : null;
+        return executable === "gh" ? `/tools/${executable}` : null;
       },
     });
 
@@ -58,11 +58,10 @@ describe("offline doctor report", () => {
         { feature: "github", executable: "gh", available: true },
         { feature: "github-rst", executable: "pandoc", available: false },
         { feature: "queue-summary", executable: "summaryctl", available: false },
-        { feature: "reconciliation", executable: "agentbrain", available: true },
       ],
     });
     expect(browserLookups).toBe(1);
-    expect(executableLookups).toEqual(["gh", "pandoc", "summaryctl", "agentbrain"]);
+    expect(executableLookups).toEqual(["gh", "pandoc", "summaryctl"]);
     expect(doctorExitCode(report)).toBe(0);
   });
 
@@ -167,7 +166,6 @@ describe("offline doctor report", () => {
       "  github: gh available",
       "  github-rst: pandoc missing",
       "  queue-summary: summaryctl missing",
-      "  reconciliation: agentbrain missing",
     ].join("\n");
     expect(renderDoctorHuman(report)).toBe(human);
     expect(renderDoctorHuman(report)).toBe(renderDoctorReport(report, "human"));

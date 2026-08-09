@@ -21,7 +21,6 @@ rules, and queue semantics. Deployment lifecycle lives in
 | `convert-html [FILE]` | Convert one file/stdin, or recursively convert `--dir` | Writes converted Markdown beside source HTML or to stdout |
 | `open-session NAME` / `close-session NAME` | Manage reusable browser sessions | Writes or removes local browser session state |
 | `process-queue` | Process durable standalone scrape-artifact jobs | Mutates queue, failed-job, destination, and log state |
-| `reconcile-queue` | Inventory or apply reconciliation for frozen indexed records | `--apply` mutates archived reconciliation state; inventory mode does not |
 | `doctor [--format human\|json]` | Inspect the Bun runtime and inventory optional executables using offline filesystem/PATH lookups | None |
 
 `doctor` and `check-presets --live` answer different questions and are not
@@ -329,35 +328,25 @@ and workers share the same queue root and exact precedence:
 New jobs contain `url`, `destination`, optional `summarize`, optional
 `frontmatter`, and optional strict boolean `allow_private_network`, which
 `submitScrapeJob(..., { allowPrivateNetwork })` writes only when supplied.
-Workers pass the exact true/false value into the scrape operation, frozen and
-retry envelopes preserve the original record bytes, and a network-policy denial
-is permanent rather than an upstream retry. Reconciliation may inventory the
-consent field but never executes network policy or `agentbrain` because of it.
+Workers pass the exact true/false value into the scrape operation, retry
+envelopes preserve the original record bytes, and a network-policy denial is
+permanent rather than an upstream retry.
 
-Indexed submissions are rejected, and legacy indexed records are drained into
-immutable `frozen/` envelopes for reconciliation. Browser-host outages become
-immutable, policy-pinned `retry/` envelopes revisited by the LaunchAgent's
-60-second interval; malformed and permanent failures are published without
-clobbering existing `failed/` evidence.
+A record carrying any field outside that set is invalid: it is published to
+`failed/` unchanged and its source is retired, exactly like malformed YAML.
+Browser-host outages instead become immutable, policy-pinned `retry/` envelopes
+revisited by the LaunchAgent's 60-second interval. Failures are published
+without clobbering existing `failed/` evidence.
 
-`process-queue` and `reconcile-queue --apply` share private, durable, per-name
-generation claims. A live owner makes peers skip while leaving the public
-source visible; a dead owner is recovered, and malformed, symlinked, foreign,
-or incomplete claim evidence fails closed. Outcomes, frozen/retry envelopes,
-failed records, and archives use fsynced no-clobber publication. Retirement
-removes only the snapshotted inode and preserves a concurrently replaced
-pathname. There is a narrow conditional gap between the final identity check
-and the private UUID rename; a generation captured in that gap is retained in
-the private retirement quarantine rather than unlinked.
+`process-queue` uses private, durable, per-name generation claims. A live owner
+makes peers skip while leaving the public source visible; a dead owner is
+recovered, and malformed, symlinked, foreign, or incomplete claim evidence
+fails closed. Retry envelopes and failed records use fsynced no-clobber
+publication. Retirement removes only the snapshotted inode and preserves a
+concurrently replaced pathname. There is a narrow conditional gap between the
+final identity check and the private UUID rename; a generation captured in that
+gap is retained in the private retirement quarantine rather than unlinked.
 
 Queue processing is at least once: a crash after a provider succeeds (or
 destination/output is published) but before source retirement can repeat that
 provider/output work on recovery.
-
-Reconciliation is inventory-only unless `--apply` is given and admits imports
-through explicit `agentbrain` argv with a bounded timeout. A valid existing
-outcome resumes archive publication without another submit. If an owner dies
-after `agentbrain` accepted a request but before its receipt was durably
-published, recovery can physically submit again; correctness at that boundary
-relies on the `agentbrain` duplicate/idempotency contract rather than a durable
-local intent record.

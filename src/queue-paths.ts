@@ -4,10 +4,10 @@ import { isAbsolute, join, resolve } from "node:path";
 export interface QueuePaths {
   dataHome: string;
   queue: string;
-  frozen: string;
   retry: string;
   failed: string;
-  reconciliation: string;
+  /** Private transient coordination state: generation claims and retirement quarantine. */
+  private: string;
 }
 
 function validatedDataRoot(name: string, value: string): string {
@@ -29,10 +29,9 @@ export function resolveQueuePaths(
   return {
     dataHome,
     queue: join(dataHome, "queue"),
-    frozen: join(dataHome, "frozen"),
     retry: join(dataHome, "retry"),
     failed: join(dataHome, "failed"),
-    reconciliation: join(dataHome, "reconciliation"),
+    private: join(dataHome, "private"),
   };
 }
 

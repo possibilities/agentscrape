@@ -25,37 +25,25 @@ afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function fixture(): { home: string; queue: string; reconciliation: string; bin: string } {
+function fixture(): { home: string; queue: string; privateRoot: string; bin: string } {
   const home = mkdtempSync(join(tmpdir(), "agentscrape-queue-"));
   temporary.push(home);
   const queue = join(home, ".local/share/agentscrape/queue");
-  const reconciliation = join(home, ".local/share/agentscrape/reconciliation");
+  const privateRoot = join(home, ".local/share/agentscrape/private");
   const bin = join(home, "bin");
   mkdirSync(queue, { recursive: true });
   mkdirSync(bin);
-  const executable = join(bin, "agentbrain");
-  writeFileSync(
-    executable,
-    "#!/usr/bin/env bun\nprocess.stdout.write(process.env.TEST_ACK ?? '');\n",
-  );
-  chmodSync(executable, 0o700);
-  return { home, queue, reconciliation, bin };
+  return { home, queue, privateRoot, bin };
 }
 
-function queueRecord(queue: string, name = "indexed.yaml"): string {
+/**
+ * A current-format record that fails its standalone validation, so processing publishes it to
+ * failed/ and retires it without any provider call. Claim-machinery tests need exactly that: a
+ * deterministic, hermetic transition whose outcome does not depend on a network fixture.
+ */
+function queueRecord(queue: string, name = "job.yaml"): string {
   const path = join(queue, name);
-  writeFileSync(
-    path,
-    [
-      "url: https://example.com/saved",
-      "destination: /tmp/saved.md",
-      "indexer: agentbrain",
-      "source: test-ingress",
-      "frontmatter:",
-      "  authorization: never-publish-this",
-      "",
-    ].join("\n"),
-  );
+  writeFileSync(path, "url: not-a-url\ndestination: /tmp/saved.md\n");
   return path;
 }
 
@@ -97,21 +85,6 @@ function writeDueRetry(
   return { path, raw, generationId };
 }
 
-function acknowledgement(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    schema_version: 1,
-    ok: true,
-    command: "submit",
-    data: {
-      status: "queued",
-      job_id: 1,
-      idempotency_key: "submit:v1:test",
-      state: "queued",
-      ...overrides,
-    },
-  });
-}
-
 function startProcess(value: ReturnType<typeof fixture>, extraEnv: Record<string, string> = {}) {
   return Bun.spawn([process.execPath, "src/cli.ts", "process-queue"], {
     cwd: root,
@@ -126,40 +99,13 @@ function startProcess(value: ReturnType<typeof fixture>, extraEnv: Record<string
   });
 }
 
-function startReconcile(
-  value: ReturnType<typeof fixture>,
-  ack: string,
-  extraEnv: Record<string, string> = {},
-) {
-  return Bun.spawn([process.execPath, "src/cli.ts", "reconcile-queue", "--apply"], {
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...process.env,
-      HOME: value.home,
-      PATH: `${value.bin}:${process.env.PATH ?? ""}`,
-      TEST_ACK: ack,
-      ...extraEnv,
-    },
-  });
-}
-
-async function finish(child: ReturnType<typeof startReconcile>) {
+async function finish(child: ReturnType<typeof startProcess>) {
   const [code, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
   return { code, stdout, stderr };
-}
-
-async function reconcile(
-  value: ReturnType<typeof fixture>,
-  ack: string,
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = startReconcile(value, ack);
-  return finish(child);
 }
 
 async function waitFor(path: string): Promise<void> {
@@ -170,15 +116,17 @@ async function waitFor(path: string): Promise<void> {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-function outcomeFiles(reconciliation: string): string[] {
-  const directory = join(reconciliation, "outcomes");
-  return existsSync(directory)
-    ? readdirSync(directory).filter((name) => name.endsWith(".json"))
-    : [];
+function retirementFiles(privateRoot: string): string[] {
+  const directory = join(privateRoot, "retirement-quarantine");
+  return existsSync(directory) ? readdirSync(directory) : [];
 }
 
-function retirementFiles(reconciliation: string): string[] {
-  const directory = join(reconciliation, "retirement-quarantine");
+function claimFiles(privateRoot: string, kind: "slots" | "owners"): string[] {
+  return readdirSync(join(privateRoot, "claims", kind));
+}
+
+function failedFiles(home: string): string[] {
+  const directory = join(home, ".local/share/agentscrape/failed");
   return existsSync(directory) ? readdirSync(directory) : [];
 }
 
@@ -293,58 +241,35 @@ describe("durable network consent", () => {
   });
 });
 
-describe("frozen and durable retry queue states", () => {
-  test("drains indexed YAML into a strict frozen envelope and reconciles its logical identity", async () => {
+describe("durable retry queue states", () => {
+  test("publishes an indexed legacy record to failed as an ordinary invalid record", async () => {
     const value = fixture();
-    const source = queueRecord(value.queue, "legacy.yaml");
-    writeFileSync(source, `${readFileSync(source, "utf8")}allow_private_network: false\n`);
-    const original = readFileSync(source);
+    const name = "legacy.yaml";
+    const source = join(value.queue, name);
+    const raw = "url: https://example.com/saved\ndestination: /tmp/saved.md\nindexer: agentbrain\n";
+    writeFileSync(source, raw);
     const processed = await finish(startProcess(value));
     expect(processed.code, processed.stderr).toBe(0);
-    expect(processed.stderr).toContain("frozen=1");
+    expect(processed.stderr).toContain("failed=1");
+    expect(processed.stderr).not.toContain("frozen");
     expect(existsSync(source)).toBeFalse();
-
-    const frozenDirectory = join(value.home, ".local/share/agentscrape/frozen");
-    const frozenName = readdirSync(frozenDirectory)[0]!;
-    const frozenPath = join(frozenDirectory, frozenName);
-    expect(lstatSync(frozenDirectory).mode & 0o777).toBe(0o700);
-    expect(lstatSync(frozenPath).mode & 0o777).toBe(0o600);
-    const envelopeText = readFileSync(frozenPath, "utf8");
-    const envelope = JSON.parse(envelopeText);
-    expect(envelopeText).toBe(`${JSON.stringify(envelope)}\n`);
-    expect(envelope).toMatchObject({
-      version: 1,
-      state: "frozen",
-      logicalArea: "pending",
-      originalFilename: "legacy.yaml",
-      rawByteSize: original.byteLength,
-    });
-    expect(Buffer.from(envelope.rawBase64, "base64")).toEqual(original);
-
-    const applied = await reconcile(value, acknowledgement());
-    expect(applied.code, applied.stderr).toBe(0);
-    expect(existsSync(frozenPath)).toBeFalse();
-    const outcomeName = outcomeFiles(value.reconciliation)[0]!;
-    const manifest = JSON.parse(
-      readFileSync(join(value.reconciliation, "outcomes", outcomeName), "utf8"),
+    expect(existsSync(join(value.home, ".local/share/agentscrape/frozen"))).toBeFalse();
+    expect(failedFiles(value.home)).toEqual([name]);
+    expect(readFileSync(join(value.home, ".local/share/agentscrape/failed", name), "utf8")).toBe(
+      raw,
     );
-    expect(manifest.legacy_record).toMatchObject({
-      area: "pending",
-      filename: "legacy.yaml",
-      sha256: envelope.rawSha256,
-      byte_size: original.byteLength,
-    });
-    expect(readFileSync(join(value.reconciliation, manifest.archive_record))).toEqual(original);
-    const stable = await finish(
-      Bun.spawn([process.execPath, "src/cli.ts", "reconcile-queue"], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, HOME: value.home, PATH: `${value.bin}:${process.env.PATH ?? ""}` },
-      }),
-    );
-    expect(stable.code, stable.stderr).toBe(0);
-    expect(JSON.parse(stable.stdout).total_records).toBe(0);
+  });
+
+  test("does not follow queue record symlinks", async () => {
+    const value = fixture();
+    const external = join(value.home, "external.yaml");
+    writeFileSync(external, "password: do-not-read\n");
+    symlinkSync(external, join(value.queue, "linked.yaml"));
+    const result = await finish(startProcess(value));
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stderr).toContain("processed=0 failed=0");
+    expect(readFileSync(external, "utf8")).toBe("password: do-not-read\n");
+    expect(failedFiles(value.home)).toEqual([]);
   });
 
   test("schedules an immutable retry, waits without provider work, then resumes when due", async () => {
@@ -859,15 +784,6 @@ describe("frozen and durable retry queue states", () => {
         }),
       );
 
-    // Reconciliation shares the generation claim and must not consume terminal evidence while
-    // the exact ready predecessor still needs it to finish the crash recovery transition.
-    const guarded = await reconcile(value, acknowledgement());
-    expect(guarded.code, guarded.stderr).toBe(0);
-    expect(JSON.parse(guarded.stdout)).toMatchObject({ errors: 0, selected_records: 0 });
-    expect(outcomeFiles(value.reconciliation)).toEqual([]);
-    expect(existsSync(source)).toBeTrue();
-    expect(existsSync(terminal)).toBeTrue();
-
     const extraLink = join(value.home, "terminal-hardlink");
     linkSync(terminal, extraLink);
     const hardlinked = await runRecovery();
@@ -948,19 +864,7 @@ describe("frozen and durable retry queue states", () => {
     expect(existsSync(retry.path)).toBeFalse();
   });
 
-  test("recovers linked frozen and terminal publication temps in focused state flows", async () => {
-    const frozenValue = fixture();
-    queueRecord(frozenValue.queue, "linked-frozen.yaml");
-    expect((await finish(startProcess(frozenValue))).code).toBe(0);
-    const frozenDirectory = join(frozenValue.home, ".local/share/agentscrape/frozen");
-    const frozenPath = join(frozenDirectory, readdirSync(frozenDirectory)[0]!);
-    const frozenTemporary = publicationTemp(frozenDirectory);
-    linkSync(frozenPath, frozenTemporary);
-    const reconciled = await reconcile(frozenValue, acknowledgement());
-    expect(reconciled.code, reconciled.stderr).toBe(0);
-    expect(existsSync(frozenTemporary)).toBeFalse();
-    expect(existsSync(frozenPath)).toBeFalse();
-
+  test("recovers a linked terminal publication temp in a focused state flow", async () => {
     const terminalValue = fixture();
     const name = "linked-terminal.yaml";
     const source = join(terminalValue.queue, name);
@@ -1000,580 +904,12 @@ describe("frozen and durable retry queue states", () => {
   });
 });
 
-describe("queue reconciliation hardening", () => {
-  for (const jobId of [-1, 0, 1.5]) {
-    test(`rejects invalid job id ${jobId}`, async () => {
-      const value = fixture();
-      const source = queueRecord(value.queue);
-      const result = await reconcile(value, acknowledgement({ job_id: jobId }));
-      expect(result.code).toBe(1);
-      expect(JSON.parse(result.stdout).errors).toBe(1);
-      expect(existsSync(source)).toBeTrue();
-      expect(outcomeFiles(value.reconciliation)).toEqual([]);
-    });
-  }
-
-  for (const [label, key] of [
-    ["empty", ""],
-    ["oversized", "x".repeat(501)],
-  ] as const) {
-    test(`rejects an ${label} idempotency key`, async () => {
-      const value = fixture();
-      const source = queueRecord(value.queue);
-      const result = await reconcile(value, acknowledgement({ idempotency_key: key }));
-      expect(result.code).toBe(1);
-      expect(JSON.parse(result.stdout).errors).toBe(1);
-      expect(existsSync(source)).toBeTrue();
-      expect(outcomeFiles(value.reconciliation)).toEqual([]);
-    });
-  }
-
-  test("rejects malformed acknowledgement JSON without leaking it", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const result = await reconcile(value, '{"partial":"TOP-SECRET-ACK"');
-    expect(result.code).toBe(1);
-    expect(result.stdout).toContain("returned invalid JSON");
-    expect(result.stdout).not.toContain("TOP-SECRET-ACK");
-    expect(existsSync(source)).toBeTrue();
-    expect(outcomeFiles(value.reconciliation)).toEqual([]);
-    expect(JSON.parse(result.stdout).remaining_records).toBe(1);
-  });
-
-  test("publishes an exact receipt and durably archives after a valid acknowledgement", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code).toBe(0);
-    expect(existsSync(source)).toBeFalse();
-    const files = outcomeFiles(value.reconciliation);
-    expect(files).toHaveLength(1);
-    const manifest = JSON.parse(
-      readFileSync(join(value.reconciliation, "outcomes", files[0]!), "utf8"),
-    );
-    expect(manifest.agentbrain_receipt).toEqual({
-      status: "queued",
-      job_id: 1,
-      idempotency_key: "submit:v1:test",
-      state: "queued",
-    });
-    expect(manifest.evidence.frontmatter.authorization).toBe("[REDACTED]");
-    expect(manifest.archive_record).toBe(
-      `archive/pending/${manifest.record_id.slice(0, 16)}-indexed.yaml`,
-    );
-    expect(existsSync(join(value.reconciliation, manifest.archive_record))).toBeTrue();
-    expect(retirementFiles(value.reconciliation)).toEqual([]);
-  });
-
-  test("does not follow queue record symlinks", async () => {
-    const value = fixture();
-    const external = join(value.home, "external.yaml");
-    writeFileSync(external, "password: do-not-read\n");
-    symlinkSync(external, join(value.queue, "linked.yaml"));
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).total_records).toBe(0);
-    expect(readFileSync(external, "utf8")).toBe("password: do-not-read\n");
-  });
-
-  test("keeps the source when outcome publication is blocked by a symlink", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const external = join(value.home, "external-outcomes");
-    mkdirSync(external);
-    mkdirSync(value.reconciliation, { recursive: true });
-    symlinkSync(external, join(value.reconciliation, "outcomes"));
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code).toBe(1);
-    expect(existsSync(source)).toBeTrue();
-    expect(readdirSync(external)).toEqual([]);
-  });
-
-  test("never overwrites a differing outcome", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const inventoryChild = Bun.spawn([process.execPath, "src/cli.ts", "reconcile-queue"], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: value.home },
-    });
-    const [, inventoryText] = await Promise.all([
-      inventoryChild.exited,
-      new Response(inventoryChild.stdout).text(),
-      new Response(inventoryChild.stderr).text(),
-    ]);
-    const recordId = JSON.parse(inventoryText).records[0].record_id;
-    const outcomes = join(value.reconciliation, "outcomes");
-    mkdirSync(outcomes, { recursive: true, mode: 0o700 });
-    const outcome = join(outcomes, `${recordId}.json`);
-    const evidence = '{"different":"outcome evidence"}\n';
-    writeFileSync(outcome, evidence, { mode: 0o600 });
-
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code).toBe(1);
-    expect(readFileSync(outcome, "utf8")).toBe(evidence);
-    expect(existsSync(source)).toBeTrue();
-  });
-
-  test("never overwrites a differing archive and resumes an identical archive", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const raw = readFileSync(source);
-    const inventoryChild = Bun.spawn([process.execPath, "src/cli.ts", "reconcile-queue"], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: value.home },
-    });
-    const [, inventoryText] = await Promise.all([
-      inventoryChild.exited,
-      new Response(inventoryChild.stdout).text(),
-      new Response(inventoryChild.stderr).text(),
-    ]);
-    const recordId = JSON.parse(inventoryText).records[0].record_id;
-    const archiveDirectory = join(value.reconciliation, "archive", "pending");
-    mkdirSync(archiveDirectory, { recursive: true, mode: 0o700 });
-    const archive = join(archiveDirectory, `${recordId.slice(0, 16)}-indexed.yaml`);
-    writeFileSync(archive, "different archive evidence\n", { mode: 0o600 });
-
-    const blocked = await reconcile(value, acknowledgement());
-    expect(blocked.code).toBe(1);
-    expect(JSON.parse(blocked.stdout).remaining_records).toBe(1);
-    expect(readFileSync(archive, "utf8")).toBe("different archive evidence\n");
-    expect(existsSync(source)).toBeTrue();
-    expect(outcomeFiles(value.reconciliation)).toHaveLength(1);
-
-    rmSync(archive);
-    writeFileSync(archive, raw, { mode: 0o600 });
-    const resumed = await reconcile(value, "must not be submitted again");
-    expect(resumed.code).toBe(0);
-    expect(JSON.parse(resumed.stdout).already_reconciled).toBe(1);
-    expect(readFileSync(archive)).toEqual(raw);
-    expect(existsSync(source)).toBeFalse();
-  });
-
-  test("does not report success or remove the source when fsync fails", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const script = [
-      'import { mock } from "bun:test";',
-      'import * as realFs from "node:fs";',
-      `mock.module("node:fs", () => ({ ...realFs, fsyncSync() { throw new Error("simulated fsync failure token=RECONCILE-SECRET ${"x".repeat(2000)}"); } }));`,
-      'const { reconcileQueue } = await import("./src/queue.ts?fsync-failure");',
-      "const result = await reconcileQueue({ apply: true });",
-      "process.stdout.write(JSON.stringify(result));",
-    ].join("\n");
-    const child = Bun.spawn([process.execPath, "-e", script], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: {
-        ...process.env,
-        HOME: value.home,
-        PATH: `${value.bin}:${process.env.PATH ?? ""}`,
-        TEST_ACK: acknowledgement(),
-      },
-    });
-    const [code, stdout] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
-    expect(code).toBe(0);
-    const result = JSON.parse(stdout);
-    expect(result.errors).toBe(1);
-    const diagnostic = result.records.find((record: any) => record.error)?.error;
-    expect(diagnostic).toBeString();
-    expect(diagnostic).not.toContain("RECONCILE-SECRET");
-    expect(new TextEncoder().encode(diagnostic).byteLength).toBeLessThanOrEqual(1024);
-    expect(existsSync(source)).toBeTrue();
-    expect(outcomeFiles(value.reconciliation)).toEqual([]);
-  });
-
-  test("recovers an outcome after archive publication fails without resubmitting", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    mkdirSync(value.reconciliation, { recursive: true });
-    writeFileSync(join(value.reconciliation, "archive"), "blocks archive directory\n");
-
-    const failed = await reconcile(value, acknowledgement());
-    expect(failed.code).toBe(1);
-    expect(existsSync(source)).toBeTrue();
-    expect(outcomeFiles(value.reconciliation)).toHaveLength(1);
-
-    rmSync(join(value.reconciliation, "archive"));
-    const recovered = await reconcile(value, "not valid JSON and must not be submitted");
-    expect(recovered.code).toBe(0);
-    expect(JSON.parse(recovered.stdout).already_reconciled).toBe(1);
-    expect(existsSync(source)).toBeFalse();
-  });
-
-  test("retries one-shot authoritative outcome file and directory sync failures", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    mkdirSync(value.reconciliation, { recursive: true });
-    const archiveBlocker = join(value.reconciliation, "archive");
-    writeFileSync(archiveBlocker, "blocks archive directory\n");
-    const interrupted = await reconcile(value, acknowledgement());
-    expect(interrupted.code).toBe(1);
-    const outcomeName = outcomeFiles(value.reconciliation)[0]!;
-    const outcome = join(value.reconciliation, "outcomes", outcomeName);
-    const outcomeDirectory = join(value.reconciliation, "outcomes");
-    const manifest = JSON.parse(readFileSync(outcome, "utf8"));
-    rmSync(archiveBlocker);
-
-    const script = [
-      'import { mock } from "bun:test";',
-      'import * as realFs from "node:fs";',
-      "const realOpenSync = realFs.openSync;",
-      "const realCloseSync = realFs.closeSync;",
-      "const realFsyncSync = realFs.fsyncSync;",
-      "const descriptors = new Map();",
-      "let fileAttempts = 0;",
-      "let directoryAttempts = 0;",
-      `const outcome = ${JSON.stringify(outcome)};`,
-      `const outcomeDirectory = ${JSON.stringify(outcomeDirectory)};`,
-      'mock.module("node:fs", () => ({',
-      "  ...realFs,",
-      "  openSync(path, flags, mode) {",
-      "    const descriptor = realOpenSync(path, flags, mode);",
-      "    descriptors.set(descriptor, String(path));",
-      "    return descriptor;",
-      "  },",
-      "  closeSync(descriptor) { descriptors.delete(descriptor); return realCloseSync(descriptor); },",
-      "  fsyncSync(descriptor) {",
-      "    const path = descriptors.get(descriptor);",
-      "    if (path === outcome && ++fileAttempts === 1)",
-      '      throw new Error("one-shot outcome file fsync failure");',
-      "    if (path === outcomeDirectory && ++directoryAttempts === 1)",
-      '      throw new Error("one-shot outcome directory fsync failure");',
-      "    return realFsyncSync(descriptor);",
-      "  },",
-      "}));",
-      'const { reconcileQueue } = await import("./src/queue.ts?outcome-sync-retry");',
-      "const result = await reconcileQueue({ apply: true });",
-      "process.stdout.write(JSON.stringify({ result, fileAttempts, directoryAttempts }));",
-    ].join("\n");
-    const resumed = await finish(
-      Bun.spawn([process.execPath, "-e", script], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, HOME: value.home },
-      }),
-    );
-    expect(resumed.code, resumed.stderr).toBe(0);
-    const evidence = JSON.parse(resumed.stdout);
-    expect(evidence.fileAttempts).toBe(2);
-    expect(evidence.directoryAttempts).toBe(2);
-    expect(evidence.result.errors).toBe(0);
-    expect(evidence.result.already_reconciled).toBe(1);
-    expect(existsSync(join(value.reconciliation, manifest.archive_record))).toBeTrue();
-    expect(existsSync(source)).toBeFalse();
-  });
-
-  test("preserves source when authoritative outcome sync persistently fails", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    mkdirSync(value.reconciliation, { recursive: true });
-    const archiveBlocker = join(value.reconciliation, "archive");
-    writeFileSync(archiveBlocker, "blocks archive directory\n");
-    const interrupted = await reconcile(value, acknowledgement());
-    expect(interrupted.code).toBe(1);
-    const outcomeName = outcomeFiles(value.reconciliation)[0]!;
-    const outcomeDirectory = join(value.reconciliation, "outcomes");
-    rmSync(archiveBlocker);
-
-    const script = [
-      'import { mock } from "bun:test";',
-      'import * as realFs from "node:fs";',
-      "const realOpenSync = realFs.openSync;",
-      "const realCloseSync = realFs.closeSync;",
-      "const realFsyncSync = realFs.fsyncSync;",
-      "const descriptors = new Map();",
-      "let directoryAttempts = 0;",
-      `const outcomeDirectory = ${JSON.stringify(outcomeDirectory)};`,
-      'mock.module("node:fs", () => ({',
-      "  ...realFs,",
-      "  openSync(path, flags, mode) {",
-      "    const descriptor = realOpenSync(path, flags, mode);",
-      "    descriptors.set(descriptor, String(path));",
-      "    return descriptor;",
-      "  },",
-      "  closeSync(descriptor) { descriptors.delete(descriptor); return realCloseSync(descriptor); },",
-      "  fsyncSync(descriptor) {",
-      "    if (descriptors.get(descriptor) === outcomeDirectory) {",
-      "      directoryAttempts += 1;",
-      '      throw new Error("persistent outcome directory fsync failure");',
-      "    }",
-      "    return realFsyncSync(descriptor);",
-      "  },",
-      "}));",
-      'const { reconcileQueue } = await import("./src/queue.ts?outcome-sync-persistent");',
-      "const result = await reconcileQueue({ apply: true });",
-      "process.stdout.write(JSON.stringify({ result, directoryAttempts }));",
-    ].join("\n");
-    const blocked = await finish(
-      Bun.spawn([process.execPath, "-e", script], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, HOME: value.home },
-      }),
-    );
-    expect(blocked.code, blocked.stderr).toBe(0);
-    const evidence = JSON.parse(blocked.stdout);
-    expect(evidence.directoryAttempts).toBe(2);
-    expect(evidence.result.errors).toBe(1);
-    expect(evidence.result.remaining_records).toBe(1);
-    expect(existsSync(source)).toBeTrue();
-    expect(existsSync(join(value.reconciliation, "archive"))).toBeFalse();
-
-    const inventoryScript = [
-      'import { mock } from "bun:test";',
-      'import * as realFs from "node:fs";',
-      'mock.module("node:fs", () => ({ ...realFs, fsyncSync() { throw new Error("inventory must not sync"); } }));',
-      'const { reconcileQueue } = await import("./src/queue.ts?outcome-inventory-no-sync");',
-      "const result = await reconcileQueue();",
-      "process.stdout.write(JSON.stringify(result));",
-    ].join("\n");
-    const inventory = await finish(
-      Bun.spawn([process.execPath, "-e", inventoryScript], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, HOME: value.home },
-      }),
-    );
-    expect(inventory.code, inventory.stderr).toBe(0);
-    const inventoryResult = JSON.parse(inventory.stdout);
-    expect(inventoryResult.records[0].record_id).toBe(outcomeName.replace(/\.json$/, ""));
-    expect(inventoryResult.records[0].reconciled).toBeTrue();
-    expect(existsSync(source)).toBeTrue();
-  });
-
-  test("two reconciliation workers make one submit while the live owner retains its claim", async () => {
-    const value = fixture();
-    queueRecord(value.queue);
-    const ready = join(value.home, "ready");
-    const release = join(value.home, "release");
-    const calls = join(value.home, "calls");
-    const executable = join(value.bin, "agentbrain");
-    writeFileSync(
-      executable,
-      [
-        "#!/usr/bin/env bun",
-        'import { appendFileSync, existsSync, writeFileSync } from "node:fs";',
-        'appendFileSync(process.env.TEST_CALLS!, "call\\n");',
-        'writeFileSync(process.env.TEST_READY!, "ready\\n");',
-        "while (!existsSync(process.env.TEST_RELEASE!)) await Bun.sleep(10);",
-        "process.stdout.write(process.env.TEST_ACK ?? '');",
-        "",
-      ].join("\n"),
-    );
-    const env = {
-      TEST_READY: ready,
-      TEST_RELEASE: release,
-      TEST_CALLS: calls,
-    };
-    const owner = startReconcile(value, acknowledgement(), env);
-    await waitFor(ready);
-    const peerResult = await finish(startReconcile(value, acknowledgement(), env));
-    expect(peerResult.code).toBe(0);
-    expect(JSON.parse(peerResult.stdout).claimed_elsewhere).toBe(1);
-    writeFileSync(release, "release\n");
-    const ownerResult = await finish(owner);
-    expect(ownerResult.code).toBe(0);
-    expect(readFileSync(calls, "utf8")).toBe("call\n");
-    expect(outcomeFiles(value.reconciliation)).toHaveLength(1);
-    expect(readdirSync(join(value.reconciliation, "archive", "pending"))).toHaveLength(1);
-    expect(retirementFiles(value.reconciliation)).toEqual([]);
-  });
-
-  test("a process-queue peer skips a pending record held by reconciliation", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue);
-    const ready = join(value.home, "ready");
-    const release = join(value.home, "release");
-    const calls = join(value.home, "calls");
-    writeFileSync(
-      join(value.bin, "agentbrain"),
-      [
-        "#!/usr/bin/env bun",
-        'import { appendFileSync, existsSync, writeFileSync } from "node:fs";',
-        'appendFileSync(process.env.TEST_CALLS!, "call\\n");',
-        'writeFileSync(process.env.TEST_READY!, "ready\\n");',
-        "while (!existsSync(process.env.TEST_RELEASE!)) await Bun.sleep(10);",
-        "process.stdout.write(process.env.TEST_ACK ?? '');",
-        "",
-      ].join("\n"),
-    );
-    const env = { TEST_READY: ready, TEST_RELEASE: release, TEST_CALLS: calls };
-    const owner = startReconcile(value, acknowledgement(), env);
-    await waitFor(ready);
-
-    const peer = await finish(startProcess(value));
-    expect(peer.code).toBe(0);
-    expect(peer.stderr).toContain("processed=0 failed=0 frozen=0");
-    expect(existsSync(source)).toBeTrue();
-    expect(outcomeFiles(value.reconciliation)).toEqual([]);
-    const failedDirectory = join(value.home, ".local/share/agentscrape/failed");
-    expect(existsSync(failedDirectory) ? readdirSync(failedDirectory) : []).toEqual([]);
-
-    writeFileSync(release, "release\n");
-    const completed = await finish(owner);
-    expect(completed.code).toBe(0);
-    expect(readFileSync(calls, "utf8")).toBe("call\n");
-    expect(existsSync(source)).toBeFalse();
-    expect(outcomeFiles(value.reconciliation)).toHaveLength(1);
-    expect(readdirSync(join(value.reconciliation, "archive", "pending"))).toHaveLength(1);
-    expect(retirementFiles(value.reconciliation)).toEqual([]);
-  });
-
-  test("a killed owner is recovered and its unreceipted submit is retried", async () => {
-    const value = fixture();
-    queueRecord(value.queue);
-    const ready = join(value.home, "ready");
-    const release = join(value.home, "release");
-    const calls = join(value.home, "calls");
-    const executable = join(value.bin, "agentbrain");
-    writeFileSync(
-      executable,
-      [
-        "#!/usr/bin/env bun",
-        'import { appendFileSync, existsSync, writeFileSync } from "node:fs";',
-        'appendFileSync(process.env.TEST_CALLS!, "call\\n");',
-        'writeFileSync(process.env.TEST_READY!, "ready\\n");',
-        "while (!existsSync(process.env.TEST_RELEASE!)) await Bun.sleep(10);",
-        "process.stdout.write(process.env.TEST_ACK ?? '');",
-        "",
-      ].join("\n"),
-    );
-    const env = { TEST_READY: ready, TEST_RELEASE: release, TEST_CALLS: calls };
-    const doomed = startReconcile(value, acknowledgement(), env);
-    await waitFor(ready);
-    doomed.kill(9);
-    await finish(doomed);
-    writeFileSync(
-      executable,
-      [
-        "#!/usr/bin/env bun",
-        'import { appendFileSync } from "node:fs";',
-        'appendFileSync(process.env.TEST_CALLS!, "call\\n");',
-        "process.stdout.write(process.env.TEST_ACK ?? '');",
-        "",
-      ].join("\n"),
-    );
-    const recovered = await finish(startReconcile(value, acknowledgement(), env));
-    expect(recovered.code).toBe(0);
-    expect(readFileSync(calls, "utf8")).toBe("call\ncall\n");
-    expect(outcomeFiles(value.reconciliation)).toHaveLength(1);
-  });
-
-  test("counts a replacement generation that appears between inventory and claim", async () => {
-    const value = fixture();
-    const source = queueRecord(value.queue, "replaced.yaml");
-    const replacementPath = join(value.queue, ".replacement.tmp");
-    const replacement =
-      "url: https://example.com/replacement\ndestination: /tmp/replacement.md\nindexer: agentbrain\nsource: replacement\n";
-    writeFileSync(replacementPath, replacement);
-    const script = [
-      'import { mock } from "bun:test";',
-      'import * as realFs from "node:fs";',
-      "const realOpenSync = realFs.openSync;",
-      "const realRenameSync = realFs.renameSync;",
-      "let sourceOpens = 0;",
-      `const source = ${JSON.stringify(source)};`,
-      `const replacementPath = ${JSON.stringify(replacementPath)};`,
-      'mock.module("node:fs", () => ({',
-      "  ...realFs,",
-      "  openSync(path, flags, mode) {",
-      "    if (String(path) === source && ++sourceOpens === 2)",
-      "      realRenameSync(replacementPath, source);",
-      "    return realOpenSync(path, flags, mode);",
-      "  },",
-      "}));",
-      'const { reconcileQueue } = await import("./src/queue.ts?replacement-before-claim");',
-      "const result = await reconcileQueue({ apply: true });",
-      "process.stdout.write(JSON.stringify(result));",
-    ].join("\n");
-    const result = await finish(
-      Bun.spawn([process.execPath, "-e", script], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, HOME: value.home },
-      }),
-    );
-    expect(result.code, result.stderr).toBe(0);
-    const outcome = JSON.parse(result.stdout);
-    expect(outcome.selected_records).toBe(0);
-    expect(outcome.remaining_records).toBe(1);
-    expect(outcome.errors).toBe(0);
-    expect(readFileSync(source, "utf8")).toBe(replacement);
-  });
-
-  test("malformed, symlinked, and missing-owner claims are retained fail-closed", async () => {
-    const value = fixture();
-    for (const name of ["malformed.yaml", "symlink.yaml", "orphan.yaml"])
-      queueRecord(value.queue, name);
-    const claims = join(value.reconciliation, "claims");
-    const slots = join(claims, "slots");
-    const owners = join(claims, "owners");
-    const quarantine = join(claims, "quarantine");
-    mkdirSync(slots, { recursive: true, mode: 0o700 });
-    mkdirSync(owners, { mode: 0o700 });
-    mkdirSync(quarantine, { mode: 0o700 });
-    const key = (name: string) => createHash("sha256").update(`pending\0${name}`).digest("hex");
-    const malformedSlot = join(slots, key("malformed.yaml"));
-    writeFileSync(malformedSlot, "not owner json\n", { mode: 0o600 });
-    const external = join(value.home, "external-claim");
-    writeFileSync(external, "foreign evidence\n", { mode: 0o600 });
-    const symlinkSlot = join(slots, key("symlink.yaml"));
-    symlinkSync(external, symlinkSlot);
-    const token = randomUUID();
-    const rootInfo = lstatSync(value.reconciliation, { bigint: true });
-    const orphanSlot = join(slots, key("orphan.yaml"));
-    writeFileSync(
-      orphanSlot,
-      `${JSON.stringify({
-        version: 1,
-        pid: process.pid,
-        token,
-        owner: `${token}.json`,
-        operation: "reconcile",
-        area: "pending",
-        name: "orphan.yaml",
-        reconciliation_root: { dev: String(rootInfo.dev), ino: String(rootInfo.ino) },
-        source: {
-          dev: "0",
-          ino: "0",
-          size: "0",
-          mtimeNs: "0",
-          ctimeNs: "0",
-          sha256: "0".repeat(64),
-        },
-      })}\n`,
-      { mode: 0o600 },
-    );
-
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code).toBe(1);
-    expect(JSON.parse(result.stdout).errors).toBe(3);
-    expect(existsSync(malformedSlot)).toBeTrue();
-    expect(lstatSync(symlinkSlot).isSymbolicLink()).toBeTrue();
-    expect(existsSync(orphanSlot)).toBeTrue();
-    expect(outcomeFiles(value.reconciliation)).toEqual([]);
-  });
-});
-
 describe("queue processing claim publication", () => {
   test("recovers a valid dead ASR16 pending owner before taking the generation claim", async () => {
     const value = fixture();
     const name = "dead-legacy.yaml";
     const source = queueRecord(value.queue, name);
-    const claims = join(value.reconciliation, "claims");
+    const claims = join(value.privateRoot, "claims");
     const slots = join(claims, "slots");
     const owners = join(claims, "owners");
     mkdirSync(slots, { recursive: true, mode: 0o700 });
@@ -1581,7 +917,6 @@ describe("queue processing claim publication", () => {
     mkdirSync(join(claims, "quarantine"), { mode: 0o700 });
     const token = randomUUID();
     const sourceInfo = lstatSync(source, { bigint: true });
-    const rootInfo = lstatSync(value.reconciliation, { bigint: true });
     const ownerName = `${token}.json`;
     const bytes = `${JSON.stringify({
       version: 1,
@@ -1591,7 +926,6 @@ describe("queue processing claim publication", () => {
       operation: "process",
       area: "pending",
       name,
-      reconciliation_root: { dev: String(rootInfo.dev), ino: String(rootInfo.ino) },
       source: {
         dev: String(sourceInfo.dev),
         ino: String(sourceInfo.ino),
@@ -1607,8 +941,9 @@ describe("queue processing claim publication", () => {
 
     const processed = await finish(startProcess(value));
     expect(processed.code, processed.stderr).toBe(0);
-    expect(processed.stderr).toContain("frozen=1");
+    expect(processed.stderr).toContain("failed=1");
     expect(existsSync(source)).toBeFalse();
+    expect(failedFiles(value.home)).toEqual([name]);
     expect(readdirSync(slots)).toEqual([]);
     expect(readdirSync(owners)).toEqual([]);
   });
@@ -1618,7 +953,7 @@ describe("queue processing claim publication", () => {
       const value = fixture();
       const name = "blocked.yaml";
       const source = queueRecord(value.queue, name);
-      const claims = join(value.reconciliation, "claims");
+      const claims = join(value.privateRoot, "claims");
       const slots = join(claims, "slots");
       const owners = join(claims, "owners");
       mkdirSync(slots, { recursive: true, mode: 0o700 });
@@ -1633,7 +968,6 @@ describe("queue processing claim publication", () => {
         symlinkSync(retainedEvidence, slot);
       } else {
         const token = kind === "uppercase UUID" ? randomUUID().toUpperCase() : randomUUID();
-        const rootInfo = lstatSync(value.reconciliation, { bigint: true });
         const bytes = `${JSON.stringify({
           version: 1,
           pid: process.pid,
@@ -1642,7 +976,6 @@ describe("queue processing claim publication", () => {
           operation: "process",
           area: "pending",
           name,
-          reconciliation_root: { dev: String(rootInfo.dev), ino: String(rootInfo.ino) },
           source: {
             dev: "0",
             ino: "0",
@@ -1668,7 +1001,7 @@ describe("queue processing claim publication", () => {
       expect(
         kind === "symlink" ? lstatSync(slot).isSymbolicLink() : lstatSync(slot).isFile(),
       ).toBeTrue();
-      expect(outcomeFiles(value.reconciliation)).toEqual([]);
+      expect(failedFiles(value.home)).toEqual([]);
     });
   }
 
@@ -1699,28 +1032,22 @@ describe("queue processing claim publication", () => {
       "    return realFsyncSync(descriptor);",
       "  },",
       "}));",
-      'const { reconcileQueue } = await import("./src/queue.ts?slot-fsync-failure");',
-      "const result = await reconcileQueue({ apply: true });",
-      "process.stdout.write(JSON.stringify(result));",
+      'const { processQueue } = await import("./src/queue.ts?slot-fsync-failure");',
+      "await processQueue();",
     ].join("\n");
-    const child = Bun.spawn([process.execPath, "-e", script], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: {
-        ...process.env,
-        HOME: value.home,
-        PATH: `${value.bin}:${process.env.PATH ?? ""}`,
-        TEST_ACK: acknowledgement(),
-      },
-    });
-    const result = await finish(child);
-    expect(result.code, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).errors).toBe(1);
-    expect(JSON.parse(result.stdout).remaining_records).toBe(1);
+    const result = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("simulated slot publication fsync failure");
     expect(existsSync(source)).toBeTrue();
-    expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toEqual([]);
-    expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toEqual([]);
+    expect(claimFiles(value.privateRoot, "slots")).toEqual([]);
+    expect(claimFiles(value.privateRoot, "owners")).toEqual([]);
   });
 
   test("keeps the owner when slot unlink synchronization fails", async () => {
@@ -1766,11 +1093,9 @@ describe("queue processing claim publication", () => {
       "claim slot for release-sync.yaml removal could not be synchronized",
     );
     expect(existsSync(source)).toBeFalse();
-    expect(readdirSync(join(value.home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
-    const claims = join(value.reconciliation, "claims");
-    const slots = join(claims, "slots");
-    const owners = join(claims, "owners");
-    expect(readdirSync(slots)).toEqual([]);
+    expect(failedFiles(value.home)).toEqual([name]);
+    const owners = join(value.privateRoot, "claims", "owners");
+    expect(claimFiles(value.privateRoot, "slots")).toEqual([]);
     const ownerNames = readdirSync(owners);
     expect(ownerNames).toHaveLength(1);
     const owner = JSON.parse(readFileSync(join(owners, ownerNames[0]!), "utf8"));
@@ -1780,9 +1105,10 @@ describe("queue processing claim publication", () => {
     expect(existsSync(join(owners, owner.owner))).toBeTrue();
   });
 
-  test("does not report frozen success when exact claim release fails", async () => {
+  test("does not report failed publication success when exact claim release fails", async () => {
     const value = fixture();
-    const source = queueRecord(value.queue, "frozen.yaml");
+    const name = "invalid.yaml";
+    const source = queueRecord(value.queue, name);
     const script = [
       'import { mock } from "bun:test";',
       'import * as realFs from "node:fs";',
@@ -1805,16 +1131,14 @@ describe("queue processing claim publication", () => {
     });
     const result = await finish(child);
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("claim slot for frozen.yaml could not be removed");
+    expect(result.stderr).toContain(`claim slot for ${name} could not be removed`);
     expect(existsSync(source)).toBeFalse();
-    expect(readdirSync(join(value.home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
-    const slots = readdirSync(join(value.reconciliation, "claims", "slots"));
-    const owners = readdirSync(join(value.reconciliation, "claims", "owners"));
-    expect(slots).toHaveLength(2);
+    expect(failedFiles(value.home)).toEqual([name]);
+    const owners = claimFiles(value.privateRoot, "owners");
+    expect(claimFiles(value.privateRoot, "slots")).toHaveLength(2);
     expect(owners).toHaveLength(2);
     expect(
-      JSON.parse(readFileSync(join(value.reconciliation, "claims", "owners", owners[0]!), "utf8"))
-        .pid,
+      JSON.parse(readFileSync(join(value.privateRoot, "claims", "owners", owners[0]!), "utf8")).pid,
     ).toBeGreaterThan(0);
   });
 
@@ -1857,9 +1181,9 @@ describe("queue processing claim publication", () => {
       expect(result.code).toBe(1);
       expect(result.stderr).toContain("claim slot for normal.yaml could not be removed");
       expect(readFileSync(destination, "utf8")).toContain("processed before release");
-      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toHaveLength(2);
-      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toHaveLength(2);
-      expect(retirementFiles(value.reconciliation)).toEqual([]);
+      expect(claimFiles(value.privateRoot, "slots")).toHaveLength(2);
+      expect(claimFiles(value.privateRoot, "owners")).toHaveLength(2);
+      expect(retirementFiles(value.privateRoot)).toEqual([]);
     } finally {
       server.stop(true);
     }
@@ -1867,21 +1191,27 @@ describe("queue processing claim publication", () => {
 
   test("preserves the operation error when claim release also fails", async () => {
     const value = fixture();
-    const source = queueRecord(value.queue);
+    const name = "retire-and-release.yaml";
+    const source = queueRecord(value.queue, name);
     const script = [
       'import { mock } from "bun:test";',
       'import * as realFs from "node:fs";',
       "const realUnlinkSync = realFs.unlinkSync;",
+      `const source = ${JSON.stringify(source)};`,
       'mock.module("node:fs", () => ({',
       "  ...realFs,",
       "  unlinkSync(path) {",
       '    if (String(path).includes("/claims/slots/")) throw new Error("simulated slot unlink failure");',
       "    return realUnlinkSync(path);",
       "  },",
+      "  renameSync(from, to) {",
+      '    if (String(from) === source) throw new Error("simulated source retirement failure");',
+      "    return realFs.renameSync(from, to);",
+      "  },",
       "}));",
-      'const { reconcileQueue } = await import("./src/queue.ts?primary-and-release-failure");',
+      'const { processQueue } = await import("./src/queue.ts?primary-and-release-failure");',
       "try {",
-      "  await reconcileQueue({ apply: true });",
+      "  await processQueue();",
       '  process.stdout.write(JSON.stringify({ aggregate: false, messages: ["unexpected success"] }));',
       "} catch (error) {",
       "  process.stdout.write(JSON.stringify({",
@@ -1892,25 +1222,21 @@ describe("queue processing claim publication", () => {
       "  }));",
       "}",
     ].join("\n");
-    const child = Bun.spawn([process.execPath, "-e", script], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: {
-        ...process.env,
-        HOME: value.home,
-        PATH: `${value.bin}:${process.env.PATH ?? ""}`,
-        TEST_ACK: '{"partial":true',
-      },
-    });
-    const result = await finish(child);
-    expect(result.code).toBe(0);
+    const result = await finish(
+      Bun.spawn([process.execPath, "-e", script], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HOME: value.home },
+      }),
+    );
+    expect(result.code, result.stderr).toBe(0);
     const evidence = JSON.parse(result.stdout);
     expect(evidence.aggregate).toBeTrue();
     expect(evidence.messages).toHaveLength(3);
-    expect(evidence.messages[0]).toContain("agentbrain submit returned invalid JSON");
-    expect(evidence.messages[1]).toContain("claim slot for indexed.yaml could not be removed");
-    expect(evidence.messages[2]).toContain("claim slot for indexed.yaml could not be removed");
+    expect(evidence.messages[0]).toContain("simulated source retirement failure");
+    expect(evidence.messages[1]).toContain(`claim slot for ${name} could not be removed`);
+    expect(evidence.messages[2]).toContain(`claim slot for ${name} could not be removed`);
     expect(existsSync(source)).toBeTrue();
   });
 
@@ -1944,8 +1270,8 @@ describe("queue processing claim publication", () => {
       );
       const owner = startProcess(value);
       await seen;
-      const heldOwners = readdirSync(join(value.reconciliation, "claims", "owners")).map((name) =>
-        JSON.parse(readFileSync(join(value.reconciliation, "claims", "owners", name), "utf8")),
+      const heldOwners = claimFiles(value.privateRoot, "owners").map((name) =>
+        JSON.parse(readFileSync(join(value.privateRoot, "claims", "owners", name), "utf8")),
       );
       expect(heldOwners.map((claim) => claim.area).sort()).toEqual(["generation", "pending"]);
       const peer = await finish(startProcess(value));
@@ -1956,9 +1282,9 @@ describe("queue processing claim publication", () => {
       expect(calls).toBe(1);
       expect(readFileSync(destination, "utf8")).toContain("# claimed once");
       expect(existsSync(join(value.queue, "job.yaml"))).toBeFalse();
-      expect(retirementFiles(value.reconciliation)).toEqual([]);
-      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toEqual([]);
-      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toEqual([]);
+      expect(retirementFiles(value.privateRoot)).toEqual([]);
+      expect(claimFiles(value.privateRoot, "slots")).toEqual([]);
+      expect(claimFiles(value.privateRoot, "owners")).toEqual([]);
     } finally {
       server.stop(true);
     }
@@ -2027,7 +1353,6 @@ describe("queue processing claim publication", () => {
       expect(evidence.result).toEqual({
         processed: 1,
         failed: 0,
-        frozen: 0,
         retry_scheduled: 0,
         retry_waiting: 0,
         retry_exhausted: 0,
@@ -2102,7 +1427,6 @@ describe("queue processing claim publication", () => {
       expect(JSON.parse(child.stdout)).toEqual({
         processed: 0,
         failed: 1,
-        frozen: 0,
         retry_scheduled: 0,
         retry_waiting: 0,
         retry_exhausted: 0,
@@ -2142,7 +1466,7 @@ describe("queue processing claim publication", () => {
         }),
     });
     const source = join(value.queue, "job.yaml");
-    const replacement = "url: https://example.com/replacement\nindexer: agentbrain\n";
+    const replacement = "url: https://example.com/replacement\ndestination: /tmp/replacement.md\n";
     try {
       writeFileSync(
         source,
@@ -2162,14 +1486,14 @@ describe("queue processing claim publication", () => {
       expect(result.stderr).toContain("processed=1");
       expect(readFileSync(source, "utf8")).toBe(replacement);
       expect(readFileSync(destination, "utf8")).toContain("summary: summary");
-      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toEqual([]);
-      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toEqual([]);
+      expect(claimFiles(value.privateRoot, "slots")).toEqual([]);
+      expect(claimFiles(value.privateRoot, "owners")).toEqual([]);
     } finally {
       server.stop(true);
     }
   });
 
-  test("cancellation stays public and frozen records drain with claims released", async () => {
+  test("cancellation stays public and invalid records fail with claims released", async () => {
     const value = fixture();
     const destination = join(value.home, "cancelled.md");
     const summaryReady = join(value.home, "summary-ready");
@@ -2205,18 +1529,18 @@ describe("queue processing claim publication", () => {
       const cancelled = await finish(worker);
       expect(cancelled.code).toBe(143);
       expect(existsSync(source)).toBeTrue();
-      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toEqual([]);
-      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toEqual([]);
+      expect(claimFiles(value.privateRoot, "slots")).toEqual([]);
+      expect(claimFiles(value.privateRoot, "owners")).toEqual([]);
 
       rmSync(source);
-      queueRecord(value.queue, "frozen.yaml");
-      const frozen = await finish(startProcess(value));
-      expect(frozen.code).toBe(0);
-      expect(frozen.stderr).toContain("frozen=1");
-      expect(existsSync(join(value.queue, "frozen.yaml"))).toBeFalse();
-      expect(readdirSync(join(value.home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
-      expect(readdirSync(join(value.reconciliation, "claims", "slots"))).toEqual([]);
-      expect(readdirSync(join(value.reconciliation, "claims", "owners"))).toEqual([]);
+      queueRecord(value.queue, "invalid.yaml");
+      const invalid = await finish(startProcess(value));
+      expect(invalid.code).toBe(0);
+      expect(invalid.stderr).toContain("failed=1");
+      expect(existsSync(join(value.queue, "invalid.yaml"))).toBeFalse();
+      expect(failedFiles(value.home)).toEqual(["invalid.yaml"]);
+      expect(claimFiles(value.privateRoot, "slots")).toEqual([]);
+      expect(claimFiles(value.privateRoot, "owners")).toEqual([]);
     } finally {
       server.stop(true);
     }
@@ -2366,52 +1690,6 @@ describe("queue processing claim publication", () => {
     expect(existsSync(join(value.queue, name))).toBeFalse();
   });
 
-  test("archives a valid long final name without lengthening its temporary name", async () => {
-    const value = fixture();
-    const name = `${"b".repeat(220)}.yaml`;
-    const source = queueRecord(value.queue, name);
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code, result.stderr).toBe(0);
-    expect(existsSync(source)).toBeFalse();
-    const manifestName = outcomeFiles(value.reconciliation)[0]!;
-    const manifest = JSON.parse(
-      readFileSync(join(value.reconciliation, "outcomes", manifestName), "utf8"),
-    );
-    const archiveName = manifest.archive_record.split("/").at(-1);
-    expect(Buffer.byteLength(archiveName)).toBeLessThanOrEqual(255);
-    expect(archiveName).toBe(`${manifest.record_id.slice(0, 16)}-${name}`);
-    expect(existsSync(join(value.reconciliation, manifest.archive_record))).toBeTrue();
-  });
-
-  test("bounds an overflowing 239-byte archive name and reuses it for outcome recovery", async () => {
-    const value = fixture();
-    const name = `${"c".repeat(234)}.yaml`;
-    expect(Buffer.byteLength(name)).toBe(239);
-    const source = queueRecord(value.queue, name);
-    const raw = readFileSync(source);
-    const result = await reconcile(value, acknowledgement());
-    expect(result.code, result.stderr).toBe(0);
-    expect(existsSync(source)).toBeFalse();
-    const manifestName = outcomeFiles(value.reconciliation)[0]!;
-    const manifest = JSON.parse(
-      readFileSync(join(value.reconciliation, "outcomes", manifestName), "utf8"),
-    );
-    const archiveName = manifest.archive_record.split("/").at(-1);
-    expect(Buffer.byteLength(archiveName)).toBeLessThanOrEqual(255);
-    expect(archiveName).not.toBe(`${manifest.record_id.slice(0, 16)}-${name}`);
-    expect(archiveName).toEndWith(
-      `--${createHash("sha256").update(name).digest("hex").slice(0, 16)}.yaml`,
-    );
-    expect(readFileSync(join(value.reconciliation, manifest.archive_record))).toEqual(raw);
-
-    queueRecord(value.queue, name);
-    const recovered = await reconcile(value, "must not submit an existing outcome");
-    expect(recovered.code, recovered.stderr).toBe(0);
-    expect(JSON.parse(recovered.stdout).already_reconciled).toBe(1);
-    expect(existsSync(source)).toBeFalse();
-    expect(readdirSync(join(value.reconciliation, "archive", "pending"))).toEqual([archiveName]);
-  });
-
   test("failed publication never overwrites a same-name failed record", async () => {
     const value = fixture();
     const failedDirectory = join(value.home, ".local/share/agentscrape/failed");
@@ -2438,6 +1716,6 @@ describe("queue processing claim publication", () => {
     expect(suffix).toBeDefined();
     expect(readFileSync(join(failedDirectory, suffix!), "utf8")).toBe(malformed);
     expect(existsSync(join(value.queue, "job.yaml"))).toBeFalse();
-    expect(retirementFiles(value.reconciliation)).toEqual([]);
+    expect(retirementFiles(value.privateRoot)).toEqual([]);
   });
 });

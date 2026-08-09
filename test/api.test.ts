@@ -547,20 +547,4 @@ console.log(submitScrapeJob("https://example.com/a", "/tmp/a.md", { summarize: t
       expect(existsSync(join(home, ".local", "share", "agentscrape", "queue"))).toBeFalse();
     }
   });
-
-  test("frozen indexed and source submissions reject before queue resolution", async () => {
-    for (const options of [{ indexer: "agentbrain" }, { source: "test-ingress" }]) {
-      const home = temp();
-      const result = await runSubmission(
-        `try { submitScrapeJob("https://example.com/frozen", "/tmp/frozen.md", ${JSON.stringify(options)}); } catch (error) { console.log(error instanceof Error ? error.message : String(error)); }`,
-        queueEnvironment(home, { AGENTSCRAPE_DATA_HOME: "invalid-relative-root" }),
-      );
-
-      expect(result.code).toBe(0);
-      expect(result.stdout.trim()).toBe(
-        "indexed scrape queue submissions are frozen; use the dedicated ingestion command",
-      );
-      expect(existsSync(join(home, ".local", "share", "agentscrape", "queue"))).toBeFalse();
-    }
-  });
 });

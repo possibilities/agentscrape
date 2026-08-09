@@ -105,7 +105,6 @@ describe("CLI offline smoke suite", () => {
       "open-session",
       "close-session",
       "process-queue",
-      "reconcile-queue",
       "doctor",
     ]) {
       expect(result.stdout).toContain(name);
@@ -154,7 +153,7 @@ describe("CLI offline smoke suite", () => {
     const marker = join(directory, "CAPABILITY-WAS-EXECUTED");
     mkdirSync(home);
     mkdirSync(binaries);
-    for (const name of ["agent-browser", "gh", "pandoc", "summaryctl", "agentbrain"]) {
+    for (const name of ["agent-browser", "gh", "pandoc", "summaryctl"]) {
       const path = join(binaries, name);
       writeFileSync(path, `#!/bin/sh\nprintf 'invoked' >> ${JSON.stringify(marker)}\n`);
       chmodSync(path, 0o755);
@@ -172,7 +171,6 @@ describe("CLI offline smoke suite", () => {
     expect(human.stdout).toContain(
       `runtime: bun actual=${Bun.version} expected=${BUN_ENGINE_RANGE} status=pass`,
     );
-    expect(human.stdout).toContain("  reconciliation: agentbrain available");
     expect(human.stdout).not.toContain(directory);
 
     const json = await command(["doctor", "--format", "json"], options);
@@ -194,7 +192,6 @@ describe("CLI offline smoke suite", () => {
         { feature: "github", executable: "gh", available: true },
         { feature: "github-rst", executable: "pandoc", available: true },
         { feature: "queue-summary", executable: "summaryctl", available: true },
-        { feature: "reconciliation", executable: "agentbrain", available: true },
       ],
     });
     expect(existsSync(marker)).toBeFalse();
@@ -643,16 +640,13 @@ describe("CLI offline smoke suite", () => {
       { preset, status: "not_configured", detail: "no canary configured" },
     ]);
   });
-  test("empty queue and reconciliation commands are safe in an isolated home", async () => {
+  test("an empty queue is safe to process in an isolated home", async () => {
     const home = temp();
     const processResult = await command(["process-queue"], { home });
     expect(processResult.code).toBe(0);
     expect(processResult.stderr).toContain("processed=0");
-    const inventory = await command(["reconcile-queue"], { home });
-    expect(inventory.code).toBe(0);
-    expect(JSON.parse(inventory.stdout).total_records).toBe(0);
   });
-  test("queue inventory redacts malformed records and processing drains frozen records", async () => {
+  test("indexed and malformed records are published as ordinary invalid records", async () => {
     const home = temp();
     const queue = join(home, ".local/share/agentscrape/queue");
     mkdirSync(queue, { recursive: true });
@@ -664,18 +658,15 @@ describe("CLI offline smoke suite", () => {
       join(queue, "malformed.yaml"),
       "url: [unterminated\npassword: TOP-SECRET-MALFORMED\n",
     );
-    const inventory = await command(["reconcile-queue"], { home });
-    expect(inventory.code).toBe(0);
-    expect(JSON.parse(inventory.stdout).total_records).toBe(2);
-    expect(inventory.stdout).not.toContain("TOP-SECRET-MALFORMED");
     const processed = await command(["process-queue"], { home });
     expect(processed.code).toBe(0);
     expect(existsSync(join(queue, "indexed.yaml"))).toBeFalse();
-    expect(readdirSync(join(home, ".local/share/agentscrape/frozen"))).toHaveLength(1);
     expect(processed.stderr).toContain(
-      "processed=0 failed=1 frozen=1 retry_scheduled=0 retry_waiting=0 retry_exhausted=0",
+      "processed=0 failed=2 retry_scheduled=0 retry_waiting=0 retry_exhausted=0",
     );
-    expect(existsSync(join(home, ".local/share/agentscrape/failed/malformed.yaml"))).toBeTrue();
+    const failed = join(home, ".local/share/agentscrape/failed");
+    expect(existsSync(join(failed, "indexed.yaml"))).toBeTrue();
+    expect(existsSync(join(failed, "malformed.yaml"))).toBeTrue();
   });
   test("usage failures use exit 2 across an argv compatibility table", async () => {
     const cases: Array<[string[], string]> = [
@@ -727,14 +718,12 @@ describe("CLI offline smoke suite", () => {
         ],
         "at most 100",
       ],
-      [["reconcile-queue", "--limit", "0"], "at least 1"],
       [["doctor", "unexpected"], "no positional arguments"],
       [
         ["discover-feed", "--source-url", "https://blog.example.com/feed.xml", "--format", "human"],
         "--format must be json or yaml",
       ],
       [["check-presets", "--format", "human"], "--format must be json or yaml"],
-      [["reconcile-queue", "--format", "human"], "--format must be json or yaml"],
       [["list-presets", "--format", "xml"], "--format"],
     ];
     for (const [argv, message] of cases) {
@@ -774,7 +763,7 @@ describe("CLI offline smoke suite", () => {
       "--agent-help",
       "--agent-teaser",
     ]);
-    expect(rootHelp.commands).toHaveLength(15);
+    expect(rootHelp.commands).toHaveLength(14);
     expect(feedJson.arguments.find((argument: any) => argument.name === "file")).toMatchObject({
       positional: true,
       required: false,

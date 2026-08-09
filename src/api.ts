@@ -831,15 +831,9 @@ export function submitScrapeJob(
   options: {
     summarize?: boolean;
     frontmatter?: Record<string, unknown>;
-    indexer?: string;
-    source?: string;
     allowPrivateNetwork?: boolean;
   } = {},
 ): string {
-  if (options.indexer !== undefined || options.source !== undefined)
-    throw new Error(
-      "indexed scrape queue submissions are frozen; use the dedicated ingestion command",
-    );
   if (options.allowPrivateNetwork !== undefined && typeof options.allowPrivateNetwork !== "boolean")
     throw new AgentscrapeUsageError("allowPrivateNetwork must be a boolean when provided");
   const queue = resolveQueuePaths().queue;

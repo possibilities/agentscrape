@@ -16,8 +16,8 @@ export interface DoctorRuntime {
 }
 
 export interface DoctorCapability {
-  feature: "browser" | "github" | "github-rst" | "queue-summary" | "reconciliation";
-  executable: "agent-browser" | "gh" | "pandoc" | "summaryctl" | "agentbrain";
+  feature: "browser" | "github" | "github-rst" | "queue-summary";
+  executable: "agent-browser" | "gh" | "pandoc" | "summaryctl";
   available: boolean;
 }
 
@@ -42,7 +42,6 @@ const CAPABILITIES = [
   ["github", "gh"],
   ["github-rst", "pandoc"],
   ["queue-summary", "summaryctl"],
-  ["reconciliation", "agentbrain"],
 ] as const satisfies ReadonlyArray<
   readonly [DoctorCapability["feature"], DoctorCapability["executable"]]
 >;

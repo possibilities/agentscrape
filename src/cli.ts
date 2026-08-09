@@ -46,7 +46,7 @@ import {
 import { convertHtml } from "./html";
 import { convertHtmlDirectory, readRegularFileNoFollow } from "./html-files";
 import { loadRegistry, validatePresetFile } from "./presets";
-import { processQueue, reconcileQueue } from "./queue";
+import { processQueue } from "./queue";
 import { redactDiagnostic, sanitizeErrorInPlace } from "./redaction";
 import type { ExtractionEnvelope } from "./schemas";
 
@@ -553,38 +553,17 @@ async function sessionCommand(
   }
   return 0;
 }
-async function queueCommand(
-  command: string,
-  args: string[],
-  signal?: AbortSignal,
-): Promise<number> {
-  if (command === "process-queue") {
-    const parsed = parseArgs(command, args);
-    const helpCode = commandHelp(parsed, command);
-    if (helpCode !== null) return helpCode;
-    if (parsed.positionals.length)
-      throw new AgentscrapeUsageError("process-queue takes no positional arguments");
-    const result = await processQueue(signal ? { signal } : {});
-    console.error(
-      `processed=${result.processed} failed=${result.failed} frozen=${result.frozen} retry_scheduled=${result.retry_scheduled} retry_waiting=${result.retry_waiting} retry_exhausted=${result.retry_exhausted}`,
-    );
-    return 0;
-  }
-  const parsed = parseArgs("reconcile-queue", args);
-  const helpCode = commandHelp(parsed, "reconcile-queue");
+async function queueCommand(args: string[], signal?: AbortSignal): Promise<number> {
+  const parsed = parseArgs("process-queue", args);
+  const helpCode = commandHelp(parsed, "process-queue");
   if (helpCode !== null) return helpCode;
   if (parsed.positionals.length)
-    throw new AgentscrapeUsageError("reconcile-queue takes no positional arguments");
-  const outputFormat = (one(parsed, "--format") ?? "json").toLowerCase();
-  if (!["json", "yaml"].includes(outputFormat))
-    throw new AgentscrapeUsageError("--format must be json or yaml");
-  const result = await reconcileQueue({
-    apply: parsed.flags.has("--apply"),
-    limit: numberOption(parsed, "--limit", 500, { integer: true, min: 1, max: 5000 }),
-    signal,
-  });
-  output(outputFormat === "yaml" ? stringifyYaml(result) : JSON.stringify(result));
-  return Number(result.errors ?? 0) ? 1 : 0;
+    throw new AgentscrapeUsageError("process-queue takes no positional arguments");
+  const result = await processQueue(signal ? { signal } : {});
+  console.error(
+    `processed=${result.processed} failed=${result.failed} retry_scheduled=${result.retry_scheduled} retry_waiting=${result.retry_waiting} retry_exhausted=${result.retry_exhausted}`,
+  );
+  return 0;
 }
 function doctorCommand(args: string[]): number {
   const parsed = parseArgs("doctor", args);
@@ -668,7 +647,7 @@ export async function main(
   if (["open-session", "close-session"].includes(command))
     return sessionCommand(command, args, signal);
   if (command === "doctor") return doctorCommand(args);
-  return queueCommand(command, args, signal);
+  return queueCommand(args, signal);
 }
 
 if (import.meta.main) {

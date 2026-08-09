@@ -414,26 +414,6 @@ const rawCliSpec = {
       options: commandOptions(),
     },
     {
-      name: "reconcile-queue",
-      summary: "Inventory or reconcile frozen queue records",
-      paragraphs: [],
-      positionals: [],
-      options: commandOptions(
-        [
-          flag("--apply", "Apply reconciliation changes"),
-          value(
-            "--limit",
-            ["INTEGER"],
-            "Maximum records to inspect (integer from 1 through 5000)",
-            {
-              default: 500,
-            },
-          ),
-        ],
-        formatOption("Select output", ["json", "yaml"], "json"),
-      ),
-    },
-    {
       name: "doctor",
       summary: "Inspect offline runtime readiness and optional capabilities",
       paragraphs: [],
