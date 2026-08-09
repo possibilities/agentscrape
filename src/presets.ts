@@ -1,6 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { parse as parseYaml } from "yaml";
 import { withBrowserNetworkPolicy, withBrowserSignal } from "./browser";
 import { cssSelectorProblem } from "./css-selector";
 import { PresetConfigError, PresetOutputError, PresetSelectionError } from "./errors";
@@ -39,14 +38,16 @@ export interface PresetConfig {
   source: "official" | "local";
 }
 
-const COMMON = new Set(["name", "summary", "domain", "mode", "aliases", "browser_profile"]);
-const MODE_FIELDS: Record<PresetMode, Set<string>> = {
+export const PRESET_MODES = ["content", "links", "nav-links"] as const;
+export const REQUIRED_FIELDS = ["name", "summary", "domain", "mode"] as const;
+export const COMMON = new Set(["name", "summary", "domain", "mode", "aliases", "browser_profile"]);
+export const MODE_FIELDS: Record<PresetMode, Set<string>> = {
   content: new Set(["url_patterns", "handler", "schema"]),
   links: new Set(["selector", "toggle_selector"]),
   "nav-links": new Set(["section_selector", "category_selector", "toggle_selector"]),
 };
 const ALL_FIELDS = new Set([...COMMON, ...Object.values(MODE_FIELDS).flatMap((set) => [...set])]);
-const STRING_FIELDS = new Set([
+export const STRING_FIELDS = new Set([
   "name",
   "summary",
   "domain",
@@ -97,11 +98,11 @@ export function canonicalMatchUrl(value: unknown): string | null {
 
 function problems(data: Record<string, unknown>, label: string): string[] {
   const result: string[] = [];
-  const unknown = Object.keys(data)
-    .filter((key) => !ALL_FIELDS.has(key))
-    .sort();
+  // "$schema" points editors at the generated JSON Schema; it is not part of the preset model.
+  const keys = Object.keys(data).filter((key) => key !== "$schema");
+  const unknown = keys.filter((key) => !ALL_FIELDS.has(key)).sort();
   if (unknown.length) result.push(`${label}: unknown keys: ${unknown.join(", ")}`);
-  for (const field of ["name", "summary", "domain", "mode"]) {
+  for (const field of REQUIRED_FIELDS) {
     if (!(field in data)) result.push(`${label}: missing required field: ${field}`);
   }
   for (const [name, value] of Object.entries(data)) {
@@ -119,14 +120,12 @@ function problems(data: Record<string, unknown>, label: string): string[] {
     }
   }
   const mode = data.mode;
-  if (typeof mode === "string" && !(["content", "links", "nav-links"] as string[]).includes(mode)) {
-    result.push(`${label}: invalid mode: '${mode}' (must be one of content, links, nav-links)`);
+  if (typeof mode === "string" && !(PRESET_MODES as readonly string[]).includes(mode)) {
+    result.push(`${label}: invalid mode: '${mode}' (must be one of ${PRESET_MODES.join(", ")})`);
   }
-  if ((["content", "links", "nav-links"] as unknown[]).includes(mode)) {
+  if ((PRESET_MODES as readonly unknown[]).includes(mode)) {
     const applicable = new Set([...COMMON, ...MODE_FIELDS[mode as PresetMode]]);
-    const invalid = Object.keys(data)
-      .filter((key) => ALL_FIELDS.has(key) && !applicable.has(key))
-      .sort();
+    const invalid = keys.filter((key) => ALL_FIELDS.has(key) && !applicable.has(key)).sort();
     if (invalid.length)
       result.push(`${label}: fields not valid for mode '${mode}': ${invalid.join(", ")}`);
   }
@@ -185,14 +184,16 @@ function problems(data: Record<string, unknown>, label: string): string[] {
 }
 
 export function validatePresetFile(path: string): string[] {
+  const text = readFileSync(path, "utf8");
+  if (!text.trim()) return ["Preset file is empty"];
   let value: unknown;
   try {
-    value = parseYaml(readFileSync(path, "utf8"));
+    value = JSON.parse(text);
   } catch (error) {
-    return [`Failed to parse YAML: ${String(error)}`];
+    return [`Failed to parse JSON: ${String(error)}`];
   }
-  if (value === null || value === undefined) return ["Preset file is empty"];
-  if (typeof value !== "object" || Array.isArray(value)) return ["Preset must be a YAML mapping"];
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return ["Preset must be a JSON object"];
   return problems(value as Record<string, unknown>, basename(path)).map((problem) =>
     problem.startsWith(`${basename(path)}: `) ? problem.slice(basename(path).length + 2) : problem,
   );
@@ -205,17 +206,21 @@ function readEntries(
   if (!existsSync(directory)) return { entries: [], errors: [] };
   const entries: RawEntry[] = [];
   const errors: string[] = [];
-  for (const file of readdirSync(directory)
-    .filter((name) => name.endsWith(".yaml"))
-    .sort()) {
+  const names = readdirSync(directory).sort();
+  for (const file of names.filter((name) => name.endsWith(".yaml") || name.endsWith(".yml"))) {
+    errors.push(
+      `${file} (${source}): legacy YAML preset; agentscrape now reads JSON presets (convert to .json)`,
+    );
+  }
+  for (const file of names.filter((name) => name.endsWith(".json"))) {
     const label = `${file} (${source})`;
     try {
-      const data = parseYaml(readFileSync(join(directory, file), "utf8"));
+      const data = JSON.parse(readFileSync(join(directory, file), "utf8"));
       if (!data || typeof data !== "object" || Array.isArray(data))
-        errors.push(`${label}: preset must be a YAML mapping`);
+        errors.push(`${label}: preset must be a JSON object`);
       else entries.push({ data: data as Record<string, unknown>, label, source });
     } catch (error) {
-      errors.push(`${label}: failed to parse YAML: ${String(error)}`);
+      errors.push(`${label}: failed to parse JSON: ${String(error)}`);
     }
   }
   return { entries, errors };

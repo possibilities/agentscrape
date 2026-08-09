@@ -339,7 +339,7 @@ const rawCliSpec = {
       summary: "Validate a preset contract",
       paragraphs: [],
       positionals: [
-        positional("name_or_path", "NAME_OR_PATH", true, "Preset name or YAML file path"),
+        positional("name_or_path", "NAME_OR_PATH", true, "Preset name or JSON file path"),
       ],
       options: commandOptions(),
     },

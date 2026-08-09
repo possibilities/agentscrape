@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
 import {
   closeSessionBestEffort,
   currentBrowserNetworkPolicy,
@@ -64,11 +63,12 @@ export async function checkPresets(
   } = {},
 ): Promise<CanaryEnvelope> {
   return withBrowserNetworkPolicy(options.allowPrivateNetwork, async () => {
-    const path = options.canaryPath ?? join(import.meta.dir, "../config/preset-canaries.yaml");
-    const parsed = parseYaml(readFileSync(path, "utf8"));
+    const path = options.canaryPath ?? join(import.meta.dir, "../config/preset-canaries.json");
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      throw new Error("preset-canaries.yaml must be a mapping of preset name to config");
-    const canaries = parsed as Record<string, Canary>;
+      throw new Error("preset-canaries.json must be a JSON object mapping preset name to config");
+    // Every remaining key is a preset name, so the editor "$schema" pointer cannot stay.
+    const { $schema: _schema, ...canaries } = parsed as Record<string, Canary>;
     const names = options.presets?.length ? options.presets : Object.keys(canaries).sort();
     const registry = loadRegistry();
     const results: CanaryResult[] = [];

@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agentscrape preset canaries",
+  "description": "Public URLs and semantic invariants for `agentscrape check-presets --live`. A canary URL is published with the repository, so it must be a durable public resource rather than a page the operator happens to have open. Presets with nothing that qualifies carry no canary; check-presets only probes what is listed here.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path to this schema, for editor completion. The canary loader ignores it."
+    }
+  },
+  "additionalProperties": {
+    "type": "object",
+    "description": "Canary for the preset named by this key. A preset with no canary is reported as `not_configured` rather than probed.",
+    "properties": {
+      "url": {
+        "type": "string",
+        "format": "uri",
+        "description": "Durable public page to scrape with the preset. Omitting it reports the preset as `not_configured`."
+      },
+      "invariants": {
+        "type": "object",
+        "description": "Semantic floors the live result must clear. A result that parses but falls short is reported as drift, not as an operational failure.",
+        "properties": {
+          "min_markdown_chars": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Shortest acceptable rendered markdown, in characters."
+          },
+          "require_title": {
+            "type": "boolean",
+            "description": "When true, the structured result's `title` must be present and nonblank."
+          },
+          "min_rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Fewest acceptable entries in the structured result's `rounds` list."
+          },
+          "min_citations": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Fewest acceptable entries in the structured result's `citations` list."
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "additionalProperties": true
+  }
+}

@@ -327,15 +327,15 @@ of plausible-looking wrong Markdown.
 ```bash
 agentscrape list-presets                   # by mode: content / links / nav-links
 agentscrape show-preset x-tweet            # domain, aliases, handler, schema fields
-agentscrape validate-preset ./scrapers/my-nav.yaml
+agentscrape validate-preset ./scrapers/my-nav.json
 ```
 
 Shipped: ChatGPT conversations; DeepWiki wiki and persisted search pages;
 X posts, articles, profiles, and timelines; documentation navigation
 (`docs-sidebar`, `docs-section-nav`, both `domain: "*"`). Selector-based
 `links` / `nav-links` presets can be dropped into `./scrapers` as
-data-only YAML; the CLI deliberately never imports executable handler
-modules from YAML, the environment, or the working directory.
+data-only JSON; the CLI deliberately never imports executable handler
+modules from JSON, the environment, or the working directory.
 
 ## Maintainer moves
 

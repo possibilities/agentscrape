@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "preset": "docs-section-nav",
+  "mode": "nav-links",
+  "url": "https://docs.example.test/guide",
+  "expect": "success",
+  "category_pages": [
+    {
+      "section_url": "https://docs.example.test/guide/getting-started",
+      "page": "category-getting-started.html"
+    }
+  ],
+  "links": [
+    {
+      "url": "https://docs.example.test/guide/getting-started/install",
+      "title": "Install",
+      "section": "Getting Started",
+      "category": "Installation"
+    },
+    {
+      "url": "https://docs.example.test/guide/getting-started/upgrade",
+      "title": "Upgrade",
+      "section": "Getting Started",
+      "category": "Installation"
+    }
+  ]
+}

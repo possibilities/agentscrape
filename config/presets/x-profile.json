@@ -1,0 +1,13 @@
+{
+  "$schema": "../preset.schema.json",
+  "name": "x-profile",
+  "summary": "User profile page with bio, follower counts, and pinned tweet",
+  "domain": "x.com",
+  "aliases": ["twitter.com"],
+  "mode": "content",
+  "url_patterns": [
+    "^https?://(?:www\\.)?(?:x\\.com|twitter\\.com)/(?!(?:[iI]|[hH][oO][mM][eE]|[sS][eE][aA][rR][cC][hH]|[eE][xX][pP][lL][oO][rR][eE]|[nN][oO][tT][iI][fF][iI][cC][aA][tT][iI][oO][nN][sS]|[mM][eE][sS][sS][aA][gG][eE][sS]|[sS][eE][tT][tT][iI][nN][gG][sS]|[cC][oO][mM][pP][oO][sS][eE]|[iI][nN][tT][eE][nN][tT])(?:[/?]|$))\\w+/?(?:\\?.*)?$"
+  ],
+  "handler": "x.scrape_profile",
+  "schema": "XProfile"
+}

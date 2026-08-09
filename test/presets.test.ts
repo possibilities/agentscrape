@@ -27,9 +27,9 @@ function directory(): string {
   temporary.push(path);
   return path;
 }
-function writePreset(path: string, name: string, text: string): void {
+function writePreset(path: string, name: string, preset: Record<string, unknown>): void {
   mkdirSync(path, { recursive: true });
-  writeFileSync(join(path, `${name}.yaml`), text);
+  writeFileSync(join(path, `${name}.json`), `${JSON.stringify(preset, null, 2)}\n`);
 }
 
 describe("strict preset registry", () => {
@@ -196,16 +196,20 @@ describe("strict preset registry", () => {
   test("local preset can shadow one official contract", () => {
     const local = directory();
     const official = directory();
-    writePreset(
-      official,
-      "x",
-      "name: x\nsummary: official\ndomain: x.test\nmode: links\nselector: nav\n",
-    );
-    writePreset(
-      local,
-      "x",
-      "name: x\nsummary: local\ndomain: x.test\nmode: links\nselector: main\n",
-    );
+    writePreset(official, "x", {
+      name: "x",
+      summary: "official",
+      domain: "x.test",
+      mode: "links",
+      selector: "nav",
+    });
+    writePreset(local, "x", {
+      name: "x",
+      summary: "local",
+      domain: "x.test",
+      mode: "links",
+      selector: "main",
+    });
     const registry = loadRegistry({ officialDir: official, localDir: local });
     expect(registry.presets).toHaveLength(1);
     expect(registry.byName("x")?.summary).toBe("local");
@@ -214,11 +218,16 @@ describe("strict preset registry", () => {
   test("gates automatic matching by the declared domain and aliases", () => {
     const official = directory();
     const local = directory();
-    writePreset(
-      local,
-      "host-gated",
-      "name: host-gated\nsummary: Host-gated route\ndomain: allowed.test\naliases: [alias.test]\nmode: content\nhandler: chatgpt.scrape_conversation\nschema: ChatGPTConversation\nurl_patterns: ['^https://[^/]+/page$']\n",
-    );
+    writePreset(local, "host-gated", {
+      name: "host-gated",
+      summary: "Host-gated route",
+      domain: "allowed.test",
+      aliases: ["alias.test"],
+      mode: "content",
+      handler: "chatgpt.scrape_conversation",
+      schema: "ChatGPTConversation",
+      url_patterns: ["^https://[^/]+/page$"],
+    });
     const registry = loadRegistry({ officialDir: official, localDir: local });
     for (const url of [
       "https://allowed.test/page",
@@ -235,11 +244,15 @@ describe("strict preset registry", () => {
   test("keeps wildcard-domain automatic matching host-agnostic", () => {
     const official = directory();
     const local = directory();
-    writePreset(
-      local,
-      "wildcard",
-      "name: wildcard\nsummary: Host-agnostic route\ndomain: '*'\nmode: content\nhandler: chatgpt.scrape_conversation\nschema: ChatGPTConversation\nurl_patterns: ['^https://[^/]+/portable$']\n",
-    );
+    writePreset(local, "wildcard", {
+      name: "wildcard",
+      summary: "Host-agnostic route",
+      domain: "*",
+      mode: "content",
+      handler: "chatgpt.scrape_conversation",
+      schema: "ChatGPTConversation",
+      url_patterns: ["^https://[^/]+/portable$"],
+    });
     const registry = loadRegistry({ officialDir: official, localDir: local });
     for (const url of ["https://one.test/portable", "https://elsewhere.invalid/portable"])
       expect(
@@ -250,12 +263,16 @@ describe("strict preset registry", () => {
   test("requires visible anchors for published automatic patterns", () => {
     const official = directory();
     const invalid = directory();
-    writePreset(
-      invalid,
-      "unanchored",
-      "name: unanchored\nsummary: Invalid automatic routes\ndomain: local.test\nmode: content\nhandler: chatgpt.scrape_conversation\nschema: ChatGPTConversation\nurl_patterns: ['https://local[.]test/page', '^https://local[.]test/start-only']\n",
-    );
-    const invalidPath = join(invalid, "unanchored.yaml");
+    writePreset(invalid, "unanchored", {
+      name: "unanchored",
+      summary: "Invalid automatic routes",
+      domain: "local.test",
+      mode: "content",
+      handler: "chatgpt.scrape_conversation",
+      schema: "ChatGPTConversation",
+      url_patterns: ["https://local[.]test/page", "^https://local[.]test/start-only"],
+    });
+    const invalidPath = join(invalid, "unanchored.json");
     const fileProblems = validatePresetFile(invalidPath);
     expect(fileProblems).toHaveLength(2);
     expect(
@@ -271,12 +288,16 @@ describe("strict preset registry", () => {
     }
 
     const valid = directory();
-    writePreset(
-      valid,
-      "anchored",
-      "name: anchored\nsummary: Valid automatic route\ndomain: local.test\nmode: content\nhandler: chatgpt.scrape_conversation\nschema: ChatGPTConversation\nurl_patterns: ['^https://local[.]test/page$']\n",
-    );
-    expect(validatePresetFile(join(valid, "anchored.yaml"))).toEqual([]);
+    writePreset(valid, "anchored", {
+      name: "anchored",
+      summary: "Valid automatic route",
+      domain: "local.test",
+      mode: "content",
+      handler: "chatgpt.scrape_conversation",
+      schema: "ChatGPTConversation",
+      url_patterns: ["^https://local[.]test/page$"],
+    });
+    expect(validatePresetFile(join(valid, "anchored.json"))).toEqual([]);
     expect(
       loadRegistry({ officialDir: official, localDir: valid }).byName("anchored"),
     ).not.toBeNull();
@@ -284,12 +305,16 @@ describe("strict preset registry", () => {
   test("requires runtime regex matches to span the canonical URL", () => {
     const official = directory();
     const local = directory();
-    writePreset(
-      local,
-      "alternation",
-      "name: alternation\nsummary: Superficially anchored alternation\ndomain: allowed.test\nmode: content\nhandler: chatgpt.scrape_conversation\nschema: ChatGPTConversation\nurl_patterns: ['^https://allowed[.]test/page|suffix$']\n",
-    );
-    expect(validatePresetFile(join(local, "alternation.yaml"))).toEqual([]);
+    writePreset(local, "alternation", {
+      name: "alternation",
+      summary: "Superficially anchored alternation",
+      domain: "allowed.test",
+      mode: "content",
+      handler: "chatgpt.scrape_conversation",
+      schema: "ChatGPTConversation",
+      url_patterns: ["^https://allowed[.]test/page|suffix$"],
+    });
+    expect(validatePresetFile(join(local, "alternation.json"))).toEqual([]);
     const registry = loadRegistry({ officialDir: official, localDir: local });
     expect(
       registry.pageKindMatches("https://allowed.test/page").map((preset) => preset.name),
@@ -300,11 +325,15 @@ describe("strict preset registry", () => {
   test("explicit by-name selection is independent of URL eligibility", () => {
     const official = directory();
     const local = directory();
-    writePreset(
-      local,
-      "named",
-      "name: named\nsummary: Explicit route\ndomain: allowed.test\nmode: content\nhandler: chatgpt.scrape_conversation\nschema: ChatGPTConversation\nurl_patterns: ['^https://allowed[.]test/page$']\n",
-    );
+    writePreset(local, "named", {
+      name: "named",
+      summary: "Explicit route",
+      domain: "allowed.test",
+      mode: "content",
+      handler: "chatgpt.scrape_conversation",
+      schema: "ChatGPTConversation",
+      url_patterns: ["^https://allowed[.]test/page$"],
+    });
     const registry = loadRegistry({ officialDir: official, localDir: local });
     const unrelated = "https://other.test/not-eligible";
     expect(registry.pageKindMatches(unrelated)).toEqual([]);
@@ -312,11 +341,14 @@ describe("strict preset registry", () => {
   });
   test("unknown fields and invalid mode fields block publication", () => {
     const official = directory();
-    writePreset(
-      official,
-      "bad",
-      "name: bad\nsummary: no\ndomain: bad.test\nmode: content\nselector: body\nbogus: true\n",
-    );
+    writePreset(official, "bad", {
+      name: "bad",
+      summary: "no",
+      domain: "bad.test",
+      mode: "content",
+      selector: "body",
+      bogus: true,
+    });
     try {
       loadRegistry({ officialDir: official, localDir: join(official, "absent") });
       throw new Error("registry unexpectedly loaded");
@@ -328,30 +360,80 @@ describe("strict preset registry", () => {
   });
   test("malformed regex and unresolved content references are aggregated", () => {
     const official = directory();
-    writePreset(
-      official,
-      "bad",
-      "name: bad\nsummary: no\ndomain: bad.test\nmode: content\nhandler: no.no\nschema: NoSchema\nurl_patterns: ['(bad']\n",
-    );
+    writePreset(official, "bad", {
+      name: "bad",
+      summary: "no",
+      domain: "bad.test",
+      mode: "content",
+      handler: "no.no",
+      schema: "NoSchema",
+      url_patterns: ["(bad"],
+    });
     expect(() => loadRegistry({ officialDir: official, localDir: join(official, "none") })).toThrow(
       PresetConfigError,
     );
   });
   test("single-file validation reports strict errors", () => {
     const root = directory();
-    const path = join(root, "bad.yaml");
-    writeFileSync(path, "name: bad\nsummary: x\ndomain: x.test\nmode: links\n");
+    const path = join(root, "bad.json");
+    writeFileSync(path, '{ "name": "bad", "summary": "x", "domain": "x.test", "mode": "links" }\n');
     expect(validatePresetFile(path)).toContain("links mode requires 'selector'");
+  });
+  test("single-file validation reports malformed JSON by shape", () => {
+    const root = directory();
+    const empty = join(root, "empty.json");
+    writeFileSync(empty, "  \n");
+    expect(validatePresetFile(empty)).toEqual(["Preset file is empty"]);
+    const truncated = join(root, "truncated.json");
+    writeFileSync(truncated, '{ "name": "bad"\n');
+    expect(validatePresetFile(truncated)[0]).toStartWith("Failed to parse JSON:");
+    const list = join(root, "list.json");
+    writeFileSync(list, "[]\n");
+    expect(validatePresetFile(list)).toEqual(["Preset must be a JSON object"]);
+  });
+  test("the editor $schema pointer is not part of the preset model", () => {
+    const official = directory();
+    const local = directory();
+    writePreset(local, "pointed", {
+      $schema: "../preset.schema.json",
+      name: "pointed",
+      summary: "Carries an editor schema pointer",
+      domain: "docs.test",
+      mode: "links",
+      selector: "nav",
+    });
+    expect(validatePresetFile(join(local, "pointed.json"))).toEqual([]);
+    expect(
+      loadRegistry({ officialDir: official, localDir: local }).byName("pointed"),
+    ).not.toBeNull();
+  });
+  test("a legacy YAML preset in a scanned directory is an error, not a silent skip", () => {
+    const official = directory();
+    const local = directory();
+    writeFileSync(join(local, "legacy.yaml"), "name: legacy\n");
+    writeFileSync(join(official, "stale.yml"), "name: stale\n");
+    try {
+      loadRegistry({ officialDir: official, localDir: local });
+      throw new Error("legacy presets unexpectedly loaded");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PresetConfigError);
+      expect((error as PresetConfigError).problems).toEqual([
+        "legacy.yaml (local): legacy YAML preset; agentscrape now reads JSON presets (convert to .json)",
+        "stale.yml (official): legacy YAML preset; agentscrape now reads JSON presets (convert to .json)",
+      ]);
+    }
   });
   test("rejects malformed preset selector syntax at publication time", () => {
     const official = directory();
     const local = directory();
-    writePreset(
-      local,
-      "bad-selector",
-      "name: bad-selector\nsummary: Invalid CSS\ndomain: docs.test\nmode: links\nselector: '['\n",
-    );
-    expect(validatePresetFile(join(local, "bad-selector.yaml")).join(" ")).toContain(
+    writePreset(local, "bad-selector", {
+      name: "bad-selector",
+      summary: "Invalid CSS",
+      domain: "docs.test",
+      mode: "links",
+      selector: "[",
+    });
+    expect(validatePresetFile(join(local, "bad-selector.json")).join(" ")).toContain(
       "not valid CSS",
     );
     expect(() => loadRegistry({ officialDir: official, localDir: local })).toThrow(
@@ -491,11 +573,15 @@ describe("strict preset registry", () => {
     });
     const official = directory();
     const local = directory();
-    writePreset(
-      local,
-      "custom",
-      "name: custom\nsummary: Registered content\ndomain: custom.test\nmode: content\nhandler: custom.registered\nschema: CustomPage\nurl_patterns: ['^https://custom\\.test/page$']\n",
-    );
+    writePreset(local, "custom", {
+      name: "custom",
+      summary: "Registered content",
+      domain: "custom.test",
+      mode: "content",
+      handler: "custom.registered",
+      schema: "CustomPage",
+      url_patterns: ["^https://custom\\.test/page$"],
+    });
     const registry = loadRegistry({ officialDir: official, localDir: local });
     const preset = registry.byName("custom")!;
     try {

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "preset": "x-profile",
+  "mode": "content",
+  "url": "https://x.com/simpleuser",
+  "expect": "success",
+  "structured": {
+    "display_name": "Simple User",
+    "handle": "@simpleuser",
+    "bio": "Just a simple user.",
+    "header_text": "",
+    "following_text": "42 Following",
+    "followers_text": "100 Followers",
+    "pinned_tweet": "",
+    "recent_posts": [
+      "[![](https://pbs.twimg.com/profile_images/666/simple_normal.jpg)](/simpleuser)\n\n[Simple User](/simpleuser)\n\n[@simpleuser](/simpleuser)\n\nHello world, this is my first tweet.\n\n[11:00 AM · Feb 5, 2026](/simpleuser/status/8001)",
+      "[![](https://pbs.twimg.com/profile_images/666/simple_normal.jpg)](/simpleuser)\n\n[Simple User](/simpleuser)\n\n[@simpleuser](/simpleuser)\n\nLearning something new every day.\n\n[9:00 AM · Feb 4, 2026](/simpleuser/status/8002)",
+      "[![](https://pbs.twimg.com/profile_images/666/simple_normal.jpg)](/simpleuser)\n\n[Simple User](/simpleuser)\n\n[@simpleuser](/simpleuser)\n\nCoffee is life.\n\n[7:00 AM · Feb 3, 2026](/simpleuser/status/8003)"
+    ],
+    "recent_posts_structured": [
+      {
+        "text": "Hello world, this is my first tweet.",
+        "timestamp": "11:00 AM · Feb 5, 2026",
+        "permalink": "https://x.com/simpleuser/status/8001",
+        "links": []
+      },
+      {
+        "text": "Learning something new every day.",
+        "timestamp": "9:00 AM · Feb 4, 2026",
+        "permalink": "https://x.com/simpleuser/status/8002",
+        "links": []
+      },
+      {
+        "text": "Coffee is life.",
+        "timestamp": "7:00 AM · Feb 3, 2026",
+        "permalink": "https://x.com/simpleuser/status/8003",
+        "links": []
+      }
+    ],
+    "latest_version": "",
+    "latest_post_id": ""
+  }
+}

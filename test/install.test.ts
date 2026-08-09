@@ -111,6 +111,9 @@ async function command(
 const phaseFiles = [
   "scripts/install.sh",
   "scripts/runtime-snapshot.ts",
+  "config/preset.schema.json",
+  "config/preset-canaries.schema.json",
+  "config/corpus-meta.schema.json",
   "src/api.ts",
   "src/corpus.ts",
   "src/envelope.ts",
@@ -634,7 +637,12 @@ async function createTinySnapshot(
   for (const path of ["src", "config/presets", "plist", "scripts", "test/corpus", "node_modules"])
     mkdirSync(join(snapshot, path), { recursive: true, mode: 0o700 });
   writeFileSync(join(snapshot, "src/cli.ts"), "console.log('tiny runtime');\n");
-  writeFileSync(join(snapshot, "config/preset-schema.yaml"), "{}\n");
+  for (const name of [
+    "preset.schema.json",
+    "preset-canaries.schema.json",
+    "corpus-meta.schema.json",
+  ])
+    writeFileSync(join(snapshot, "config", name), "{}\n");
   writeFileSync(join(snapshot, "package.json"), "{}\n");
   writeFileSync(join(snapshot, "bun.lock"), "");
   cpSync(
@@ -1184,7 +1192,7 @@ describe("installer", () => {
     const checkout = await committedPhaseCheckout();
     const committedCli = text(join(checkout, "src/cli.ts"));
     writeFileSync(join(checkout, "src/cli.ts"), `${committedCli}\nthrow new Error("dirty");\n`);
-    writeFileSync(join(checkout, "config/presets/dirty.yaml"), "dirty: true\n");
+    writeFileSync(join(checkout, "config/presets/dirty.json"), '{ "dirty": true }\n');
     const fixture = installEnv({}, { preseedSnapshots: false });
     const installed = await command(["bash", join(checkout, "scripts/install.sh")], {
       cwd: checkout,
@@ -1194,7 +1202,7 @@ describe("installer", () => {
     const state = join(fixture.home, ".local/state/agentscrape");
     const runtime = join(realpathSync(state), "runtime", text(join(state, "deployed-sha")).trim());
     expect(text(join(runtime, "src/cli.ts"))).toBe(committedCli);
-    expect(existsSync(join(runtime, "config/presets/dirty.yaml"))).toBeFalse();
+    expect(existsSync(join(runtime, "config/presets/dirty.json"))).toBeFalse();
     makeWritable(checkout);
     rmSync(checkout, { recursive: true, force: true });
     const runnable = await command([join(fixture.home, ".local/bin/agentscrape"), "--help"], {

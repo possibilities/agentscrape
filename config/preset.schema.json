@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agentscrape preset",
+  "description": "A preset in `config/presets/` or a project's `scrapers/` directory: the routing rule and extraction strategy for one kind of page.",
+  "type": "object",
+  "required": ["name", "summary", "domain", "mode"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path to this schema, for editor completion. The preset loader ignores it."
+    },
+    "name": {
+      "type": "string",
+      "description": "Registry identity for this preset. `--preset NAME` selects it, and the name must be unique among the official presets and among the local `scrapers/` presets."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-line description of what the preset extracts, shown by `list-presets`."
+    },
+    "domain": {
+      "type": "string",
+      "description": "Host this preset claims, or \"*\" to match any host. Declaring a domain claims the entire host: a URL on it that matches no preset fails rather than falling back to generic extraction."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["content", "links", "nav-links"],
+      "description": "Extraction strategy. `content` runs a registered handler, `links` collects anchors under one selector, and `nav-links` walks a two-level navigation."
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Further hosts claimed on the same terms as `domain`, such as twitter.com alongside x.com."
+    },
+    "browser_profile": {
+      "type": "string",
+      "description": "Browser profile the scrape runs under when the caller supplies none, for pages that need a signed-in session."
+    },
+    "url_patterns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^\\^[\\s\\S]*\\$$"
+      },
+      "description": "JavaScript regular expressions matched against the canonicalized URL. Each must carry a visible `^` start anchor and `$` end anchor, and no two presets may declare the same pattern."
+    },
+    "handler": {
+      "type": "string",
+      "description": "Registered content extractor to run, named `module.function`. The CLI never loads local executable code, so the handler must already be registered through the package API."
+    },
+    "schema": {
+      "type": "string",
+      "description": "Name of the ScrapeSchema class the handler returns. It must be registered together with `handler`."
+    },
+    "selector": {
+      "type": "string",
+      "description": "CSS selector for the anchors to collect."
+    },
+    "toggle_selector": {
+      "type": "string",
+      "description": "CSS selector for expander controls to click before links are collected, such as collapsed navigation sections."
+    },
+    "section_selector": {
+      "type": "string",
+      "description": "CSS selector for the top-level section links to visit."
+    },
+    "category_selector": {
+      "type": "string",
+      "description": "CSS selector for the links to collect on each section page that was visited."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "content"
+          }
+        },
+        "required": ["mode"]
+      },
+      "then": {
+        "required": ["handler", "schema"],
+        "properties": {
+          "selector": false,
+          "toggle_selector": false,
+          "section_selector": false,
+          "category_selector": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "links"
+          }
+        },
+        "required": ["mode"]
+      },
+      "then": {
+        "required": ["selector"],
+        "properties": {
+          "url_patterns": false,
+          "handler": false,
+          "schema": false,
+          "section_selector": false,
+          "category_selector": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "nav-links"
+          }
+        },
+        "required": ["mode"]
+      },
+      "then": {
+        "required": ["section_selector", "category_selector"],
+        "properties": {
+          "url_patterns": false,
+          "handler": false,
+          "schema": false,
+          "selector": false
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "$schema": "../preset.schema.json",
+  "name": "x-tweet",
+  "summary": "Tweet with optional thread collection and quote tweet",
+  "domain": "x.com",
+  "aliases": ["twitter.com"],
+  "mode": "content",
+  "url_patterns": ["^https?://(?:www\\.)?(?:x\\.com|twitter\\.com)/\\w+/status/\\d+(?:[/?].*)?$"],
+  "handler": "x.scrape_tweet",
+  "schema": "TweetThread"
+}

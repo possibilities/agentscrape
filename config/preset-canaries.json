@@ -1,0 +1,10 @@
+{
+  "$schema": "./preset-canaries.schema.json",
+  "deepwiki-wiki-page": {
+    "url": "https://deepwiki.com/facebook/react",
+    "invariants": {
+      "require_title": true,
+      "min_markdown_chars": 200
+    }
+  }
+}

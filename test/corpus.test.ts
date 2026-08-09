@@ -261,7 +261,7 @@ describe("corpus overlay", () => {
     delete process.env.XDG_DATA_HOME;
 
     const sample = __publishCapturedSampleForTest("x-tweet", {
-      "meta.yaml": "version: 1\n",
+      "meta.json": '{ "version": 1 }\n',
       "page.html": "<main>captured</main>\n",
     });
     expect(sample).toBe(join(dataHome, "corpus", "x-tweet", "sample-001"));
@@ -285,7 +285,7 @@ describe("corpus overlay", () => {
 
     expect(() =>
       __publishCapturedSampleForTest("x-tweet", {
-        "meta.yaml": "version: 1\n",
+        "meta.json": '{ "version": 1 }\n',
         "page.html": "x".repeat(CORPUS_ARTIFACT_MAX_BYTES + 1),
       }),
     ).toThrow(`${CORPUS_ARTIFACT_MAX_BYTES}-byte limit`);
@@ -302,19 +302,21 @@ describe("corpus overlay", () => {
     mkdirSync(escaped, { mode: 0o700 });
     writeFileSync(join(escaped, "sentinel.txt"), "foreign path remains\n", { mode: 0o600 });
     writeFileSync(
-      join(local, "malicious.yaml"),
-      [
-        "name: ../../escaped",
-        "summary: malicious local capture name",
-        "domain: example.invalid",
-        "mode: content",
-        "aliases: []",
-        "url_patterns:",
-        "  - '^https://example\\.invalid/.*$'",
-        "handler: x.scrape_tweet",
-        "schema: TweetThread",
-        "",
-      ].join("\n"),
+      join(local, "malicious.json"),
+      `${JSON.stringify(
+        {
+          name: "../../escaped",
+          summary: "malicious local capture name",
+          domain: "example.invalid",
+          mode: "content",
+          aliases: [],
+          url_patterns: ["^https://example\\.invalid/.*$"],
+          handler: "x.scrape_tweet",
+          schema: "TweetThread",
+        },
+        null,
+        2,
+      )}\n`,
     );
     const registry = loadRegistry({
       officialDir: join(import.meta.dir, "../config/presets"),
@@ -327,7 +329,7 @@ describe("corpus overlay", () => {
     delete process.env.XDG_DATA_HOME;
 
     expect(() =>
-      __publishCapturedSampleForTest(malicious!.name, { "meta.yaml": "version: 1\n" }),
+      __publishCapturedSampleForTest(malicious!.name, { "meta.json": '{ "version": 1 }\n' }),
     ).toThrow(/unsafe path name|separator/);
     expect(readFileSync(join(escaped, "sentinel.txt"), "utf8")).toBe("foreign path remains\n");
     expect(existsSync(dataHome)).toBeFalse();
@@ -346,7 +348,7 @@ describe("corpus overlay", () => {
     delete process.env.XDG_DATA_HOME;
 
     expect(() =>
-      __publishCapturedSampleForTest("x-tweet", { "meta.yaml": "version: 1\n" }),
+      __publishCapturedSampleForTest("x-tweet", { "meta.json": '{ "version": 1 }\n' }),
     ).toThrow(/already occupied/);
     expect(readFileSync(join(preset, "sample-003", "sentinel.txt"), "utf8")).toBe("occupied\n");
     expect(readdirSync(preset).filter((name) => name.startsWith(".capture-tmp-"))).toEqual([]);

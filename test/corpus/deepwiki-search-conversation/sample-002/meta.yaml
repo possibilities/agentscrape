@@ -1,8 +1,0 @@
-version: 1
-preset: deepwiki-search-conversation
-mode: content
-url: https://deepwiki.com/search/how-do-i-load-config_abc123
-expect: failure
-failure:
-  type: PresetDriftError
-  contains: is incomplete

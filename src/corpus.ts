@@ -18,7 +18,6 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, parse as parsePath, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   type PreparedTextArtifact,
   preflightTextArtifacts,
@@ -350,29 +349,29 @@ function readCorpusText(path: string, security?: SecureSampleContext): string | 
 }
 
 function loadMeta(directory: string, security?: SecureSampleContext): Meta {
-  const path = join(directory, "meta.yaml");
+  const path = join(directory, "meta.json");
   const text = readCorpusText(path, security);
-  if (text === null) throw new CorpusError("missing meta.yaml");
+  if (text === null) throw new CorpusError("missing meta.json");
   let value: unknown;
   try {
-    value = parseYaml(text);
+    value = JSON.parse(text);
   } catch (error) {
-    throw new CorpusError(`malformed meta.yaml: ${String(error)}`);
+    throw new CorpusError(`malformed meta.json: ${String(error)}`);
   }
   if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new CorpusError("meta.yaml must be a mapping");
+    throw new CorpusError("meta.json must be a JSON object");
   const data = value as Record<string, unknown>;
   if (data.version !== CORPUS_VERSION)
     throw new CorpusError(
       `unsupported sample contract version ${String(data.version)} (expected ${CORPUS_VERSION})`,
     );
   for (const field of ["preset", "mode", "url", "expect"])
-    if (!(field in data)) throw new CorpusError(`meta.yaml missing required field: ${field}`);
+    if (!(field in data)) throw new CorpusError(`meta.json missing required field: ${field}`);
   if (!["content", "links", "nav-links"].includes(data.mode as string))
-    throw new CorpusError(`meta.yaml has unsupported mode: '${String(data.mode)}'`);
+    throw new CorpusError(`meta.json has unsupported mode: '${String(data.mode)}'`);
   if (!["success", "failure"].includes(data.expect as string))
     throw new CorpusError(
-      `meta.yaml 'expect' must be 'success' or 'failure', got '${String(data.expect)}'`,
+      `meta.json 'expect' must be 'success' or 'failure', got '${String(data.expect)}'`,
     );
   return data as unknown as Meta;
 }
@@ -386,7 +385,7 @@ function rootHtml(directory: string, security?: SecureSampleContext): string {
 function verifyFailure(meta: Meta, error: unknown): void {
   if (!meta.failure?.type) throw new CorpusError("expect: failure requires a 'failure.type' field");
   const expected = FAILURE_TYPES[meta.failure.type];
-  if (!expected) throw new CorpusError(`unknown failure type in meta.yaml: '${meta.failure.type}'`);
+  if (!expected) throw new CorpusError(`unknown failure type in meta.json: '${meta.failure.type}'`);
   const value = error instanceof Error ? error : new Error(String(error));
   const matches = (candidate: Error, expectedType: abstract new (...args: never[]) => Error) =>
     candidate instanceof expectedType;
@@ -416,12 +415,12 @@ function verifySuccess(
     throw new CorpusError("markdown does not match expected.md");
   if (meta.mode === "content") {
     if ("structured" in meta && !isDeepStrictEqual(payload, meta.structured))
-      throw new CorpusError("structured output does not match meta.yaml 'structured'");
+      throw new CorpusError("structured output does not match meta.json 'structured'");
   } else {
     if (!meta.links)
       throw new CorpusError(`expect: success (${meta.mode} mode) requires a 'links' field`);
     if (!isDeepStrictEqual(payload, meta.links))
-      throw new CorpusError("extracted links do not match meta.yaml 'links'");
+      throw new CorpusError("extracted links do not match meta.json 'links'");
   }
   for (const needle of meta.assertions?.contains ?? [])
     if (!markdown.includes(needle))
@@ -453,7 +452,7 @@ async function replay(
     return [structured.toMarkdown(), links];
   }
   if (!meta.category_pages?.length)
-    throw new CorpusError("nav-links mode requires 'category_pages' in meta.yaml");
+    throw new CorpusError("nav-links mode requires 'category_pages' in meta.json");
   const pages = new Map(
     meta.category_pages.map((entry) => {
       const path = join(directory, entry.page);
@@ -486,7 +485,7 @@ async function runSample(
 ): Promise<void> {
   if (meta.mode !== preset.mode)
     throw new CorpusError(
-      `meta.yaml mode '${meta.mode}' does not match registry mode '${preset.mode}' for preset '${preset.name}'`,
+      `meta.json mode '${meta.mode}' does not match registry mode '${preset.mode}' for preset '${preset.name}'`,
     );
   try {
     const [markdown, payload] = await replay(directory, meta, preset, security);
@@ -688,7 +687,7 @@ async function runCorpusRoot(
             if (!preset) throw new CorpusError(`preset '${meta.preset}' not found in registry`);
             if (preset.name !== presetName)
               throw new CorpusError(
-                `meta.yaml preset '${meta.preset}' does not match directory preset '${presetName}'`,
+                `meta.json preset '${meta.preset}' does not match directory preset '${presetName}'`,
               );
             await runSample(directory, meta, preset, security);
             result.passed += 1;
@@ -990,7 +989,7 @@ export async function captureCorpus(
       return publishCapturedSample(
         preset.name,
         {
-          "meta.yaml": stringifyYaml(meta),
+          "meta.json": `${JSON.stringify(meta, null, 2)}\n`,
           ...(rendered ? { "page.html": rendered } : {}),
         },
         options.root,
@@ -1010,7 +1009,7 @@ export async function captureCorpus(
     return publishCapturedSample(
       preset.name,
       {
-        "meta.yaml": stringifyYaml(meta),
+        "meta.json": `${JSON.stringify(meta, null, 2)}\n`,
         ...(result.full_html ? { "page.html": result.full_html } : {}),
         ...(result.selected_html ? { "selected.html": result.selected_html } : {}),
         ...(result.markdown ? { "expected.md": result.markdown } : {}),
@@ -1019,4 +1018,4 @@ export async function captureCorpus(
     );
   });
 }
-export { CorpusError, CorpusSecurityError, loadMeta, runSample };
+export { CorpusError, CorpusSecurityError, FAILURE_TYPES, loadMeta, runSample };

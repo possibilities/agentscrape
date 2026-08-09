@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agentscrape corpus sample metadata",
+  "description": "The `meta.json` beside a captured sample under `test/corpus/`: what the sample was captured from and what replaying it must produce.",
+  "type": "object",
+  "required": ["version", "preset", "mode", "url", "expect"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Sample contract version. A sample declaring any other version is rejected rather than replayed."
+    },
+    "preset": {
+      "type": "string",
+      "description": "Preset that captured the sample. It must match the corpus directory the sample lives in."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["content", "links", "nav-links"],
+      "description": "Extraction mode to replay. It must match the preset's mode in the registry."
+    },
+    "url": {
+      "type": "string",
+      "description": "Redacted URL the sample was captured from, replayed as the request URL."
+    },
+    "expect": {
+      "type": "string",
+      "enum": ["success", "failure"],
+      "description": "Whether replay must succeed and match the recorded output, or must raise the recorded failure."
+    },
+    "structured": {
+      "description": "Structured payload the content-mode handler must return, compared as deeply equal. Absent means the payload is not asserted."
+    },
+    "links": {
+      "type": "array",
+      "description": "Links the `links` or `nav-links` replay must return, compared as deeply equal. Required for a successful sample in either mode."
+    },
+    "failure": {
+      "type": "object",
+      "description": "Failure a sample with `expect: failure` must raise.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "AgentscrapeAuthError",
+            "AgentscrapeError",
+            "AgentscrapeUpstreamDownError",
+            "PresetConfigError",
+            "PresetDriftError",
+            "PresetOutputError",
+            "PresetSelectionError",
+            "Error",
+            "TypeError",
+            "RangeError",
+            "ValueError",
+            "RuntimeError"
+          ],
+          "description": "Error class the replay must throw, matched with `instanceof`."
+        },
+        "contains": {
+          "type": "string",
+          "description": "Substring the thrown error's message must contain."
+        },
+        "message_captured": {
+          "type": "string",
+          "description": "Redacted message recorded when the sample was captured. It documents the capture and is not asserted."
+        }
+      }
+    },
+    "assertions": {
+      "type": "object",
+      "description": "Substring checks against the markdown a successful replay renders.",
+      "properties": {
+        "contains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Substrings the rendered markdown must contain."
+        },
+        "not_contains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Substrings the rendered markdown must not contain."
+        }
+      }
+    },
+    "category_pages": {
+      "type": "array",
+      "description": "Captured second-level pages for a `nav-links` replay, one per section link followed.",
+      "items": {
+        "type": "object",
+        "required": ["section_url", "page"],
+        "properties": {
+          "section_url": {
+            "type": "string",
+            "description": "Section link whose page this fixture stands in for."
+          },
+          "page": {
+            "type": "string",
+            "description": "Filename of the captured page, relative to the sample directory."
+          }
+        }
+      }
+    }
+  }
+}

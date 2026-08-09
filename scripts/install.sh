@@ -567,7 +567,7 @@ prepare_snapshot() {
   fi
   listing="$(git -C "$ROOT_DIR" ls-tree -r --format='%(objectmode) %(objecttype)' "$sha")"
   while read -r mode type; do [[ "$mode" != 120000 && "$mode" != 160000 && "$type" != commit ]] || fail "refusing tracked symlink or gitlink in runtime commit"; done <<<"$listing"
-  for path in src/cli.ts config/presets config/preset-schema.yaml plist/$LABEL.plist scripts/runtime-snapshot.ts test/corpus package.json bun.lock; do
+  for path in src/cli.ts config/presets config/preset.schema.json config/preset-canaries.schema.json config/corpus-meta.schema.json plist/$LABEL.plist scripts/runtime-snapshot.ts test/corpus package.json bun.lock; do
     git -C "$ROOT_DIR" cat-file -e "$sha:$path" 2>/dev/null || fail "runtime commit is missing required asset: $path"
   done
   stage="$(mktemp -d "$RUNTIME_DIR/.stage.XXXXXX")"

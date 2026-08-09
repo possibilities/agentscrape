@@ -15,7 +15,7 @@ import {
 } from "./errors";
 import { EnvelopeBuildError, type ExtractorDefinition, projectScrapeResult } from "./extractors";
 import type { ScrapeResult } from "./handlers/types";
-import { isSecureHttpUrl, isSensitiveName, redactDiagnostic, redactUrl } from "./redaction";
+import { isSecureHttpUrl, redactDiagnostic, redactUrl } from "./redaction";
 import type { ExtractionEnvelope, FailureClass } from "./schemas";
 import { AGENTSCRAPE_VERSION } from "./version";
 

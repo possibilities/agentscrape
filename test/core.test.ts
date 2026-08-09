@@ -258,7 +258,10 @@ describe("corpus, canary, and queue contracts", () => {
     const root = _temp();
     const directory = join(root, "private-sample");
     const exact = "x".repeat(CORPUS_ARTIFACT_MAX_BYTES);
-    const sample = atomicSample(directory, { "meta.yaml": "version: 1\n", "page.html": exact });
+    const sample = atomicSample(directory, {
+      "meta.json": '{ "version": 1 }\n',
+      "page.html": exact,
+    });
     expect(lstatSync(sample).mode & 0o077).toBe(0);
     for (const name of readdirSync(sample))
       expect(lstatSync(join(sample, name)).mode & 0o077).toBe(0);
@@ -266,7 +269,7 @@ describe("corpus, canary, and queue contracts", () => {
     const oversizedDirectory = join(root, "oversized");
     expect(() =>
       atomicSample(oversizedDirectory, {
-        "meta.yaml": "version: 1\n",
+        "meta.json": '{ "version": 1 }\n',
         "page.html": `${exact}x`,
       }),
     ).toThrow(`${CORPUS_ARTIFACT_MAX_BYTES}-byte limit`);
@@ -275,7 +278,7 @@ describe("corpus, canary, and queue contracts", () => {
     const aggregateDirectory = join(root, "aggregate");
     expect(() =>
       atomicSample(aggregateDirectory, {
-        "meta.yaml": "m",
+        "meta.json": "m",
         "page.html": exact,
         "selected.html": exact,
         "expected.md": exact,

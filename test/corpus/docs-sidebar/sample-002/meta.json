@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "preset": "docs-sidebar",
+  "mode": "links",
+  "url": "https://docs.example.test/docs/empty",
+  "expect": "failure",
+  "failure": {
+    "type": "ValueError",
+    "contains": "found no links"
+  }
+}

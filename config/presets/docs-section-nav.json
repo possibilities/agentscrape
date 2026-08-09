@@ -1,0 +1,10 @@
+{
+  "$schema": "../preset.schema.json",
+  "name": "docs-section-nav",
+  "summary": "Two-level doc site nav: visit each section, scrape sub-nav links",
+  "domain": "*",
+  "mode": "nav-links",
+  "section_selector": "#navigation-items",
+  "category_selector": "#navigation-items",
+  "toggle_selector": "button"
+}

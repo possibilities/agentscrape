@@ -30,10 +30,10 @@ function temp(): string {
 }
 async function command(
   args: string[],
-  options: { stdin?: string; home?: string; env?: Record<string, string> } = {},
+  options: { stdin?: string; home?: string; cwd?: string; env?: Record<string, string> } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn([process.execPath, "src/cli.ts", ...args], {
-    cwd: root,
+  const child = Bun.spawn([process.execPath, join(root, "src/cli.ts"), ...args], {
+    cwd: options.cwd ?? root,
     stdin: options.stdin === undefined ? "ignore" : new Blob([options.stdin]),
     stdout: "pipe",
     stderr: "pipe",
@@ -134,6 +134,22 @@ describe("CLI offline smoke suite", () => {
     expect((await command(["list-presets"])).stdout).toContain("deepwiki-wiki-page");
     expect((await command(["show-preset", "x-tweet"])).stdout).toContain("Schema: TweetThread");
     expect((await command(["validate-preset", "deepwiki-wiki-page"])).stdout).toContain("OK:");
+  });
+  test("validate-preset refuses a legacy YAML preset instead of skipping it", async () => {
+    const directory = temp();
+    const literal = join(directory, "legacy.yaml");
+    writeFileSync(literal, "name: legacy\n");
+    const direct = await command(["validate-preset", literal]);
+    expect(direct.code).toBe(2);
+    expect(direct.stderr).toContain("preset files are JSON");
+
+    const project = join(directory, "project");
+    mkdirSync(join(project, "scrapers"), { recursive: true });
+    writeFileSync(join(project, "scrapers", "shadow.yml"), "name: shadow\n");
+    const ladder = await command(["validate-preset", "shadow"], { cwd: project });
+    expect(ladder.code).toBe(2);
+    expect(ladder.stderr).toContain("legacy YAML preset");
+    expect(ladder.stderr).toContain("shadow.yml");
   });
   test("doctor renders offline human and JSON reports without executing capabilities", async () => {
     const directory = temp();

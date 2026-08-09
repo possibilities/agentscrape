@@ -386,11 +386,23 @@ async function discoverFeedCommand(
   output(serialized);
   return result.failure === null ? 0 : 1;
 }
+function legacyPreset(path: string): never {
+  throw new AgentscrapeUsageError(
+    `preset files are JSON; '${path}' is a legacy YAML preset (convert it to .json)`,
+  );
+}
 function presetPath(name: string): string | null {
-  if (existsSync(name) && [".yaml", ".yml"].includes(extname(name))) return name;
-  const local = join(process.cwd(), "scrapers", `${name}.yaml`);
+  if (existsSync(name)) {
+    if ([".yaml", ".yml"].includes(extname(name))) legacyPreset(name);
+    if (extname(name) === ".json") return name;
+  }
+  const local = join(process.cwd(), "scrapers", `${name}.json`);
   if (existsSync(local)) return local;
-  const official = join(import.meta.dir, "../config/presets", `${name}.yaml`);
+  for (const extension of [".yaml", ".yml"]) {
+    const legacy = join(process.cwd(), "scrapers", `${name}${extension}`);
+    if (existsSync(legacy)) legacyPreset(legacy);
+  }
+  const official = join(import.meta.dir, "../config/presets", `${name}.json`);
   return existsSync(official) ? official : null;
 }
 async function presetsCommand(command: string, args: string[]): Promise<number> {

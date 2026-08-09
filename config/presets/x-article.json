@@ -1,0 +1,14 @@
+{
+  "$schema": "../preset.schema.json",
+  "name": "x-article",
+  "summary": "X Article (long-form post) as readable markdown with title and author",
+  "domain": "x.com",
+  "aliases": ["twitter.com"],
+  "mode": "content",
+  "url_patterns": [
+    "^https?://(?:www\\.)?(?:x\\.com|twitter\\.com)/i/article/\\d+(?:[/?].*)?$",
+    "^https?://(?:www\\.)?(?:x\\.com|twitter\\.com)/\\w+/articles?/\\d+(?:[/?].*)?$"
+  ],
+  "handler": "x.scrape_article",
+  "schema": "XArticle"
+}

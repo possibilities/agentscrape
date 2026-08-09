@@ -70,18 +70,20 @@ exit 41
   return value;
 }
 
-function writeClaimedLinksPreset(value: Fixture, name: string, domain: string): void {
+function writePreset(value: Fixture, name: string, preset: Record<string, unknown>): void {
   const directory = join(value.root, "scrapers");
   mkdirSync(directory, { recursive: true });
-  writeFileSync(
-    join(directory, `${name}.yaml`),
-    `name: ${name}
-summary: Claim ${domain} without an automatic page-kind match
-domain: ${domain}
-mode: links
-selector: body
-`,
-  );
+  writeFileSync(join(directory, `${name}.json`), `${JSON.stringify(preset, null, 2)}\n`);
+}
+
+function writeClaimedLinksPreset(value: Fixture, name: string, domain: string): void {
+  writePreset(value, name, {
+    name,
+    summary: `Claim ${domain} without an automatic page-kind match`,
+    domain,
+    mode: "links",
+    selector: "body",
+  });
 }
 
 async function program(
@@ -213,20 +215,15 @@ describe("preset and generic precedence", () => {
 
   test("an explicit preset is selected by name without URL-match eligibility", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "named-route.yaml"),
-      `name: named-route
-summary: Explicit content route ineligible for the requested URL
-domain: elsewhere.invalid
-mode: content
-handler: named.handle
-schema: NamedPage
-url_patterns:
-  - '^https://elsewhere[.]invalid/eligible$'
-`,
-    );
+    writePreset(value, "named-route", {
+      name: "named-route",
+      summary: "Explicit content route ineligible for the requested URL",
+      domain: "elsewhere.invalid",
+      mode: "content",
+      handler: "named.handle",
+      schema: "NamedPage",
+      url_patterns: ["^https://elsewhere[.]invalid/eligible$"],
+    });
     const url = "https://github.com/owner/repository?View=Original#Fragment";
     const output = await program(
       value,
@@ -520,19 +517,15 @@ describe("definition-role X status routing", () => {
 
   test("accepts a local x-article shadow with the official article pair", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "x-article.yaml"),
-      `name: x-article
-summary: Local shadow retaining the article definition
-domain: x.com
-aliases: [twitter.com]
-mode: content
-handler: x.scrape_article
-schema: XArticle
-`,
-    );
+    writePreset(value, "x-article", {
+      name: "x-article",
+      summary: "Local shadow retaining the article definition",
+      domain: "x.com",
+      aliases: ["twitter.com"],
+      mode: "content",
+      handler: "x.scrape_article",
+      schema: "XArticle",
+    });
     const output = await program(
       value,
       `  const result = await api.fetchMarkdown(${JSON.stringify(articleUrl)}, {
@@ -552,19 +545,15 @@ schema: XArticle
 
   test("fails closed when a local x-article shadow has no article role", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "x-article.yaml"),
-      `name: x-article
-summary: Mismatched local article shadow
-domain: x.com
-aliases: [twitter.com]
-mode: content
-handler: shadow.handle
-schema: ShadowArticle
-`,
-    );
+    writePreset(value, "x-article", {
+      name: "x-article",
+      summary: "Mismatched local article shadow",
+      domain: "x.com",
+      aliases: ["twitter.com"],
+      mode: "content",
+      handler: "shadow.handle",
+      schema: "ShadowArticle",
+    });
     const output = await program(
       value,
       `  class ShadowArticle extends api.ScrapeSchema {
@@ -606,20 +595,15 @@ schema: ShadowArticle
 describe("registered content routing", () => {
   test("a registered matching preset wins and receives the original URL", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "registered-route.yaml"),
-      `name: registered-route
-summary: Registered matching route
-domain: github.com
-mode: content
-handler: routing.handle
-schema: RoutingPage
-url_patterns:
-  - '^https://github[.]com/registered/route[?]View=Case$'
-`,
-    );
+    writePreset(value, "registered-route", {
+      name: "registered-route",
+      summary: "Registered matching route",
+      domain: "github.com",
+      mode: "content",
+      handler: "routing.handle",
+      schema: "RoutingPage",
+      url_patterns: ["^https://github[.]com/registered/route[?]View=Case$"],
+    });
     const url = "https://github.com/registered/route?View=Case#Original";
     const output = await program(
       value,
@@ -657,20 +641,15 @@ url_patterns:
 
   test("a default non-browser custom extractor builds a generic envelope", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "custom-envelope.yaml"),
-      `name: custom-envelope
-summary: Custom generic envelope
-domain: custom.test
-mode: content
-handler: envelope.handle
-schema: EnvelopePage
-url_patterns:
-  - '^https://custom[.]test/start[?]View=Case$'
-`,
-    );
+    writePreset(value, "custom-envelope", {
+      name: "custom-envelope",
+      summary: "Custom generic envelope",
+      domain: "custom.test",
+      mode: "content",
+      handler: "envelope.handle",
+      schema: "EnvelopePage",
+      url_patterns: ["^https://custom[.]test/start[?]View=Case$"],
+    });
     const url = "https://custom.test/start?View=Case";
     const output = await program(
       value,
@@ -717,18 +696,14 @@ url_patterns:
 
   test("an explicit custom result final URL wins without browser capture", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "custom-final.yaml"),
-      `name: custom-final
-summary: Custom provider final URL
-domain: custom.test
-mode: content
-handler: final.handle
-schema: FinalPage
-`,
-    );
+    writePreset(value, "custom-final", {
+      name: "custom-final",
+      summary: "Custom provider final URL",
+      domain: "custom.test",
+      mode: "content",
+      handler: "final.handle",
+      schema: "FinalPage",
+    });
     const requested = "https://custom.test/start";
     const finalUrl = "https://custom.test/final?ok=yes";
     const output = await program(
@@ -775,18 +750,14 @@ schema: FinalPage
 
   test("a browser-enabled custom extractor captures the browser final URL", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "custom-browser.yaml"),
-      `name: custom-browser
-summary: Browser-enabled custom content
-domain: custom.test
-mode: content
-handler: browser.handle
-schema: BrowserPage
-`,
-    );
+    writePreset(value, "custom-browser", {
+      name: "custom-browser",
+      summary: "Browser-enabled custom content",
+      domain: "custom.test",
+      mode: "content",
+      handler: "browser.handle",
+      schema: "BrowserPage",
+    });
     const finalUrl = "https://custom.test/captured";
     writeFileSync(
       value.browser,
@@ -839,18 +810,14 @@ esac
 
   test("fetchLinks rejects a non-link custom extractor before handler and browser effects", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "custom-no-links.yaml"),
-      `name: custom-no-links
-summary: Custom content without links capability
-domain: custom.test
-mode: content
-handler: no-links.handle
-schema: NoLinksPage
-`,
-    );
+    writePreset(value, "custom-no-links", {
+      name: "custom-no-links",
+      summary: "Custom content without links capability",
+      domain: "custom.test",
+      mode: "content",
+      handler: "no-links.handle",
+      schema: "NoLinksPage",
+    });
     const output = await program(
       value,
       `  class NoLinksPage extends api.ScrapeSchema {
@@ -883,18 +850,14 @@ schema: NoLinksPage
 
   test("a preset named x-timeline cannot claim timeline options without the capability", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "x-timeline.yaml"),
-      `name: x-timeline
-summary: Name-only timeline shadow
-domain: custom.test
-mode: content
-handler: name-only-timeline.handle
-schema: NameOnlyTimeline
-`,
-    );
+    writePreset(value, "x-timeline", {
+      name: "x-timeline",
+      summary: "Name-only timeline shadow",
+      domain: "custom.test",
+      mode: "content",
+      handler: "name-only-timeline.handle",
+      schema: "NameOnlyTimeline",
+    });
     const output = await program(
       value,
       `  class NameOnlyTimeline extends api.ScrapeSchema {
@@ -934,18 +897,14 @@ schema: NameOnlyTimeline
 
   test("fetchLinks executes a custom links opt-in and enforces its result", async () => {
     const value = fixture();
-    const directory = join(value.root, "scrapers");
-    mkdirSync(directory);
-    writeFileSync(
-      join(directory, "custom-links.yaml"),
-      `name: custom-links
-summary: Custom content with links capability
-domain: custom.test
-mode: content
-handler: links.handle
-schema: LinksPage
-`,
-    );
+    writePreset(value, "custom-links", {
+      name: "custom-links",
+      summary: "Custom content with links capability",
+      domain: "custom.test",
+      mode: "content",
+      handler: "links.handle",
+      schema: "LinksPage",
+    });
     const output = await program(
       value,
       `  class LinksPage extends api.ScrapeSchema {

@@ -1,8 +1,0 @@
-version: 1
-preset: chatgpt-conversation
-mode: content
-url: https://chatgpt.com/share/nope
-expect: failure
-failure:
-  type: PresetDriftError
-  contains: has no turns

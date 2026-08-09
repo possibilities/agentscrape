@@ -14,7 +14,7 @@ rules, and queue semantics. Deployment lifecycle lives in
 | `discover-feed [FILE] --source-url URL` | Discover bounded live RSS/Atom feeds, or parse recorded feed/archive responses when `FILE` is supplied | No local write unless redirected by the caller |
 | `list-presets` | List official and local presets by mode | None |
 | `show-preset NAME` | Display a preset contract | None |
-| `validate-preset NAME_OR_PATH` | Validate strict preset YAML | None |
+| `validate-preset NAME_OR_PATH` | Validate strict preset JSON | None |
 | `capture-corpus URL` | Atomically capture a positive or typed-negative content sample | Writes versioned corpus fixtures under the configured data home's `corpus/` overlay |
 | `test-corpus [--preset NAME]` | Replay the shipped corpus, then a distinct configured capture overlay | None |
 | `check-presets --live` | Classify configured public canaries | No provider writes; local browser/session state may change |
@@ -156,9 +156,9 @@ declared structured schema, and Markdown identical to that schema's renderer.
 Missing provider structure raises typed drift rather than returning generic
 body text.
 
-Local YAML presets remain data-only. Selector-based `links` and `nav-links`
+Local JSON presets remain data-only. Selector-based `links` and `nav-links`
 presets work directly in `./scrapers`; the CLI deliberately does not import
-executable handler modules from YAML, environment variables, or the working
+executable handler modules from JSON, environment variables, or the working
 directory. Trusted TypeScript callers can pass a handler and its `ScrapeSchema`
 to `registerContentHandler` before loading the registry. Registration is
 process-local, rejects built-in and name collisions, enforces the registered
@@ -282,7 +282,7 @@ never inside the error message or an envelope.
 expected Markdown may contain sensitive provider content and are not sanitized.
 Persisted metadata URLs and captured failure messages are redacted. New sample
 directories use mode `0700` or stricter and files mode `0600` or stricter.
-Every sample file, including `meta.yaml`, is capped at exactly 8,000,000 UTF-8
+Every sample file, including `meta.json`, is capped at exactly 8,000,000 UTF-8
 bytes, with an exact 24,000,000-byte aggregate cap across the sample. All bytes
 are preflighted before creation, and ordinary failures clean the owned
 temporary directory without publishing a partial final sample.
@@ -309,7 +309,7 @@ read and gated by `test/fixture-hygiene.test.ts`, which rejects credential and
 identity material by shape.
 
 `check-presets --live --allow-private-network` uses
-`config/preset-canaries.yaml`, validates the same registry and output contract
+`config/preset-canaries.json`, validates the same registry and output contract
 as normal fetching, checks semantic invariants rather than exact mutable text,
 and closes every browser session it was allowed to use. A canary URL ships with
 the repository, so only durable public resources qualify and presets without

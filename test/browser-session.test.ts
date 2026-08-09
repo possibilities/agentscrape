@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
 import { fetchLinks, fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
@@ -597,8 +596,11 @@ describe("browser network consent", () => {
       }),
     ).rejects.toBeInstanceOf(AgentscrapeNetworkPolicyError);
     expect(existsSync(join(corpusRoot, "x-tweet"))).toBeFalse();
-    const canaryPath = join(value.root, "canaries.yaml");
-    writeFileSync(canaryPath, "x-tweet:\n  url: https://x.com/example/status/1\n");
+    const canaryPath = join(value.root, "canaries.json");
+    writeFileSync(
+      canaryPath,
+      `${JSON.stringify({ "x-tweet": { url: "https://x.com/example/status/1" } }, null, 2)}\n`,
+    );
     await expect(checkPresets({ presets: ["x-tweet"], canaryPath })).rejects.toBeInstanceOf(
       AgentscrapeNetworkPolicyError,
     );
@@ -625,13 +627,13 @@ describe("corpus capture security", () => {
       allowPrivateNetwork: true,
     });
     expect(lstatSync(sample).mode & 0o077).toBe(0);
-    for (const name of ["meta.yaml", "page.html"]) {
+    for (const name of ["meta.json", "page.html"]) {
       expect(existsSync(join(sample, name))).toBeTrue();
       expect(lstatSync(join(sample, name)).mode & 0o077).toBe(0);
     }
-    const text = readFileSync(join(sample, "meta.yaml"), "utf8");
+    const text = readFileSync(join(sample, "meta.json"), "utf8");
     expect(text).not.toContain("#fragment");
-    expect(parseYaml(text)).toMatchObject({
+    expect(JSON.parse(text)).toMatchObject({
       url: "https://x.com/example/status/1?page=1",
       failure: { type: "AgentscrapeError" },
     });
@@ -646,7 +648,7 @@ describe("corpus capture security", () => {
       root: join(value.root, "truncated-corpus"),
       allowPrivateNetwork: true,
     });
-    expect(existsSync(join(sample, "meta.yaml"))).toBeTrue();
+    expect(existsSync(join(sample, "meta.json"))).toBeTrue();
     expect(existsSync(join(sample, "page.html"))).toBeFalse();
   });
 });

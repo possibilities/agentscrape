@@ -1,7 +1,0 @@
-name: x-timeline
-summary: "Account timeline — recent posts as canonical status links (explicit --preset only)"
-domain: x.com
-aliases: [twitter.com]
-mode: content
-handler: x.scrape_timeline
-schema: XTimeline

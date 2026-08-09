@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "preset": "x-profile",
+  "mode": "content",
+  "url": "https://x.com/nobody",
+  "expect": "failure",
+  "failure": {
+    "type": "PresetDriftError",
+    "contains": "core structure missing"
+  }
+}

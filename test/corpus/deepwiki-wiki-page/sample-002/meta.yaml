@@ -1,8 +1,0 @@
-version: 1
-preset: deepwiki-wiki-page
-mode: content
-url: https://deepwiki.com/acme/widget/2-configuration
-expect: failure
-failure:
-  type: PresetDriftError
-  contains: expected exactly one

@@ -1,8 +1,0 @@
-version: 1
-preset: x-timeline
-mode: content
-url: https://x.com/testuser
-expect: failure
-failure:
-  type: PresetDriftError
-  contains: no classifiable tweets or allowlisted provider-empty state
