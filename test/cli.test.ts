@@ -135,21 +135,17 @@ describe("CLI offline smoke suite", () => {
     expect((await command(["show-preset", "x-tweet"])).stdout).toContain("Schema: TweetThread");
     expect((await command(["validate-preset", "deepwiki-wiki-page"])).stdout).toContain("OK:");
   });
-  test("validate-preset refuses a legacy YAML preset instead of skipping it", async () => {
+  test("stray YAML never resolves as a preset and is never an error", async () => {
     const directory = temp();
-    const literal = join(directory, "legacy.yaml");
-    writeFileSync(literal, "name: legacy\n");
-    const direct = await command(["validate-preset", literal]);
-    expect(direct.code).toBe(2);
-    expect(direct.stderr).toContain("preset files are JSON");
-
     const project = join(directory, "project");
     mkdirSync(join(project, "scrapers"), { recursive: true });
     writeFileSync(join(project, "scrapers", "shadow.yml"), "name: shadow\n");
     const ladder = await command(["validate-preset", "shadow"], { cwd: project });
-    expect(ladder.code).toBe(2);
-    expect(ladder.stderr).toContain("legacy YAML preset");
-    expect(ladder.stderr).toContain("shadow.yml");
+    expect(ladder.code).not.toBe(0);
+    expect(ladder.stderr).toContain("not found");
+    const listing = await command(["list-presets"], { cwd: project });
+    expect(listing.code).toBe(0);
+    expect(listing.stdout).not.toContain("shadow");
   });
   test("doctor renders offline human and JSON reports without executing capabilities", async () => {
     const directory = temp();

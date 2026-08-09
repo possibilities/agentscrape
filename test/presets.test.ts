@@ -407,21 +407,16 @@ describe("strict preset registry", () => {
       loadRegistry({ officialDir: official, localDir: local }).byName("pointed"),
     ).not.toBeNull();
   });
-  test("a legacy YAML preset in a scanned directory is an error, not a silent skip", () => {
+  test("non-JSON files in a scanned directory are ignored", () => {
     const official = directory();
     const local = directory();
-    writeFileSync(join(local, "legacy.yaml"), "name: legacy\n");
+    writeFileSync(join(local, "stray.yaml"), "name: stray\n");
     writeFileSync(join(official, "stale.yml"), "name: stale\n");
-    try {
-      loadRegistry({ officialDir: official, localDir: local });
-      throw new Error("legacy presets unexpectedly loaded");
-    } catch (error) {
-      expect(error).toBeInstanceOf(PresetConfigError);
-      expect((error as PresetConfigError).problems).toEqual([
-        "legacy.yaml (local): legacy YAML preset; agentscrape now reads JSON presets (convert to .json)",
-        "stale.yml (official): legacy YAML preset; agentscrape now reads JSON presets (convert to .json)",
-      ]);
-    }
+    writeFileSync(join(local, "notes.txt"), "not a preset\n");
+    const registry = loadRegistry({ officialDir: official, localDir: local });
+    expect(registry.presets).toEqual([]);
+    expect(registry.byName("stray")).toBeNull();
+    expect(registry.byName("stale")).toBeNull();
   });
   test("rejects malformed preset selector syntax at publication time", () => {
     const official = directory();

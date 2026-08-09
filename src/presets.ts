@@ -207,11 +207,6 @@ function readEntries(
   const entries: RawEntry[] = [];
   const errors: string[] = [];
   const names = readdirSync(directory).sort();
-  for (const file of names.filter((name) => name.endsWith(".yaml") || name.endsWith(".yml"))) {
-    errors.push(
-      `${file} (${source}): legacy YAML preset; agentscrape now reads JSON presets (convert to .json)`,
-    );
-  }
   for (const file of names.filter((name) => name.endsWith(".json"))) {
     const label = `${file} (${source})`;
     try {
