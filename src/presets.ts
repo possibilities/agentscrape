@@ -110,17 +110,23 @@ function problems(data: Record<string, unknown>, label: string): string[] {
   // "$schema" points editors at the generated JSON Schema; it is not part of the preset model.
   const { $schema: _schema, ...values } = data;
   const keys = Object.keys(values);
-  // The zod schema is the structural gate: unknown keys, required presence, field
-  // types, the mode enum, and url_pattern anchors all come from its verdict. The
-  // issues are rendered here (grouped per field, message text derived from the
-  // raw values) so the historical prose and accumulation survive.
+  // The zod schema is the structural gate: required presence, field types, the
+  // mode enum, and url_pattern anchors all come from its verdict. The issues are
+  // rendered here (grouped per field, message text derived from the raw values)
+  // so the historical prose and accumulation survive.
   const parsed = presetValuesSchema.safeParse(values);
   const issuesByField = new Map<string, z.core.$ZodIssue[]>();
-  const unknownKeys: string[] = [];
+  // Unknown keys are the one gate zod cannot own alone: its object parser skips a
+  // literal own "__proto__" key before unrecognized-key detection can see it (an
+  // anti-pollution guard in zod/v4/core/schemas.js), so a preset declaring one
+  // would slip through a strictObject that rejects every other stray key. The raw
+  // own-key walk this validator has always done stays, unioned with zod's verdict
+  // into the same single sorted message.
+  const unknownKeys = new Set(keys.filter((key) => !ALL_FIELDS.has(key)));
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
       if (issue.code === "unrecognized_keys") {
-        unknownKeys.push(...issue.keys);
+        for (const key of issue.keys) unknownKeys.add(key);
         continue;
       }
       const field = issue.path[0];
@@ -128,7 +134,8 @@ function problems(data: Record<string, unknown>, label: string): string[] {
       issuesByField.set(field, [...(issuesByField.get(field) ?? []), issue]);
     }
   }
-  if (unknownKeys.length) result.push(`${label}: unknown keys: ${unknownKeys.sort().join(", ")}`);
+  if (unknownKeys.size)
+    result.push(`${label}: unknown keys: ${[...unknownKeys].sort().join(", ")}`);
   for (const field of REQUIRED_FIELDS) {
     if (issuesByField.has(field) && !(field in values))
       result.push(`${label}: missing required field: ${field}`);

@@ -24,6 +24,16 @@ function presetProblems(preset: Record<string, unknown>): string[] {
   writeFileSync(path, `${JSON.stringify(preset, null, 2)}\n`);
   return validatePresetFile(path);
 }
+/**
+ * Same seam from raw file text, for the keys JSON.stringify cannot express: a
+ * "__proto__" property in an object literal is special-cased by the language, so
+ * only handwritten JSON puts one on the loader's path.
+ */
+function presetProblemsFromText(text: string): string[] {
+  const path = join(directory(), "probe.json");
+  writeFileSync(path, `${text}\n`);
+  return validatePresetFile(path);
+}
 const linksBase = {
   name: "probe",
   summary: "characterization probe",
@@ -75,6 +85,35 @@ describe("preset validator characterization", () => {
     expect(presetProblems({ ...linksBase, zeta: 1, alpha: 2 })).toEqual([
       "unknown keys: alpha, zeta",
     ]);
+  });
+  test("counts a literal own __proto__ key among the unknown keys", () => {
+    // A JSON file may carry a "__proto__" key, and every validator this loader ever
+    // had rejected it as unknown. zod's object parser deliberately skips the key
+    // before unrecognized-key detection can see it, so the raw own-key walk in
+    // problems() is what keeps this rejection — and it merges into the same message.
+    const base =
+      '"name": "probe", "summary": "probe", "domain": "probe.test", "mode": "links", "selector": "nav"';
+    expect(presetProblemsFromText(`{"__proto__": 1, ${base}}`)).toEqual([
+      "unknown keys: __proto__",
+    ]);
+    expect(presetProblemsFromText(`{${base}, "__proto__": 1}`)).toEqual([
+      "unknown keys: __proto__",
+    ]);
+    expect(presetProblemsFromText(`{"bogus": 1, "__proto__": 1, ${base}}`)).toEqual([
+      "unknown keys: __proto__, bogus",
+    ]);
+    expect(presetProblemsFromText('{"__proto__": 1}')).toEqual([
+      "unknown keys: __proto__",
+      "missing required field: name",
+      "missing required field: summary",
+      "missing required field: domain",
+      "missing required field: mode",
+    ]);
+    // Reading the key must never write through to the prototype.
+    expect(presetProblemsFromText(`{"__proto__": {"polluted": true}, ${base}}`)).toEqual([
+      "unknown keys: __proto__",
+    ]);
+    expect("polluted" in {}).toBe(false);
   });
   test("reports missing required fields in declaration order", () => {
     expect(presetProblems({})).toEqual([
@@ -200,6 +239,10 @@ describe("preset validator characterization", () => {
     write("one.json", { ...linksBase, name: "dup" });
     write("two.json", { ...linksBase, name: "dup", selector: "main" });
     write("zeta.json", { ...linksBase, name: "zeta-carrier", zeta: 1 });
+    writeFileSync(
+      join(official, "proto.json"),
+      '{"__proto__": 1, "name": "proto-carrier", "summary": "probe", "domain": "probe.test", "mode": "links", "selector": "nav"}\n',
+    );
     write("three.json", {
       ...contentBase,
       name: "pat-a",
@@ -222,6 +265,7 @@ describe("preset validator characterization", () => {
         "url_pattern '^https://probe[.]test/a$' is declared by multiple presets: pat-a, pat-b",
       );
       expect(problems).toContain("zeta.json (official): unknown keys: zeta");
+      expect(problems).toContain("proto.json (official): unknown keys: __proto__");
     }
   });
 });

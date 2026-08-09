@@ -29,6 +29,14 @@ and pinned by `test/config-validation.test.ts`: preset string fields
 tolerate null, `$schema` is ignored whatever its value, canary entries are
 never judged at load, and error prose still names the offending key.
 
+One gate zod cannot own alone: its object parser skips a literal own
+`__proto__` key before unrecognized-key detection can see it, so
+`strictObject` never reports one. The preset validator keeps its own raw
+own-key walk and unions it with zod's verdict, and any future loader that
+rejects unknown keys must do the same. Test such a key from handwritten JSON
+text — `JSON.stringify` of an object literal cannot produce a `__proto__` own
+property, which is why the first characterization pass missed it.
+
 ## Preset domain claims are host-wide
 
 Declaring `domain:` in a preset claims the entire host. A URL on that host
