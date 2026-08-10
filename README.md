@@ -1,5 +1,7 @@
 # Agentscrape
 
+[![CI](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml)
+
 Fetch and extract web content through an agent-friendly Bun CLI: Markdown from any URL, navigation links, live or recorded feeds, and strict provider presets.
 
 Agentscrape never writes back to remote providers, but it is not read-only locally — commands write destinations, corpus fixtures, queue state, and browser session state, and the installer mutates the user command and LaunchAgent paths it owns. See the [threat model](docs/threat-model.md) for claimed boundaries.
