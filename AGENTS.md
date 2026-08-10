@@ -92,3 +92,19 @@ tiers, consent denials, exit codes, flag names, and the error strings it quotes.
 Trust the binary over the prose. The skill directory must stay self-contained:
 the installer ships only that directory, so a `../` reference to `docs/` or
 `README.md` resolves to nothing on an installed copy.
+
+## The fleet
+
+This checkout is one of the agent* fleet under `~/code`. Shared machinery
+lives in two siblings, and some changes here must cascade:
+
+- Skills under `skills/<name>/` ship globally through Agentdots' scan
+  (`~/code/agentdots/scripts/sync-skills`, run six-hourly by Funk's
+  updater): a SKILL.md edit is live within six hours, or on demand by
+  running that script. Whether a new skill earns a TOOLS.md advertisement
+  line is a deliberate decision — `agentwiki get tool-advertisement-policy`.
+- Adding or removing a call to another fleet tool changes the fleet map:
+  update `~/code/agentdots/skills/fleet/MAP.md` (served by the `fleet`
+  skill, every edge with evidence) in the same change.
+- General agent doctrine — collab, build, story, the resource skills — is
+  `~/code/agentguidance`; tool-specific runbooks stay here.
