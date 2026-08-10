@@ -152,9 +152,7 @@ describe("hermetic package checks", () => {
     const wrapper = readFileSync(join(root, "scripts/check-hermetic.sh"), "utf8");
     expect(wrapper).toContain("<check|static|test|coverage>");
     expect(wrapper).toContain("check | static | test | coverage)");
-    expect(wrapper).toContain(
-      "local test_command=(bun test --parallel=1 --max-concurrency=1 --timeout 60000)",
-    );
+    expect(wrapper).toContain("local test_command=(bun test --parallel=1 --timeout 60000)");
     expect(
       wrapper
         .split("\n")

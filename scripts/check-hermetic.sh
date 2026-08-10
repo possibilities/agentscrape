@@ -96,7 +96,11 @@ export HOME="$private_home"
 export PATH="$repo_root/node_modules/.bin:${PATH:-/usr/bin:/bin}"
 
 run_tests() {
-  local test_command=(bun test --parallel=1 --max-concurrency=1 --timeout 60000)
+  # --max-concurrency governs test.concurrent() only, and this suite has none, so
+  # it was pinning nothing. --parallel=1 is the one that matters: it keeps test
+  # files on a single worker, which the module-level afterEach cleanup arrays and
+  # the shared private HOME both assume.
+  local test_command=(bun test --parallel=1 --timeout 60000)
   if [[ "$mode" == "coverage" ]]; then
     test_command+=(
       --coverage
