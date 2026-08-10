@@ -29,6 +29,16 @@ jobs:
       - name: Install frozen dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install PDF dependency on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes poppler-utils
+
+      - name: Install PDF dependency on macOS
+        if: runner.os == 'macOS'
+        run: brew install poppler
+
       - name: Run project checks
         run: bun run check
 
