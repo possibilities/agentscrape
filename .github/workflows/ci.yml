@@ -69,28 +69,6 @@ jobs:
             printf 'shellcheck unavailable on the macOS runner; continuing\n' >&2
           fi
 
-      - name: Validate plist with Python
-        run: |
-          python3 - <<'PY'
-          import plistlib
-          from pathlib import Path
-
-          with Path("plist/agentscrape.process-queue.plist").open("rb") as stream:
-              plist = plistlib.load(stream)
-          assert plist["Label"] == "agentscrape.process-queue"
-          assert plist["ProgramArguments"] == ["__AGENTSCRAPE_PROGRAM__", "process-queue"]
-          PY
-
-      - name: Lint plist with macOS plutil
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          if command -v plutil >/dev/null 2>&1; then
-            plutil -lint plist/agentscrape.process-queue.plist
-          else
-            printf 'plutil unavailable on the macOS runner; continuing\n' >&2
-          fi
-
       - name: Check whitespace and clean worktree
         shell: bash
         run: |

@@ -231,7 +231,7 @@ describe("CI workflow contract", () => {
     });
   });
 
-  test("requires portable shell, plist, whitespace, and clean-worktree gates", () => {
+  test("requires portable shell, whitespace, and clean-worktree gates", () => {
     const workflow = loadWorkflow();
     const steps = workflow.jobs.check.steps;
     const lines = commandLines(steps);
@@ -250,15 +250,9 @@ describe("CI workflow contract", () => {
     expect(shellValidation).toContain("exit 1");
     expect(shellValidation).toContain("macOS runner; continuing");
 
-    const portablePlist = steps.find((step) => step.name === "Validate plist with Python");
-    expect(portablePlist?.if).toBeUndefined();
-    expect(portablePlist?.run).toContain("import plistlib");
-    expect(portablePlist?.run).toContain("plistlib.load(stream)");
-
-    const macPlist = steps.find((step) => step.name === "Lint plist with macOS plutil");
-    expect(macPlist?.if).toBe("runner.os == 'macOS'");
-    expect(macPlist?.run).toContain("if command -v plutil >/dev/null 2>&1; then");
-    expect(lines).toContain("plutil -lint plist/agentscrape.process-queue.plist");
+    // The process-queue plist moved to Agentdots, which owns every fleet launch
+    // agent. Nothing here renders a plist, so nothing here validates one.
+    expect(steps.some((step) => step.name?.includes("plist"))).toBe(false);
 
     expect(lines).toContain("git diff --check");
     expect(lines).toContain("git diff --exit-code");
