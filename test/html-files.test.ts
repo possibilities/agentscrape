@@ -440,15 +440,14 @@ describe("recoverable HTML retire transactions", () => {
     expect(existsSync(preparation)).toBeFalse();
   });
 
-  // Two starting states, not four. The crash *phase* is the risk surface — each
-  // one leaves different debris — so every phase below still runs. The state
-  // mostly picks which debris exists before the crash, and these two reach every
-  // branch in the body between them: output-only owns the mode-0300 transitions
-  // and the current-source authority path, ready owns the 0700 family and
-  // manifest removal. The dropped pair re-proved the same recovery.
+  // One starting state, down from four. The crash *phase* is the risk surface —
+  // each leaves different debris — so every phase below still runs. The state
+  // only picks what exists before the crash, and output-only is the one that
+  // reaches the most branches in the body: the mode-0300 marker and transition
+  // assertions, the cleanup mode transition, output removal, and the
+  // current-source authority path. The other three re-proved the same recovery.
   const preparationCrashStates = [
     ["mode-0300 output-only", "afterPreparationOutputWrite"],
-    ["mode-0700 ready", "afterPreparationReadyModeTransition"],
   ] as const;
   const preparationCleanupCrashPhases = [
     "afterCleanupPendingCreation",

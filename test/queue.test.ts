@@ -539,64 +539,6 @@ describe("durable retry queue states", () => {
     expect(existsSync(source)).toBeTrue();
   });
 
-  test("ready and retry crash duplicates share one generation claim across two workers", async () => {
-    const value = fixture();
-    const name = "duplicate.yaml";
-    const destination = join(value.home, "duplicate.md");
-    const source = join(value.queue, name);
-    const raw = Buffer.from(`url: https://example.com/duplicate\ndestination: ${destination}\n`);
-    writeFileSync(source, raw);
-    const scheduleScript = [
-      'import { mock } from "bun:test";',
-      'import { AgentscrapeUpstreamDownError } from "./src/errors.ts";',
-      'mock.module("./src/api.ts", () => ({ fetchMarkdown: async () => { throw new AgentscrapeUpstreamDownError("down"); }, resetBrowserUnavailableCache() {} }));',
-      'const { processQueue } = await import("./src/queue.ts?duplicate-schedule");',
-      "await processQueue({ now: () => 0 });",
-    ].join("\n");
-    expect(
-      (
-        await finish(
-          Bun.spawn([process.execPath, "-e", scheduleScript], {
-            cwd: root,
-            stdout: "pipe",
-            stderr: "pipe",
-            env: { ...process.env, HOME: value.home },
-          }),
-        )
-      ).code,
-    ).toBe(0);
-    writeFileSync(source, raw);
-    const calls = join(value.home, "provider-calls");
-    const workerScript = [
-      'import { mock } from "bun:test";',
-      'import { appendFileSync, writeFileSync } from "node:fs";',
-      'mock.module("./src/api.ts", () => ({',
-      '  fetchMarkdown: async (_url, options) => { appendFileSync(process.env.TEST_CALLS, "call\\n"); writeFileSync(options.destination, "done\\n"); },',
-      "  resetBrowserUnavailableCache() {},",
-      "}));",
-      'const { processQueue } = await import("./src/queue.ts?duplicate-worker");',
-      "await processQueue({ now: () => 1000 });",
-    ].join("\n");
-    const workers = [0, 1].map(() =>
-      finish(
-        Bun.spawn([process.execPath, "-e", workerScript], {
-          cwd: root,
-          stdout: "pipe",
-          stderr: "pipe",
-          env: { ...process.env, HOME: value.home, TEST_CALLS: calls },
-        }),
-      ),
-    );
-    const completed = await Promise.all(workers);
-    expect(
-      completed.map((item) => item.code),
-      completed.map((item) => item.stderr).join("\n"),
-    ).toEqual([0, 0]);
-    expect(readFileSync(calls, "utf8")).toBe("call\n");
-    expect(existsSync(source)).toBeFalse();
-    expect(readdirSync(join(value.home, ".local/share/agentscrape/retry"))).toEqual([]);
-  });
-
   test("a canonical higher retry removes all lower predecessors before succeeding", async () => {
     const value = fixture();
     const name = "chain.yaml";

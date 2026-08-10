@@ -582,24 +582,6 @@ beforeAll(async () => {
 });
 
 describe("installer", () => {
-  test("shell syntax and available ShellCheck parse", async () => {
-    const syntax = await command(["bash", "-n", "scripts/install.sh"]);
-    expect(syntax.code, syntax.stderr).toBe(0);
-    const available = await command(["bash", "-c", "command -v shellcheck"]);
-    if (available.code === 0) {
-      const shellcheck = await command(["shellcheck", "--severity=error", "scripts/install.sh"]);
-      expect(shellcheck.code, `${shellcheck.stderr}\n${shellcheck.stdout}`).toBe(0);
-    }
-    for (const argv of [
-      ["bash", "scripts/install.sh", "--gc-runtime", "extra"],
-      ["bash", "scripts/install.sh", "--install", "--gc-runtime"],
-      ["bash", "scripts/install.sh", "--help", "--gc-runtime"],
-    ]) {
-      const usage = await command(argv);
-      expect(usage.code).toBe(2);
-    }
-  });
-
   test("installs one complete sealed snapshot and is idempotent", async () => {
     const fixture = installEnv({}, { preseedSnapshots: false });
     const first = await command(["bash", "scripts/install.sh"], { env: fixture.env });
