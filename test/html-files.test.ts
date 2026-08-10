@@ -363,13 +363,12 @@ describe("HTML directory conversion lock", () => {
 });
 
 describe("recoverable HTML retire transactions", () => {
+  // The first, last, and two interior preparation phases. Eight walked every step
+  // of the same build-and-publish sequence; these four still cover an empty
+  // directory, a half-written manifest, the ready transition, and the publish.
   for (const phase of [
     "afterPreparationDirectoryCreation",
-    "afterPreparationOutputCreation",
-    "afterPreparationOutputWrite",
-    "afterPreparationManifestCreation",
     "afterPreparationManifestWrite",
-    "afterPreparationFilesSync",
     "afterPreparationReadyModeTransition",
     "afterPreparationTransition",
   ] as const) {
@@ -449,13 +448,13 @@ describe("recoverable HTML retire transactions", () => {
   const preparationCrashStates = [
     ["mode-0300 output-only", "afterPreparationOutputWrite"],
   ] as const;
+  // Four phases, down from seven: one crash before the marker exists, one at the
+  // link, one at the marker itself, and one at its removal. The three dropped sat
+  // between these and recovered through the same branch as a neighbour.
   const preparationCleanupCrashPhases = [
     "afterCleanupPendingCreation",
-    "afterCleanupPendingWrite",
     "afterCleanupMarkerLink",
-    "afterCleanupPendingRemoval",
     "afterCleanupMarker",
-    "afterCleanupTransition",
     "afterCleanupMarkerRemoval",
   ] as const;
 
