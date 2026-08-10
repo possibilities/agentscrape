@@ -169,7 +169,7 @@ describe("CI workflow contract", () => {
     expect(shellValidation).toContain("exit 1");
     expect(shellValidation).toContain("macOS runner; continuing");
 
-    // The process-queue plist moved to Agentdots, which owns every fleet launch
+    // The process-queue plist moved to AgentStart, which owns every fleet launch
     // agent. Nothing here renders a plist, so nothing here validates one.
     expect(steps.some((step) => step.name?.includes("plist"))).toBe(false);
 

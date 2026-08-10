@@ -396,7 +396,7 @@ load_receipt() {
     cmp -s "$file" <(render_receipt "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_SHA") || return 1
   elif (( ${#lines[@]} == 12 )); then
     # Written while this installer still owned the LaunchAgent. The three extra
-    # fields describe a service Agentdots owns now; the identity fields are
+    # fields describe a service AgentStart owns now; the identity fields are
     # still ours, so the receipt is read and rewritten in the current format on
     # the next install rather than refused.
     RECEIPT_FORMAT=serviced; RECEIPT_SHARE="${lines[7]#share=}"; RECEIPT_QUEUE="${lines[8]#queue=}"
@@ -799,7 +799,7 @@ uninstall() {
   make_backup "$DEPLOYED_SHA_PATH" "$UNINSTALL_DEPLOYED_BACKUP"
   make_backup "$RECEIPT_PATH" "$UNINSTALL_RECEIPT_BACKUP"
   fsync_path directory "$BIN_DIR"; fsync_path directory "$STATE_DIR"
-  # The service is Agentdots'; stop it best-effort so it does not keep firing
+  # The service is AgentStart's; stop it best-effort so it does not keep firing
   # at a command that is about to be removed, and leave its removal to its
   # owner. The override is not optional: launchctl domains are per-user, not
   # per-HOME, so an uninstall run against a sandboxed HOME would otherwise
@@ -841,7 +841,7 @@ ensure_directory "$RUNTIME_DIR" "runtime directory" 700
 
 if [[ "$ACTION" == uninstall ]]; then
   uninstall
-  printf 'uninstalled owned agentscrape command; the service belongs to Agentdots\n'
+  printf 'uninstalled owned agentscrape command; the service belongs to AgentStart\n'
   exit 0
 fi
 
@@ -860,7 +860,7 @@ classify_install
 if [[ ! -e "$LOG_PATH" ]]; then touch "$LOG_PATH"; chmod 600 "$LOG_PATH"; fsync_path file "$LOG_PATH"; fsync_path directory "$STATE_DIR"; fi
 if [[ "$PREINSTALL_STATE" == D ]]; then
   # Everything already matches the deployment. The only act left here used
-  # to be confirming the service was loaded, and that is Agentdots' now.
+  # to be confirming the service was loaded, and that is AgentStart's now.
   :
 else
   COMMAND_BACKUP="$BIN_DIR/.agentscrape.rollback.$$"
@@ -878,5 +878,5 @@ else
   trap 'release_lock "$?"' EXIT
 fi
 printf 'installed %s\n' "$COMMAND_PATH"
-printf 'the agentscrape.process-queue service is installed by Agentdots: %s\n' \
-  "$HOME/code/agentdots/scripts/install-launchagents --install"
+printf 'the agentscrape.process-queue service is installed by AgentStart: %s\n' \
+  "$HOME/code/agentstart/scripts/install-launchagents --install"
