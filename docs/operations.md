@@ -167,8 +167,11 @@ survive and are not claimed as killed.
 `bun run check` is the contributor and CI default: typecheck, lint, then the
 serial bounded suite. Before any of that it replaces `HOME` with a private
 temporary directory and removes inherited Agentscrape, XDG, and Bun/Node
-process-option state; `bun run test` and `bun run coverage` use the same
-boundary. The suite makes no live internet calls, but it does use loopback
+process-option state; `bun run static`, `bun run test`, and `bun run coverage`
+use the same boundary. `bun run static` is the typecheck-and-lint half on its
+own, for callers that get the suite from somewhere else — CI's Linux runner
+takes it so the covered run below is the only time the tests execute there.
+The suite makes no live internet calls, but it does use loopback
 networking, so this is an isolation boundary rather than an external-network
 sandbox.
 
@@ -176,6 +179,7 @@ sandbox.
 aggregate line and function coverage, failing closed on missing, malformed, or
 zero-denominator LCOV. That floor is a gate, not a claim of comprehensive
 coverage; work in spawned CLI subprocesses is not necessarily attributed to the
-parent report. CI runs the same check on Ubuntu and macOS, validates the shell
-installer and plist, and rejects whitespace errors or any worktree change —
-`.github/workflows/ci.yml` is the authority on the matrix and steps.
+parent report. CI runs the suite once per runner — macOS through `check`, Linux
+through the coverage gate — validates the shell installer, and rejects
+whitespace errors or any worktree change; `.github/workflows/ci.yml` is the
+authority on the matrix and steps.

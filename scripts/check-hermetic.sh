@@ -3,9 +3,10 @@ set -Eeuo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/check-hermetic.sh <check|test|coverage> [--] [bun test arguments...]
+Usage: scripts/check-hermetic.sh <check|static|test|coverage> [--] [bun test arguments...]
 
   check     Run typecheck, lint, then the serial bounded test command.
+  static    Run only typecheck and lint, with no test run.
   test      Run only the serial bounded test command.
   coverage  Run the serial bounded test command with text and LCOV coverage.
 EOF
@@ -24,7 +25,7 @@ fi
 mode="$1"
 shift
 case "$mode" in
-  check | test | coverage) ;;
+  check | static | test | coverage) ;;
   -h | --help)
     usage
     exit 0
@@ -111,11 +112,18 @@ run_tests() {
   fi
 }
 
+run_static() {
+  tsc --noEmit
+  biome check .
+}
+
 case "$mode" in
   check)
-    tsc --noEmit
-    biome check .
+    run_static
     run_tests
+    ;;
+  static)
+    run_static
     ;;
   test)
     run_tests

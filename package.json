@@ -27,6 +27,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bash scripts/check-hermetic.sh test",
     "coverage": "bash scripts/check-hermetic.sh coverage",
+    "static": "bash scripts/check-hermetic.sh static",
     "generate:schemas": "bun run scripts/generate-schemas.ts",
     "x-readiness": "bun run scripts/check-x-readiness.ts",
     "check": "bash scripts/check-hermetic.sh check"

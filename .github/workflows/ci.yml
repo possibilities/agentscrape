@@ -40,7 +40,10 @@ jobs:
         run: brew install poppler
 
       - name: Run project checks
-        run: bun run check
+        # Linux runs the whole suite again under the coverage gate below, so it
+        # takes only the static gates here. Running `check` on both runners ran
+        # every test twice on Linux and bought no extra signal for it.
+        run: ${{ runner.os == 'Linux' && 'bun run static' || 'bun run check' }}
 
       - name: Run coverage gate
         if: runner.os == 'Linux'

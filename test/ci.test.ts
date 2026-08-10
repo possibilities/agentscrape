@@ -132,11 +132,12 @@ describe("hermetic package checks", () => {
     expect(`${result.stdout}\n${result.stderr}`).toContain("hermetic-env-probe.ts");
   }, 55_000);
 
-  test("package scripts route check, test, and coverage through the wrapper", () => {
+  test("package scripts route check, static, test, and coverage through the wrapper", () => {
     const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
     };
     expect(packageJson.scripts.check).toBe("bash scripts/check-hermetic.sh check");
+    expect(packageJson.scripts.static).toBe("bash scripts/check-hermetic.sh static");
     expect(packageJson.scripts.test).toBe("bash scripts/check-hermetic.sh test");
     expect(packageJson.scripts.coverage).toBe("bash scripts/check-hermetic.sh coverage");
   });
@@ -149,8 +150,8 @@ describe("hermetic package checks", () => {
     });
 
     const wrapper = readFileSync(join(root, "scripts/check-hermetic.sh"), "utf8");
-    expect(wrapper).toContain("<check|test|coverage>");
-    expect(wrapper).toContain("check | test | coverage)");
+    expect(wrapper).toContain("<check|static|test|coverage>");
+    expect(wrapper).toContain("check | static | test | coverage)");
     expect(wrapper).toContain(
       "local test_command=(bun test --parallel=1 --max-concurrency=1 --timeout 60000)",
     );
@@ -206,7 +207,12 @@ describe("CI workflow contract", () => {
 
     const lines = commandLines(job.steps);
     expect(lines).toContain("bun install --frozen-lockfile");
-    expect(lines).toContain("bun run check");
+    // Linux gets the same tests from the coverage gate, so it runs the static
+    // half here; every other runner still runs the whole check.
+    const projectChecks = job.steps.find((step) => step.name === "Run project checks")?.run ?? "";
+    expect(projectChecks).toContain("runner.os == 'Linux'");
+    expect(projectChecks).toContain("bun run static");
+    expect(projectChecks).toContain("bun run check");
   });
 
   test("runs the Linux-only coverage gate before the pinned LCOV upload", () => {
