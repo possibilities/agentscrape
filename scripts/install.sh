@@ -36,12 +36,8 @@ ROOT_DIR="$ROOT"
 LABEL=agentscrape.process-queue
 OWNER_UID="$(id -u)"
 PLATFORM="$(uname -s)"
-DOMAIN="gui/$OWNER_UID"
-SERVICE_TARGET="$DOMAIN/$LABEL"
 BIN_DIR="${AGENTSCRAPE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 COMMAND_PATH="$BIN_DIR/agentscrape"
-LAUNCH_AGENTS_DIR="${AGENTSCRAPE_INSTALL_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
-SERVICE_DEST="$LAUNCH_AGENTS_DIR/$LABEL.plist"
 STATE_DIR="${AGENTSCRAPE_INSTALL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agentscrape}"
 SHARE_DIR="${AGENTSCRAPE_INSTALL_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agentscrape}"
 QUEUE_DIR="$SHARE_DIR/queue"
@@ -53,68 +49,49 @@ RECEIPT_PATH="$STATE_DIR/install-receipt"
 LOCK_DIR="$HOME/.local/state/.agentscrape-installer"
 LOCK_PATH="$LOCK_DIR/install.lock"
 BUN_CMD="${AGENTSCRAPE_INSTALL_BUN:-bun}"
-LAUNCHCTL_CMD="${AGENTSCRAPE_INSTALL_LAUNCHCTL:-launchctl}"
 PLUTIL_CMD="${AGENTSCRAPE_INSTALL_PLUTIL:-plutil}"
 COMMAND_MARKER='agentscrape-installer-owned: agentscrape.command.v1'
 RECEIPT_MARKER='agentscrape-installer-owned: agentscrape.install-receipt.v1'
 
 BUN_BIN=""
-LAUNCHCTL_BIN=""
 DEPLOYED_SHA=""
 DEPLOYED_TREE=""
 SNAPSHOT_ROOT=""
 SNAPSHOT_SOURCE=""
-SNAPSHOT_TEMPLATE=""
-SERVICE_PATH=""
 LOCK_HELD=0
 LOCK_TEMP=""
 LOCK_TOKEN=""
 LOCK_INODE=""
 LOCK_DEVICE=""
-LOADED_SERVICE_STATE=unknown
-LOADED_SERVICE_PRINT=""
-ALLOW_CURRENT_SERVICE_IDENTITY=0
-ALLOW_RECEIPT_SERVICE_IDENTITY=0
 PREINSTALL_STATE=""
-PREVIOUS_SERVICE_LOADED=0
 ROLLBACK_ENABLED=0
 DEPLOYMENT_PUBLISHED=0
 UNINSTALL_ROLLBACK=0
-UNINSTALL_WAS_LOADED=0
 UNINSTALL_TREE=""
 UNINSTALL_HELPER=""
 UNINSTALL_COMMAND_BACKUP=""
-UNINSTALL_SERVICE_BACKUP=""
 UNINSTALL_DEPLOYED_BACKUP=""
 UNINSTALL_RECEIPT_BACKUP=""
 UNINSTALL_COMMAND_INODE=""
 UNINSTALL_COMMAND_DEVICE=""
-UNINSTALL_SERVICE_INODE=""
-UNINSTALL_SERVICE_DEVICE=""
 UNINSTALL_DEPLOYED_INODE=""
 UNINSTALL_DEPLOYED_DEVICE=""
 UNINSTALL_RECEIPT_INODE=""
 UNINSTALL_RECEIPT_DEVICE=""
 COMMAND_CHANGED=0
-SERVICE_CHANGED=0
 RECEIPT_CHANGED=0
 DEPLOYED_CHANGED=0
 COMMAND_BACKUP=""
-SERVICE_BACKUP=""
 RECEIPT_BACKUP=""
 DEPLOYED_BACKUP=""
 COMMAND_TEMP=""
-SERVICE_TEMP=""
 RECEIPT_TEMP=""
 DEPLOYED_TEMP=""
 COMMAND_PRESENT=0
-SERVICE_PRESENT=0
 RECEIPT_PRESENT=0
 DEPLOYED_PRESENT=0
 COMMAND_INODE=""
 COMMAND_DEVICE=""
-SERVICE_INODE=""
-SERVICE_DEVICE=""
 RECEIPT_INODE=""
 RECEIPT_DEVICE=""
 DEPLOYED_INODE=""
@@ -126,11 +103,8 @@ RECEIPT_SOURCE=""
 RECEIPT_SHA=""
 RECEIPT_BUN=""
 RECEIPT_COMMAND=""
-RECEIPT_SERVICE=""
 RECEIPT_SHARE=""
 RECEIPT_QUEUE=""
-RECEIPT_LOG=""
-RECEIPT_SERVICE_PATH=""
 GC_PUBLIC_STATE=""
 GC_PROTECTED_SHA="-"
 GC_AUTHORITY_SHA=""
@@ -257,7 +231,6 @@ canonicalize_data_paths() {
   if [[ -n "$DEPLOYED_SHA" ]]; then
     SNAPSHOT_ROOT="$RUNTIME_DIR/$DEPLOYED_SHA"
     SNAPSHOT_SOURCE="$SNAPSHOT_ROOT/src/cli.ts"
-    SNAPSHOT_TEMPLATE="$SNAPSHOT_ROOT/plist/$LABEL.plist"
   fi
 }
 
@@ -266,16 +239,14 @@ validate_paths() {
   safe_absolute_path "$HOME" || fail "HOME must be a normalized absolute path"
   validate_no_follow_path "$HOME" "HOME"
   validate_owned_directory "$HOME" "HOME"
-  for path in "$BIN_DIR" "$LAUNCH_AGENTS_DIR" "$STATE_DIR" "$SHARE_DIR" "$RUNTIME_DIR"; do
+  for path in "$BIN_DIR" "$STATE_DIR" "$SHARE_DIR" "$RUNTIME_DIR"; do
     validate_no_follow_path "$path" "configured directory"
   done
   [[ "$COMMAND_PATH" == "$HOME/"* ]] || fail "installed command must remain inside HOME"
-  [[ "$SERVICE_DEST" == "$HOME/"* ]] || fail "LaunchAgent must remain inside HOME"
   while read -r path label; do validate_no_follow_path "$path" "$label"; done <<EOF
 $LOG_PATH queue-log
 $DEPLOYED_SHA_PATH deployed-sha
 $RECEIPT_PATH install-receipt
-$SERVICE_DEST LaunchAgent
 EOF
   validate_no_follow_path "$COMMAND_PATH" "installed command" 1
 }
@@ -375,9 +346,6 @@ release_lock() {
 
 shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
-expected_service_path() {
-  printf '%s:%s:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n' "$(dirname "$1")" "$(dirname "$2")"
-}
 
 render_wrapper() {
   local root="$1" sha="$2" bun="$3" source="$4" share="$5"
@@ -392,22 +360,10 @@ escape_xml() {
 
 escape_sed() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
 
-render_plist() {
-  local template="$1" command="$2" service_path="$3" queue="$4" log="$5" text program path_value queue_value log_value
-  [[ -f "$template" && ! -L "$template" ]] || return 1
-  text="$(<"$template")"
-  program="$(escape_sed "$(escape_xml "$command")")"
-  path_value="$(escape_sed "$(escape_xml "$service_path")")"
-  queue_value="$(escape_sed "$(escape_xml "$queue")")"
-  log_value="$(escape_sed "$(escape_xml "$log")")"
-  text="$(printf '%s' "$text" | sed -e "s|__AGENTSCRAPE_PROGRAM__|$program|g" -e "s|__AGENTSCRAPE_PATH__|$path_value|g" -e "s|__AGENTSCRAPE_QUEUE__|$queue_value|g" -e "s|__AGENTSCRAPE_LOG__|$log_value|g")"
-  [[ "$text" != *'__AGENTSCRAPE_'* ]] || return 1
-  printf '%s' "$text"
-}
 
 render_receipt() {
-  printf 'marker=%s\nlabel=%s\nroot=%s\nsource=%s\nbun=%s\ncommand=%s\nservice=%s\nshare=%s\nqueue=%s\nlog=%s\npath=%s\nsha=%s\n' \
-    "$RECEIPT_MARKER" "$LABEL" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+  printf 'marker=%s\nlabel=%s\nroot=%s\nsource=%s\nbun=%s\ncommand=%s\nshare=%s\nqueue=%s\nsha=%s\n' \
+    "$RECEIPT_MARKER" "$LABEL" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 }
 
 file_matches() {
@@ -418,7 +374,6 @@ file_matches() {
 }
 
 wrapper_matches_values() { file_matches "$1" 755 render_wrapper "$2" "$3" "$4" "$5" "$6"; }
-plist_matches_values() { file_matches "$1" 600 render_plist "$2" "$3" "$4" "$5" "$6"; }
 deployed_matches() { file_matches "$1" 600 printf '%s\n' "$2"; }
 
 load_receipt() {
@@ -428,29 +383,36 @@ load_receipt() {
   [[ -f "$file" && ! -L "$file" && "$(path_owner_uid "$file")" == "$OWNER_UID" &&
     "$(path_mode "$file")" == 600 && "$(path_nlink "$file")" == 1 ]] || return 1
   while IFS= read -r line; do lines+=("$line"); done <"$file"
-  (( ${#lines[@]} == 12 || ${#lines[@]} == 8 )) || return 1
+  (( ${#lines[@]} == 9 || ${#lines[@]} == 12 || ${#lines[@]} == 8 )) || return 1
   [[ "${lines[0]}" == "marker=$RECEIPT_MARKER" && "${lines[1]}" == "label=$LABEL" ]] || return 1
   RECEIPT_ROOT="${lines[2]#root=}"; RECEIPT_SOURCE="${lines[3]#source=}"; RECEIPT_BUN="${lines[4]#bun=}"
-  RECEIPT_COMMAND="${lines[5]#command=}"; RECEIPT_SERVICE="${lines[6]#service=}"
+  RECEIPT_COMMAND="${lines[5]#command=}"
   [[ "${lines[2]}" == root=* && "${lines[3]}" == source=* && "${lines[4]}" == bun=* &&
-    "${lines[5]}" == command=* && "${lines[6]}" == service=* ]] || return 1
-  if (( ${#lines[@]} == 12 )); then
-    RECEIPT_FORMAT=current; RECEIPT_SHARE="${lines[7]#share=}"; RECEIPT_QUEUE="${lines[8]#queue=}"
-    RECEIPT_LOG="${lines[9]#log=}"; RECEIPT_SERVICE_PATH="${lines[10]#path=}"; RECEIPT_SHA="${lines[11]#sha=}"
-    [[ "${lines[7]}" == share=* && "${lines[8]}" == queue=* && "${lines[9]}" == log=* && "${lines[10]}" == path=* && "${lines[11]}" == sha=* ]] || return 1
-    cmp -s "$file" <(render_receipt "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SERVICE" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_LOG" "$RECEIPT_SERVICE_PATH" "$RECEIPT_SHA") || return 1
+    "${lines[5]}" == command=* ]] || return 1
+  if (( ${#lines[@]} == 9 )); then
+    RECEIPT_FORMAT=current; RECEIPT_SHARE="${lines[6]#share=}"; RECEIPT_QUEUE="${lines[7]#queue=}"
+    RECEIPT_SHA="${lines[8]#sha=}"
+    [[ "${lines[6]}" == share=* && "${lines[7]}" == queue=* && "${lines[8]}" == sha=* ]] || return 1
+    cmp -s "$file" <(render_receipt "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_SHA") || return 1
+  elif (( ${#lines[@]} == 12 )); then
+    # Written while this installer still owned the LaunchAgent. The three extra
+    # fields describe a service Agentdots owns now; the identity fields are
+    # still ours, so the receipt is read and rewritten in the current format on
+    # the next install rather than refused.
+    RECEIPT_FORMAT=serviced; RECEIPT_SHARE="${lines[7]#share=}"; RECEIPT_QUEUE="${lines[8]#queue=}"
+    RECEIPT_SHA="${lines[11]#sha=}"
+    [[ "${lines[6]}" == service=* && "${lines[7]}" == share=* && "${lines[8]}" == queue=* &&
+      "${lines[9]}" == log=* && "${lines[10]}" == path=* && "${lines[11]}" == sha=* ]] || return 1
   else
-    RECEIPT_FORMAT=legacy; RECEIPT_SHA="${lines[7]#sha=}"; [[ "${lines[7]}" == sha=* ]] || return 1
-    RECEIPT_SHARE="$SHARE_DIR"; RECEIPT_QUEUE="$SHARE_DIR/queue"; RECEIPT_LOG="$STATE_DIR/process-queue.log"
-    RECEIPT_SERVICE_PATH="$(expected_service_path "$RECEIPT_BUN" "$RECEIPT_COMMAND")"
+    RECEIPT_FORMAT=legacy; RECEIPT_SHA="${lines[7]#sha=}"
+    [[ "${lines[6]}" == service=* && "${lines[7]}" == sha=* ]] || return 1
+    RECEIPT_SHARE="$SHARE_DIR"; RECEIPT_QUEUE="$SHARE_DIR/queue"
   fi
-  for line in "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SERVICE" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_LOG"; do safe_absolute_path "$line" || return 1; done
+  for line in "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SHARE" "$RECEIPT_QUEUE"; do safe_absolute_path "$line" || return 1; done
   [[ "$RECEIPT_SOURCE" == "$RECEIPT_ROOT/src/cli.ts" && "$RECEIPT_COMMAND" == "$COMMAND_PATH" &&
-    "$RECEIPT_SERVICE" == "$SERVICE_DEST" && "$RECEIPT_QUEUE" == "$RECEIPT_SHARE/queue" &&
-    "$RECEIPT_LOG" == "$STATE_DIR/process-queue.log" && "$RECEIPT_SHA" =~ ^[0-9a-f]{40}$ ]] || return 1
-  [[ "$RECEIPT_SERVICE_PATH" == "$(expected_service_path "$RECEIPT_BUN" "$RECEIPT_COMMAND")" ]] || return 1
+    "$RECEIPT_QUEUE" == "$RECEIPT_SHARE/queue" && "$RECEIPT_SHA" =~ ^[0-9a-f]{40}$ ]] || return 1
   if [[ "$RECEIPT_ROOT" == "$RUNTIME_DIR/$RECEIPT_SHA" ]]; then
-    [[ "$RECEIPT_FORMAT" == current ]] || return 1
+    [[ "$RECEIPT_FORMAT" == current || "$RECEIPT_FORMAT" == serviced ]] || return 1
     RECEIPT_KIND=snapshot
   else
     RECEIPT_KIND=checkout
@@ -567,7 +529,7 @@ prepare_snapshot() {
   fi
   listing="$(git -C "$ROOT_DIR" ls-tree -r --format='%(objectmode) %(objecttype)' "$sha")"
   while read -r mode type; do [[ "$mode" != 120000 && "$mode" != 160000 && "$type" != commit ]] || fail "refusing tracked symlink or gitlink in runtime commit"; done <<<"$listing"
-  for path in src/cli.ts config/presets config/preset.schema.json config/preset-canaries.schema.json config/corpus-meta.schema.json plist/$LABEL.plist scripts/runtime-snapshot.ts test/corpus package.json bun.lock; do
+  for path in src/cli.ts config/presets config/preset.schema.json config/preset-canaries.schema.json config/corpus-meta.schema.json scripts/runtime-snapshot.ts test/corpus package.json bun.lock; do
     git -C "$ROOT_DIR" cat-file -e "$sha:$path" 2>/dev/null || fail "runtime commit is missing required asset: $path"
   done
   stage="$(mktemp -d "$RUNTIME_DIR/.stage.XXXXXX")"
@@ -600,22 +562,10 @@ receipt_is_authorized() {
 }
 
 receipt_command_matches() { wrapper_matches_values "$COMMAND_PATH" "$RECEIPT_ROOT" "$RECEIPT_SHA" "$RECEIPT_BUN" "$RECEIPT_SOURCE" "$RECEIPT_SHARE"; }
-receipt_plist_matches() {
-  local template
-  if [[ "$RECEIPT_KIND" == snapshot ]]; then template="$RECEIPT_ROOT/plist/$LABEL.plist"
-  else
-    template="$(mktemp "$STATE_DIR/.prior-plist.XXXXXX")"
-    git -C "$ROOT_DIR" show "$RECEIPT_SHA:plist/$LABEL.plist" >"$template"
-  fi
-  plist_matches_values "$SERVICE_DEST" "$template" "$RECEIPT_COMMAND" "$RECEIPT_SERVICE_PATH" "$RECEIPT_QUEUE" "$RECEIPT_LOG"
-  local status=$?
-  [[ "$RECEIPT_KIND" == snapshot ]] || rm -f "$template"
-  return "$status"
-}
 
 current_receipt_matches() {
   [[ "$RECEIPT_FORMAT" == current && "$RECEIPT_KIND" == snapshot ]] || return 1
-  cmp -s "$RECEIPT_PATH" <(render_receipt "$SNAPSHOT_ROOT" "$SNAPSHOT_SOURCE" "$BUN_BIN" "$COMMAND_PATH" "$SERVICE_DEST" "$SHARE_DIR" "$QUEUE_DIR" "$LOG_PATH" "$SERVICE_PATH" "$DEPLOYED_SHA")
+  cmp -s "$RECEIPT_PATH" <(render_receipt "$SNAPSHOT_ROOT" "$SNAPSHOT_SOURCE" "$BUN_BIN" "$COMMAND_PATH" "$SHARE_DIR" "$QUEUE_DIR" "$DEPLOYED_SHA")
 }
 
 capture_identity() {
@@ -634,97 +584,32 @@ capture_identity() {
 }
 
 classify_install() {
-  local command_current=0 service_current=0 receipt_current=0 deployed_current=0 deployed_valid=0
-  capture_identity "$COMMAND_PATH" COMMAND; capture_identity "$SERVICE_DEST" SERVICE
+  local command_current=0 receipt_current=0 deployed_current=0 deployed_valid=0
+  capture_identity "$COMMAND_PATH" COMMAND
   capture_identity "$RECEIPT_PATH" RECEIPT; capture_identity "$DEPLOYED_SHA_PATH" DEPLOYED
   if (( RECEIPT_PRESENT )); then load_receipt || fail "refusing malformed or unowned install receipt"; receipt_is_authorized || fail "install receipt is outside current Git authority"; fi
   if wrapper_matches_values "$COMMAND_PATH" "$SNAPSHOT_ROOT" "$DEPLOYED_SHA" "$BUN_BIN" "$SNAPSHOT_SOURCE" "$SHARE_DIR"; then command_current=1; fi
-  if plist_matches_values "$SERVICE_DEST" "$SNAPSHOT_TEMPLATE" "$COMMAND_PATH" "$SERVICE_PATH" "$QUEUE_DIR" "$LOG_PATH"; then service_current=1; fi
   if (( RECEIPT_PRESENT )) && current_receipt_matches; then receipt_current=1; fi
   if (( DEPLOYED_PRESENT )); then
     if [[ -f "$DEPLOYED_SHA_PATH" && ! -L "$DEPLOYED_SHA_PATH" && "$(<"$DEPLOYED_SHA_PATH")" =~ ^[0-9a-f]{40}$ &&
       "$(path_mode "$DEPLOYED_SHA_PATH")" == 600 && "$(path_nlink "$DEPLOYED_SHA_PATH")" == 1 ]]; then deployed_valid=1; fi
     if deployed_matches "$DEPLOYED_SHA_PATH" "$DEPLOYED_SHA"; then deployed_current=1; fi
   fi
-  if (( ! RECEIPT_PRESENT && ! DEPLOYED_PRESENT && ! COMMAND_PRESENT && ! SERVICE_PRESENT )); then PREINSTALL_STATE=A
-  elif (( receipt_current && command_current && service_current && deployed_current )); then PREINSTALL_STATE=D
-  elif (( receipt_current && command_current && service_current && (! DEPLOYED_PRESENT || (deployed_valid && ! deployed_current)) )); then PREINSTALL_STATE=C
-  elif (( RECEIPT_PRESENT && COMMAND_PRESENT && SERVICE_PRESENT && DEPLOYED_PRESENT )) &&
-    receipt_command_matches && receipt_plist_matches && deployed_matches "$DEPLOYED_SHA_PATH" "$RECEIPT_SHA"; then PREINSTALL_STATE=B
+  if (( ! RECEIPT_PRESENT && ! DEPLOYED_PRESENT && ! COMMAND_PRESENT )); then PREINSTALL_STATE=A
+  elif (( receipt_current && command_current && deployed_current )); then PREINSTALL_STATE=D
+  elif (( receipt_current && command_current && (! DEPLOYED_PRESENT || (deployed_valid && ! deployed_current)) )); then PREINSTALL_STATE=C
+  elif (( RECEIPT_PRESENT && COMMAND_PRESENT && DEPLOYED_PRESENT )) &&
+    receipt_command_matches && deployed_matches "$DEPLOYED_SHA_PATH" "$RECEIPT_SHA"; then PREINSTALL_STATE=B
   else fail "refusing foreign, malformed, or interrupted mixed install state"
   fi
-  ALLOW_CURRENT_SERVICE_IDENTITY=1
-  [[ "$PREINSTALL_STATE" == B ]] && ALLOW_RECEIPT_SERVICE_IDENTITY=1 || true
 }
 
-run_launchctl_bounded() {
-  "$BUN_BIN" -e '
-    import { spawnSync } from "node:child_process";
-    const result = spawnSync(process.argv[1], process.argv.slice(2), {
-      encoding: "utf8", maxBuffer: 65_536, env: process.env,
-    });
-    if (result.error || result.signal || result.status === null) process.exit(125);
-    process.stdout.write(result.stdout ?? "");
-    process.stderr.write(result.stderr ?? "");
-    process.exit(result.status);
-  ' "$LAUNCHCTL_BIN" "$@"
-}
 
 trim_space() { local v="$1"; while [[ "$v" == ' '* || "$v" == $'\t'* ]]; do v="${v#?}"; done; while [[ "$v" == *' ' || "$v" == *$'\t' ]]; do v="${v%?}"; done; printf '%s' "$v"; }
 
-loaded_output_matches() {
-  local program="$1" service_path="$2" plist="$3" line trimmed in_env=0 programs=0 plists=0 envs=0 paths=0 oslogs=0 xpcs=0 invalid=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    trimmed="$(trim_space "$line")"
-    case "$trimmed" in
-      'program = '*) [[ "$trimmed" == "program = $program" ]] && ((programs+=1)) || invalid=1 ;;
-      'path = '*) [[ "$trimmed" == "path = $plist" ]] && ((plists+=1)) || invalid=1 ;;
-      'environment = {') ((envs+=1)); in_env=1 ;;
-      'environment = {'*) ((envs+=1)); [[ "$trimmed" == "environment = { PATH => $service_path }" ]] && ((paths+=1)) || invalid=1 ;;
-      '}') in_env=0 ;;
-      *' => '*)
-        if (( in_env )); then
-          case "$trimmed" in
-            "PATH => $service_path") ((paths+=1)) ;;
-            'OSLogRateLimit => 64') ((oslogs+=1)); (( oslogs == 1 )) || invalid=1 ;;
-            "XPC_SERVICE_NAME => $LABEL") ((xpcs+=1)); (( xpcs == 1 )) || invalid=1 ;;
-            *) invalid=1 ;;
-          esac
-        fi
-        ;;
-    esac
-  done <<<"$LOADED_SERVICE_PRINT"
-  (( ! invalid && programs == 1 && plists == 1 && envs == 1 && paths == 1 ))
-}
 
-inspect_service() {
-  local status expected
-  LOADED_SERVICE_PRINT=""
-  if LOADED_SERVICE_PRINT="$(run_launchctl_bounded print "$SERVICE_TARGET" 2>&1)"; then status=0; else status=$?; fi
-  if (( status == 113 )); then
-    expected="$(printf 'Bad request.\nCould not find service "%s" in domain for user gui: %s' "$LABEL" "$OWNER_UID")"
-    [[ "$LOADED_SERVICE_PRINT" == "$expected" ]] || fail "launchctl returned noncanonical absent-service evidence"
-    LOADED_SERVICE_STATE=absent; return
-  fi
-  (( status == 0 )) || fail "launchctl could not determine service state (status $status)"
-  if (( ALLOW_CURRENT_SERVICE_IDENTITY )) && loaded_output_matches "$COMMAND_PATH" "$SERVICE_PATH" "$SERVICE_DEST"; then LOADED_SERVICE_STATE=owned
-  elif (( ALLOW_RECEIPT_SERVICE_IDENTITY )) && loaded_output_matches "$RECEIPT_COMMAND" "$RECEIPT_SERVICE_PATH" "$RECEIPT_SERVICE"; then LOADED_SERVICE_STATE=owned
-  else LOADED_SERVICE_STATE=foreign
-  fi
-}
 
-check_service() { inspect_service; [[ "$LOADED_SERVICE_STATE" != foreign ]] || fail "refusing foreign loaded service"; }
 
-unload_service() {
-  inspect_service
-  [[ "$LOADED_SERVICE_STATE" != foreign ]] || fail "refusing foreign loaded service"
-  [[ "$LOADED_SERVICE_STATE" == absent ]] && return
-  local output status=0
-  output="$(run_launchctl_bounded bootout "$SERVICE_TARGET" 2>&1)" || status=$?
-  (( status == 0 )) && [[ -z "$output" ]] || fail "launchctl bootout failed"
-  inspect_service
-  [[ "$LOADED_SERVICE_STATE" == absent ]] || fail "service remained loaded after bootout"
-}
 
 make_backup() {
   local source="$1" destination="$2"
@@ -750,7 +635,6 @@ publish_file() {
 prepare_prior_snapshot_and_backups() {
   if (( ! RECEIPT_PRESENT )); then return; fi
   make_backup "$COMMAND_PATH" "$COMMAND_BACKUP"
-  make_backup "$SERVICE_DEST" "$SERVICE_BACKUP"
   make_backup "$RECEIPT_PATH" "$RECEIPT_BACKUP"
   make_backup "$DEPLOYED_SHA_PATH" "$DEPLOYED_BACKUP"
 }
@@ -767,20 +651,16 @@ restore_one() {
   fi
 }
 
-cleanup_temps() { rm -f "$COMMAND_TEMP" "$SERVICE_TEMP" "$RECEIPT_TEMP" "$DEPLOYED_TEMP" "$COMMAND_BACKUP" "$SERVICE_BACKUP" "$RECEIPT_BACKUP" "$DEPLOYED_BACKUP" 2>/dev/null || true; }
+cleanup_temps() { rm -f "$COMMAND_TEMP" "$RECEIPT_TEMP" "$DEPLOYED_TEMP" "$COMMAND_BACKUP" "$RECEIPT_BACKUP" "$DEPLOYED_BACKUP" 2>/dev/null || true; }
 
 rollback_install() {
   local status="$?" ok=1
   if (( ROLLBACK_ENABLED && ! DEPLOYMENT_PUBLISHED )); then
     set +e
-    inspect_service
-    [[ "$LOADED_SERVICE_STATE" != owned ]] || "$LAUNCHCTL_BIN" bootout "$SERVICE_TARGET" >/dev/null 2>&1 || ok=0
     restore_one "$DEPLOYED_BACKUP" "$DEPLOYED_SHA_PATH" "$DEPLOYED_CHANGED" 600 || ok=0
     restore_one "$RECEIPT_BACKUP" "$RECEIPT_PATH" "$RECEIPT_CHANGED" 600 || ok=0
-    restore_one "$SERVICE_BACKUP" "$SERVICE_DEST" "$SERVICE_CHANGED" 600 || ok=0
     restore_one "$COMMAND_BACKUP" "$COMMAND_PATH" "$COMMAND_CHANGED" 755 || ok=0
-    fsync_path directory "$STATE_DIR" || ok=0; fsync_path directory "$LAUNCH_AGENTS_DIR" || ok=0; fsync_path directory "$BIN_DIR" || ok=0
-    if (( PREVIOUS_SERVICE_LOADED )); then "$LAUNCHCTL_BIN" bootstrap "$DOMAIN" "$SERVICE_DEST" >/dev/null 2>&1 || ok=0; fi
+    fsync_path directory "$STATE_DIR" || ok=0; fsync_path directory "$BIN_DIR" || ok=0
     (( ok )) && printf 'agentscrape-install: restored previous owned state after failure\n' >&2 || printf 'agentscrape-install: rollback incomplete; manual cleanup required\n' >&2
     cleanup_temps
     set -e
@@ -792,20 +672,14 @@ rollback_install() {
 failpoint() { [[ "${AGENTSCRAPE_INSTALL_TEST_FAILPOINT:-}" != "$1" ]] || { printf 'agentscrape-install: injected failure at %s\n' "$1" >&2; return 97; }; }
 
 install_public_files() {
-  COMMAND_TEMP="$(mktemp "$BIN_DIR/.agentscrape.XXXXXX")"; SERVICE_TEMP="$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.XXXXXX")"
+  COMMAND_TEMP="$(mktemp "$BIN_DIR/.agentscrape.XXXXXX")"
   RECEIPT_TEMP="$(mktemp "$STATE_DIR/.install-receipt.XXXXXX")"; DEPLOYED_TEMP="$(mktemp "$STATE_DIR/.deployed-sha.XXXXXX")"
   render_wrapper "$SNAPSHOT_ROOT" "$DEPLOYED_SHA" "$BUN_BIN" "$SNAPSHOT_SOURCE" "$SHARE_DIR" >"$COMMAND_TEMP"; chmod 755 "$COMMAND_TEMP"
-  render_plist "$SNAPSHOT_TEMPLATE" "$COMMAND_PATH" "$SERVICE_PATH" "$QUEUE_DIR" "$LOG_PATH" >"$SERVICE_TEMP"; chmod 600 "$SERVICE_TEMP"; "$PLUTIL_CMD" -lint "$SERVICE_TEMP" >/dev/null
-  render_receipt "$SNAPSHOT_ROOT" "$SNAPSHOT_SOURCE" "$BUN_BIN" "$COMMAND_PATH" "$SERVICE_DEST" "$SHARE_DIR" "$QUEUE_DIR" "$LOG_PATH" "$SERVICE_PATH" "$DEPLOYED_SHA" >"$RECEIPT_TEMP"; chmod 600 "$RECEIPT_TEMP"
+  render_receipt "$SNAPSHOT_ROOT" "$SNAPSHOT_SOURCE" "$BUN_BIN" "$COMMAND_PATH" "$SHARE_DIR" "$QUEUE_DIR" "$DEPLOYED_SHA" >"$RECEIPT_TEMP"; chmod 600 "$RECEIPT_TEMP"
   printf '%s\n' "$DEPLOYED_SHA" >"$DEPLOYED_TEMP"; chmod 600 "$DEPLOYED_TEMP"
-  for file in "$COMMAND_TEMP" "$SERVICE_TEMP" "$RECEIPT_TEMP" "$DEPLOYED_TEMP"; do fsync_path file "$file"; done
+  for file in "$COMMAND_TEMP" "$RECEIPT_TEMP" "$DEPLOYED_TEMP"; do fsync_path file "$file"; done
 
-  unload_service
   publish_file "$COMMAND_TEMP" "$COMMAND_PATH" "$COMMAND_PRESENT" "$COMMAND_INODE" "$COMMAND_DEVICE" command; COMMAND_TEMP=""; COMMAND_CHANGED=1; fsync_path directory "$BIN_DIR"; failpoint after-command
-  publish_file "$SERVICE_TEMP" "$SERVICE_DEST" "$SERVICE_PRESENT" "$SERVICE_INODE" "$SERVICE_DEVICE" plist; SERVICE_TEMP=""; SERVICE_CHANGED=1; fsync_path directory "$LAUNCH_AGENTS_DIR"; failpoint after-plist
-  ALLOW_CURRENT_SERVICE_IDENTITY=1
-  "$LAUNCHCTL_BIN" bootstrap "$DOMAIN" "$SERVICE_DEST"
-  inspect_service; [[ "$LOADED_SERVICE_STATE" == owned ]] || fail "loaded service failed strict verification"
   publish_file "$RECEIPT_TEMP" "$RECEIPT_PATH" "$RECEIPT_PRESENT" "$RECEIPT_INODE" "$RECEIPT_DEVICE" receipt; RECEIPT_TEMP=""; RECEIPT_CHANGED=1; fsync_path directory "$STATE_DIR"; failpoint after-receipt
   publish_file "$DEPLOYED_TEMP" "$DEPLOYED_SHA_PATH" "$DEPLOYED_PRESENT" "$DEPLOYED_INODE" "$DEPLOYED_DEVICE" deployed; DEPLOYED_TEMP=""; DEPLOYED_CHANGED=1
   failpoint before-deployed-fsync
@@ -832,16 +706,13 @@ rollback_uninstall() {
   if (( UNINSTALL_ROLLBACK )); then
     set +e
     restore_uninstall_file "$UNINSTALL_COMMAND_BACKUP" "$COMMAND_PATH" "$UNINSTALL_COMMAND_INODE" "$UNINSTALL_COMMAND_DEVICE" || ok=0
-    restore_uninstall_file "$UNINSTALL_SERVICE_BACKUP" "$SERVICE_DEST" "$UNINSTALL_SERVICE_INODE" "$UNINSTALL_SERVICE_DEVICE" || ok=0
     restore_uninstall_file "$UNINSTALL_DEPLOYED_BACKUP" "$DEPLOYED_SHA_PATH" "$UNINSTALL_DEPLOYED_INODE" "$UNINSTALL_DEPLOYED_DEVICE" || ok=0
     restore_uninstall_file "$UNINSTALL_RECEIPT_BACKUP" "$RECEIPT_PATH" "$UNINSTALL_RECEIPT_INODE" "$UNINSTALL_RECEIPT_DEVICE" || ok=0
     fsync_path directory "$BIN_DIR" || ok=0
-    fsync_path directory "$LAUNCH_AGENTS_DIR" || ok=0
     fsync_path directory "$STATE_DIR" || ok=0
-    if (( UNINSTALL_WAS_LOADED )); then "$LAUNCHCTL_BIN" bootstrap "$DOMAIN" "$SERVICE_DEST" >/dev/null 2>&1 || ok=0; fi
     (( ok )) && printf 'agentscrape-install: restored owned state after uninstall failure\n' >&2 ||
       printf 'agentscrape-install: uninstall rollback incomplete; manual cleanup required\n' >&2
-    rm -f "$UNINSTALL_COMMAND_BACKUP" "$UNINSTALL_SERVICE_BACKUP" "$UNINSTALL_DEPLOYED_BACKUP" "$UNINSTALL_RECEIPT_BACKUP" 2>/dev/null || true
+    rm -f "$UNINSTALL_COMMAND_BACKUP" "$UNINSTALL_DEPLOYED_BACKUP" "$UNINSTALL_RECEIPT_BACKUP" 2>/dev/null || true
     set -e
   fi
   release_lock "$status"
@@ -860,39 +731,27 @@ gc_checkout_authority() {
 
 gc_classify_public_state() {
   local path present=0
-  ALLOW_CURRENT_SERVICE_IDENTITY=0; ALLOW_RECEIPT_SERVICE_IDENTITY=0
-  for path in "$COMMAND_PATH" "$SERVICE_DEST" "$RECEIPT_PATH" "$DEPLOYED_SHA_PATH"; do
+  for path in "$COMMAND_PATH" "$RECEIPT_PATH" "$DEPLOYED_SHA_PATH"; do
     [[ ! -e "$path" && ! -L "$path" ]] || ((present+=1))
   done
   if (( present == 0 )); then
-    inspect_service
-    [[ "$LOADED_SERVICE_STATE" == absent ]] || fail "runtime GC requires an exactly absent service when uninstalled"
     GC_PUBLIC_STATE=uninstalled; GC_PROTECTED_SHA="-"
     return
   fi
-  (( present == 4 )) || fail "runtime GC refuses incomplete or ambiguous public install state"
+  (( present == 3 )) || fail "runtime GC refuses incomplete or ambiguous public install state"
 
   validate_regular_slot "$COMMAND_PATH" "runtime GC command"
-  validate_regular_slot "$SERVICE_DEST" "runtime GC LaunchAgent"
   validate_regular_slot "$RECEIPT_PATH" "runtime GC receipt"
   validate_regular_slot "$DEPLOYED_SHA_PATH" "runtime GC deployed SHA"
   load_receipt || fail "runtime GC refuses a malformed or unowned install receipt"
   [[ "$RECEIPT_FORMAT" == current && "$RECEIPT_KIND" == snapshot ]] ||
     fail "runtime GC requires a current snapshot-backed install receipt"
   [[ "$RECEIPT_SHARE" == "$SHARE_DIR" && "$RECEIPT_QUEUE" == "$QUEUE_DIR" &&
-    "$RECEIPT_LOG" == "$LOG_PATH" && "$RECEIPT_COMMAND" == "$COMMAND_PATH" &&
-    "$RECEIPT_SERVICE" == "$SERVICE_DEST" && "$RECEIPT_BUN" == "$BUN_BIN" &&
-    "$RECEIPT_SERVICE_PATH" == "$SERVICE_PATH" ]] ||
+    "$RECEIPT_COMMAND" == "$COMMAND_PATH" && "$RECEIPT_BUN" == "$BUN_BIN" ]] ||
     fail "runtime GC receipt does not agree with configured paths"
   deployed_matches "$DEPLOYED_SHA_PATH" "$RECEIPT_SHA" ||
     fail "runtime GC deployed SHA does not agree with its receipt"
   receipt_command_matches || fail "runtime GC refuses a mismatched installed command"
-  receipt_plist_matches || fail "runtime GC refuses a mismatched LaunchAgent"
-
-  ALLOW_RECEIPT_SERVICE_IDENTITY=1
-  inspect_service
-  [[ "$LOADED_SERVICE_STATE" == owned || "$LOADED_SERVICE_STATE" == absent ]] ||
-    fail "runtime GC refuses a foreign loaded service"
   GC_PUBLIC_STATE=installed; GC_PROTECTED_SHA="$RECEIPT_SHA"
 }
 
@@ -915,10 +774,9 @@ garbage_collect_runtime() {
 
 uninstall() {
   local evidence=0
-  for path in "$COMMAND_PATH" "$SERVICE_DEST" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"; do [[ ! -e "$path" && ! -L "$path" ]] || evidence=1; done
-  ALLOW_CURRENT_SERVICE_IDENTITY=0; ALLOW_RECEIPT_SERVICE_IDENTITY=0
-  if (( ! evidence )); then check_service; return; fi
-  for path in "$COMMAND_PATH" "$SERVICE_DEST" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"; do validate_regular_slot "$path" "uninstall artifact"; [[ -e "$path" ]] || fail "refusing incomplete uninstall state"; done
+  for path in "$COMMAND_PATH" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"; do [[ ! -e "$path" && ! -L "$path" ]] || evidence=1; done
+  if (( ! evidence )); then return; fi
+  for path in "$COMMAND_PATH" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"; do validate_regular_slot "$path" "uninstall artifact"; [[ -e "$path" ]] || fail "refusing incomplete uninstall state"; done
   load_receipt || fail "refusing malformed uninstall receipt"
   if [[ "$RECEIPT_KIND" == snapshot ]]; then
     verify_sealed_snapshot || fail "uninstall snapshot failed sealed preflight or verification"
@@ -930,47 +788,44 @@ uninstall() {
     [[ -f "$RECEIPT_BUN" && -x "$RECEIPT_BUN" ]] || fail "checkout uninstall receipt Bun is unavailable"
   fi
   receipt_command_matches || fail "refusing unrelated installed command"
-  receipt_plist_matches || fail "refusing unrelated LaunchAgent"
   deployed_matches "$DEPLOYED_SHA_PATH" "$RECEIPT_SHA" || fail "refusing unrelated deployed SHA"
   UNINSTALL_COMMAND_INODE="$(path_inode "$COMMAND_PATH")"; UNINSTALL_COMMAND_DEVICE="$(path_device "$COMMAND_PATH")"
-  UNINSTALL_SERVICE_INODE="$(path_inode "$SERVICE_DEST")"; UNINSTALL_SERVICE_DEVICE="$(path_device "$SERVICE_DEST")"
   UNINSTALL_DEPLOYED_INODE="$(path_inode "$DEPLOYED_SHA_PATH")"; UNINSTALL_DEPLOYED_DEVICE="$(path_device "$DEPLOYED_SHA_PATH")"
   UNINSTALL_RECEIPT_INODE="$(path_inode "$RECEIPT_PATH")"; UNINSTALL_RECEIPT_DEVICE="$(path_device "$RECEIPT_PATH")"
   UNINSTALL_COMMAND_BACKUP="$BIN_DIR/.agentscrape.uninstall-rollback.$$"
-  UNINSTALL_SERVICE_BACKUP="$LAUNCH_AGENTS_DIR/.$LABEL.uninstall-rollback.$$"
   UNINSTALL_DEPLOYED_BACKUP="$STATE_DIR/.deployed-sha.uninstall-rollback.$$"
   UNINSTALL_RECEIPT_BACKUP="$STATE_DIR/.install-receipt.uninstall-rollback.$$"
   make_backup "$COMMAND_PATH" "$UNINSTALL_COMMAND_BACKUP"
-  make_backup "$SERVICE_DEST" "$UNINSTALL_SERVICE_BACKUP"
   make_backup "$DEPLOYED_SHA_PATH" "$UNINSTALL_DEPLOYED_BACKUP"
   make_backup "$RECEIPT_PATH" "$UNINSTALL_RECEIPT_BACKUP"
-  fsync_path directory "$BIN_DIR"; fsync_path directory "$LAUNCH_AGENTS_DIR"; fsync_path directory "$STATE_DIR"
-  ALLOW_RECEIPT_SERVICE_IDENTITY=1
-  inspect_service
-  [[ "$LOADED_SERVICE_STATE" != foreign ]] || fail "refusing foreign loaded service"
-  [[ "$LOADED_SERVICE_STATE" != owned ]] || UNINSTALL_WAS_LOADED=1
+  fsync_path directory "$BIN_DIR"; fsync_path directory "$STATE_DIR"
+  # The service is Agentdots'; stop it best-effort so it does not keep firing
+  # at a command that is about to be removed, and leave its removal to its
+  # owner. The override is not optional: launchctl domains are per-user, not
+  # per-HOME, so an uninstall run against a sandboxed HOME would otherwise
+  # boot out the operator's real service.
+  local launchctl_cmd="${AGENTSCRAPE_INSTALL_LAUNCHCTL:-launchctl}"
+  if [[ "$launchctl_cmd" != none ]] && command -v "$launchctl_cmd" >/dev/null 2>&1; then
+    "$launchctl_cmd" bootout "gui/$OWNER_UID/$LABEL" >/dev/null 2>&1 || true
+  fi
   UNINSTALL_ROLLBACK=1
   trap rollback_uninstall EXIT HUP INT TERM
-  unload_service
   path_has_identity "$COMMAND_PATH" "$UNINSTALL_COMMAND_INODE" "$UNINSTALL_COMMAND_DEVICE" || fail "command changed during uninstall"
-  path_has_identity "$SERVICE_DEST" "$UNINSTALL_SERVICE_INODE" "$UNINSTALL_SERVICE_DEVICE" || fail "plist changed during uninstall"
   path_has_identity "$DEPLOYED_SHA_PATH" "$UNINSTALL_DEPLOYED_INODE" "$UNINSTALL_DEPLOYED_DEVICE" || fail "deployed SHA changed during uninstall"
   path_has_identity "$RECEIPT_PATH" "$UNINSTALL_RECEIPT_INODE" "$UNINSTALL_RECEIPT_DEVICE" || fail "receipt changed during uninstall"
-  rm "$COMMAND_PATH" "$SERVICE_DEST" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"
-  fsync_path directory "$BIN_DIR"; fsync_path directory "$LAUNCH_AGENTS_DIR"; fsync_path directory "$STATE_DIR"
+  rm "$COMMAND_PATH" "$DEPLOYED_SHA_PATH" "$RECEIPT_PATH"
+  fsync_path directory "$BIN_DIR"; fsync_path directory "$STATE_DIR"
   UNINSTALL_ROLLBACK=0
-  rm -f "$UNINSTALL_COMMAND_BACKUP" "$UNINSTALL_SERVICE_BACKUP" "$UNINSTALL_DEPLOYED_BACKUP" "$UNINSTALL_RECEIPT_BACKUP"
-  fsync_path directory "$BIN_DIR"; fsync_path directory "$LAUNCH_AGENTS_DIR"; fsync_path directory "$STATE_DIR"
+  rm -f "$UNINSTALL_COMMAND_BACKUP" "$UNINSTALL_DEPLOYED_BACKUP" "$UNINSTALL_RECEIPT_BACKUP"
+  fsync_path directory "$BIN_DIR"; fsync_path directory "$STATE_DIR"
   trap 'release_lock "$?"' EXIT
 }
 
 command -v "$BUN_CMD" >/dev/null 2>&1 || fail "Bun is required"
 BUN_BIN="$(command -v "$BUN_CMD")"
-command -v "$LAUNCHCTL_CMD" >/dev/null 2>&1 || fail "launchctl is required"
-LAUNCHCTL_BIN="$(command -v "$LAUNCHCTL_CMD")"
 if [[ "$ACTION" == install ]]; then command -v "$PLUTIL_CMD" >/dev/null 2>&1 || fail "plutil is required"; fi
-for executable in "$BUN_BIN" "$LAUNCHCTL_BIN"; do safe_absolute_path "$executable" || fail "tool must resolve to an absolute path"; [[ -f "$executable" && -x "$executable" ]] || fail "tool is not executable"; done
-SERVICE_PATH="$(expected_service_path "$BUN_BIN" "$COMMAND_PATH")"
+safe_absolute_path "$BUN_BIN" || fail "tool must resolve to an absolute path"
+[[ -f "$BUN_BIN" && -x "$BUN_BIN" ]] || fail "tool is not executable"
 validate_paths
 acquire_lock
 trap 'release_lock "$?"' EXIT
@@ -986,36 +841,34 @@ ensure_directory "$RUNTIME_DIR" "runtime directory" 700
 
 if [[ "$ACTION" == uninstall ]]; then
   uninstall
-  printf 'uninstalled owned agentscrape command and service\n'
+  printf 'uninstalled owned agentscrape command; the service belongs to Agentdots\n'
   exit 0
 fi
 
 DEPLOYED_SHA="$(git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || fail "current Git authority is unavailable"
 DEPLOYED_TREE="$(resolve_git_tree "$ROOT_DIR" "$DEPLOYED_SHA")" || fail "HEAD lacks an authenticated runtime helper"
-SNAPSHOT_ROOT="$RUNTIME_DIR/$DEPLOYED_SHA"; SNAPSHOT_SOURCE="$SNAPSHOT_ROOT/src/cli.ts"; SNAPSHOT_TEMPLATE="$SNAPSHOT_ROOT/plist/$LABEL.plist"
+SNAPSHOT_ROOT="$RUNTIME_DIR/$DEPLOYED_SHA"; SNAPSHOT_SOURCE="$SNAPSHOT_ROOT/src/cli.ts"
 ensure_directory "$BIN_DIR" "install bin directory" 700
-ensure_directory "$LAUNCH_AGENTS_DIR" "LaunchAgents directory" 700
 ensure_directory "$SHARE_DIR" "share directory" 700
 canonicalize_data_paths
 ensure_directory "$QUEUE_DIR" "queue directory" 700
 ensure_directory "$FAILED_DIR" "failed directory" 700
-for pair in "$LOG_PATH:queue log" "$DEPLOYED_SHA_PATH:deployed SHA" "$RECEIPT_PATH:install receipt" "$SERVICE_DEST:LaunchAgent"; do validate_regular_slot "${pair%%:*}" "${pair#*:}"; done
+for pair in "$LOG_PATH:queue log" "$DEPLOYED_SHA_PATH:deployed SHA" "$RECEIPT_PATH:install receipt"; do validate_regular_slot "${pair%%:*}" "${pair#*:}"; done
 validate_regular_slot "$COMMAND_PATH" "installed command" 1
 prepare_snapshot "$DEPLOYED_SHA" "$DEPLOYED_TREE" "$BUN_BIN"
 classify_install
-check_service
 if [[ ! -e "$LOG_PATH" ]]; then touch "$LOG_PATH"; chmod 600 "$LOG_PATH"; fsync_path file "$LOG_PATH"; fsync_path directory "$STATE_DIR"; fi
 if [[ "$PREINSTALL_STATE" == D ]]; then
-  if [[ "$LOADED_SERVICE_STATE" == absent ]]; then "$LAUNCHCTL_BIN" bootstrap "$DOMAIN" "$SERVICE_DEST"; inspect_service; [[ "$LOADED_SERVICE_STATE" == owned ]] || fail "loaded service verification failed"; fi
+  # Everything already matches the deployment. The only act left here used
+  # to be confirming the service was loaded, and that is Agentdots' now.
+  :
 else
-  COMMAND_BACKUP="$BIN_DIR/.agentscrape.rollback.$$"; SERVICE_BACKUP="$LAUNCH_AGENTS_DIR/.$LABEL.rollback.$$"
+  COMMAND_BACKUP="$BIN_DIR/.agentscrape.rollback.$$"
   RECEIPT_BACKUP="$STATE_DIR/.install-receipt.rollback.$$"; DEPLOYED_BACKUP="$STATE_DIR/.deployed-sha.rollback.$$"
   prepare_prior_snapshot_and_backups
-  [[ "$LOADED_SERVICE_STATE" != owned ]] || PREVIOUS_SERVICE_LOADED=1
   ROLLBACK_ENABLED=1
   trap rollback_install EXIT HUP INT TERM
   if [[ "$PREINSTALL_STATE" == C ]]; then
-    if [[ "$LOADED_SERVICE_STATE" == absent ]]; then "$LAUNCHCTL_BIN" bootstrap "$DOMAIN" "$SERVICE_DEST"; inspect_service; [[ "$LOADED_SERVICE_STATE" == owned ]] || fail "loaded service verification failed"; fi
     DEPLOYED_TEMP="$(mktemp "$STATE_DIR/.deployed-sha.XXXXXX")"; printf '%s\n' "$DEPLOYED_SHA" >"$DEPLOYED_TEMP"; chmod 600 "$DEPLOYED_TEMP"; fsync_path file "$DEPLOYED_TEMP"
     publish_file "$DEPLOYED_TEMP" "$DEPLOYED_SHA_PATH" "$DEPLOYED_PRESENT" "$DEPLOYED_INODE" "$DEPLOYED_DEVICE" deployed; DEPLOYED_TEMP=""; DEPLOYED_CHANGED=1; failpoint before-deployed-fsync; fsync_path directory "$STATE_DIR"; DEPLOYMENT_PUBLISHED=1; ROLLBACK_ENABLED=0
   else
@@ -1024,4 +877,6 @@ else
   cleanup_temps
   trap 'release_lock "$?"' EXIT
 fi
-printf 'installed %s\ninstalled and loaded %s\n' "$COMMAND_PATH" "$SERVICE_DEST"
+printf 'installed %s\n' "$COMMAND_PATH"
+printf 'the agentscrape.process-queue service is installed by Agentdots: %s\n' \
+  "$HOME/code/agentdots/scripts/install-launchagents --install"
