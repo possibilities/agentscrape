@@ -340,6 +340,10 @@ grep -q '<plist version="1.0">' "$2"
   const env: Record<string, string | undefined> = {
     HOME: home,
     PATH: `${tools}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    // launchd domains are per-user, not per-HOME. Without this every uninstall
+    // in this suite would boot out the operator's real agentscrape.process-queue,
+    // which is exactly what happened when the fake launchctl was removed.
+    AGENTSCRAPE_INSTALL_LAUNCHCTL: "none",
     AGENTSCRAPE_FAKE_BUN_LOG: bunLog,
     AGENTSCRAPE_FAKE_PLUTIL_LOG: plutilLog,
     AGENTSCRAPE_FAKE_PRODUCTION_TEMPLATE: suiteProductionTemplate,
@@ -361,7 +365,7 @@ function shellQuote(value: string): string {
 async function seedCheckoutInstallation(
   fixture: ReturnType<typeof installEnv>,
   checkout: string,
-  format: "current" | "legacy" = "current",
+  format: "current" | "serviced" | "legacy" = "current",
 ): Promise<void> {
   const shaResult = await command([
     "git",
@@ -399,12 +403,21 @@ async function seedCheckoutInstallation(
     `source=${source}`,
     `bun=${bun}`,
     `command=${commandPath}`,
-    // The current format stops at the fields this installer owns; the legacy
-    // one is kept verbatim, service path and all, because reading it is the
-    // migration this change has to keep working.
+    // Three shapes have to be readable: the current one, which stops at the
+    // fields this installer still owns; "serviced", written while it also owned
+    // the LaunchAgent; and the original legacy receipt. The last two are read
+    // for their identity and rewritten current on the next install.
     ...(format === "current"
       ? [`share=${canonicalShare}`, `queue=${queue}`]
-      : [`service=${service}`]),
+      : format === "serviced"
+        ? [
+            `service=${service}`,
+            `share=${canonicalShare}`,
+            `queue=${queue}`,
+            `log=${log}`,
+            `path=${dirname(bun)}:${dirname(commandPath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+          ]
+        : [`service=${service}`]),
     `sha=${sha}`,
   ];
   writeFileSync(join(canonicalState, "install-receipt"), `${receiptLines.join("\n")}\n`);
@@ -1083,7 +1096,7 @@ describe("installer", () => {
     });
     expect(failed.code).not.toBe(0);
     expect(failed.stderr).toContain("restored previous owned state");
-    expect([commandPath, service, receipt, deployed].map(text)).toEqual(before);
+    expect([commandPath, receipt, deployed].map(text)).toEqual(before);
     expect(text(receipt)).toContain(`root=${prior}`);
     expect(existsSync(join(state, "runtime", priorSha))).toBeFalse();
   });
@@ -1212,12 +1225,14 @@ describe("installer", () => {
   });
 
   test("uninstalls helper-bearing current and legacy checkout receipts", async () => {
-    for (const format of ["current", "legacy"] as const) {
+    for (const format of ["current", "serviced", "legacy"] as const) {
       const fixture = installEnv();
       const prior = await committedPhaseCheckout();
       await seedCheckoutInstallation(fixture, prior, format);
       const receipt = join(fixture.home, ".local/state/agentscrape/install-receipt");
-      expect(text(receipt).trimEnd().split("\n")).toHaveLength(format === "current" ? 12 : 8);
+      expect(text(receipt).trimEnd().split("\n")).toHaveLength(
+        format === "current" ? 9 : format === "serviced" ? 12 : 8,
+      );
 
       if (format === "current") {
         const foreign = await command(["bash", "scripts/install.sh", "--uninstall"], {
