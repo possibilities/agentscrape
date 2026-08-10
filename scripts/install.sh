@@ -799,11 +799,14 @@ uninstall() {
   make_backup "$DEPLOYED_SHA_PATH" "$UNINSTALL_DEPLOYED_BACKUP"
   make_backup "$RECEIPT_PATH" "$UNINSTALL_RECEIPT_BACKUP"
   fsync_path directory "$BIN_DIR"; fsync_path directory "$STATE_DIR"
-  # The service is Agentdots'; stop it best-effort so it does not keep
-  # firing at a command that is about to be removed, and leave its removal
-  # to its owner.
-  if command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$OWNER_UID/$LABEL" >/dev/null 2>&1 || true
+  # The service is Agentdots'; stop it best-effort so it does not keep firing
+  # at a command that is about to be removed, and leave its removal to its
+  # owner. The override is not optional: launchctl domains are per-user, not
+  # per-HOME, so an uninstall run against a sandboxed HOME would otherwise
+  # boot out the operator's real service.
+  local launchctl_cmd="${AGENTSCRAPE_INSTALL_LAUNCHCTL:-launchctl}"
+  if [[ "$launchctl_cmd" != none ]] && command -v "$launchctl_cmd" >/dev/null 2>&1; then
+    "$launchctl_cmd" bootout "gui/$OWNER_UID/$LABEL" >/dev/null 2>&1 || true
   fi
   UNINSTALL_ROLLBACK=1
   trap rollback_uninstall EXIT HUP INT TERM
