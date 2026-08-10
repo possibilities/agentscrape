@@ -1,4 +1,4 @@
-# Agentscrape
+# AgentScrape
 
 [![CI](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml)
 
