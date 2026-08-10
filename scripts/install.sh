@@ -620,6 +620,12 @@ current_receipt_matches() {
 
 capture_identity() {
   local path="$1" prefix="$2"
+  # A symlink is neither absent nor ours, and it is the one case this
+  # classification cannot express: leaving it unset reads as absent, the state
+  # machine then picks a fresh install, and the no-replace publish dies on
+  # EEXIST with an errno and a rollback instead of a reason. Refuse it here,
+  # before anything is written, the way every other foreign artifact is.
+  [[ ! -L "$path" ]] || fail "refusing to overwrite unrelated symlink: $path"
   if [[ -e "$path" && ! -L "$path" ]]; then
     printf -v "${prefix}_PRESENT" 1
     printf -v "${prefix}_INODE" '%s' "$(path_inode "$path")"
