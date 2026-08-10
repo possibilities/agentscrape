@@ -46,8 +46,6 @@ const REQUIRED = new Map<string, SnapshotType>([
   ["config/preset.schema.json", "file"],
   ["config/preset-canaries.schema.json", "file"],
   ["config/corpus-meta.schema.json", "file"],
-  ["plist", "directory"],
-  ["plist/agentscrape.process-queue.plist", "file"],
   ["scripts", "directory"],
   ["scripts/runtime-snapshot.ts", "file"],
   ["test", "directory"],

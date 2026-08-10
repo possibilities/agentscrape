@@ -264,8 +264,6 @@ function installEnv(
   const state = temp("agentscrape-install-launchctl-", options.persistent);
   const bunLog = join(state, "bun.log");
   const plutilLog = join(state, "plutil.log");
-  const launchctlLog = join(state, "launchctl.log");
-  const serviceState = join(state, "service.env");
 
   mkdirSync(tools, { recursive: true });
   writeExecutable(
@@ -334,162 +332,6 @@ printf '%s\n' "$*" >>"$AGENTSCRAPE_FAKE_PLUTIL_LOG"
 grep -q '<plist version="1.0">' "$2"
 `,
   );
-  writeExecutable(
-    join(tools, "launchctl"),
-    `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"$AGENTSCRAPE_FAKE_LAUNCHCTL_LOG"
-state_file="$AGENTSCRAPE_FAKE_LAUNCHCTL_STATE"
-fail_once_file="\${AGENTSCRAPE_FAKE_LAUNCHCTL_STATE}.bootstrap-failed-once"
-extract() {
-  local file="$1" key="$2"
-  awk -v key="$2" '
-    $0 ~ "<key>" key "</key>" {
-      while (getline) {
-        if ($0 ~ /<string>/) {
-          gsub(/^.*<string>|<\\/string>.*$/, "")
-          print
-          exit
-        }
-      }
-    }
-  ' "$1"
-}
-case "\${1:-}" in
-  bootstrap)
-    [[ $# -eq 3 ]] || exit 1
-    # Real launchctl does not accept bootstrapping the same loaded label again.
-    [[ ! -f "$state_file" ]] || exit 37
-    if [[ -n "\${FAKE_LAUNCHCTL_REMOVE_PATH_ON_BOOTSTRAP:-}" &&
-      ! -e "\${AGENTSCRAPE_FAKE_LAUNCHCTL_STATE}.removed-path-once" ]]; then
-      /bin/rm -rf "$FAKE_LAUNCHCTL_REMOVE_PATH_ON_BOOTSTRAP"
-      : >"\${AGENTSCRAPE_FAKE_LAUNCHCTL_STATE}.removed-path-once"
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_FAIL_BOOTSTRAP_ONCE:-0}" == "1" && ! -e "$fail_once_file" ]]; then
-      : >"$fail_once_file"
-      exit 1
-    fi
-    plist="$3"
-    label="$(extract "$plist" Label)"
-    program="$(extract "$plist" ProgramArguments)"
-    path_value="$(extract "$plist" PATH)"
-    {
-      printf 'domain=%s\n' "$2"
-      printf 'label=%s\n' "$label"
-      printf 'program=%s\n' "$program"
-      printf 'path=%s\n' "$path_value"
-      printf 'plist=%s\n' "$plist"
-    } >"$state_file"
-    ;;
-  print)
-    [[ $# -eq 2 ]] || exit 1
-    if [[ "\${FAKE_LAUNCHCTL_FAIL_PRINT:-0}" == "1" ]]; then
-      printf 'transient launchctl failure\n' >&2
-      exit 75
-    fi
-    if [[ ! -f "$state_file" ]]; then
-      target="\${2#gui/}"
-      uid="\${target%%/*}"
-      label="\${target#*/}"
-      printf 'Bad request.\n' >&2
-      printf 'Could not find service "%s" in domain for user gui: %s\n' "$label" "$uid" >&2
-      exit 113
-    fi
-    source "$state_file"
-    [[ "$2" == "$domain/$label" ]] || exit 1
-    if [[ "\${FAKE_LAUNCHCTL_FOREIGN_PRINT:-0}" == "1" ]]; then
-      printf 'program = /tmp/foreign-agentscrape\n'
-      printf 'path = /tmp/foreign-agentscrape.process-queue.plist\n'
-      printf 'environment = { PATH => /tmp/foreign-bin }\n'
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_FORGED_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s-forged\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = { PATH => %s }\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_WRONG_PATH_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = { PATH => %s:/tmp/forged }\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_WRONG_PLIST_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'path = %s-forged\n' "$plist"
-      printf 'environment = { PATH => %s }\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_DUPLICATE_PROGRAM_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'program = %s\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = { PATH => %s }\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_DUPLICATE_PATH_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = { PATH => %s }\n' "$path"
-      printf 'environment = { PATH => %s }\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_BASH_ENV_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = {\n  PATH => %s\n  BASH_ENV => /tmp/foreign\n}\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_NODE_OPTIONS_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = {\n  PATH => %s\n  NODE_OPTIONS => --require=/tmp/foreign\n}\n' "$path"
-      exit 0
-    fi
-    if [[ "\${FAKE_LAUNCHCTL_DUPLICATE_UNKNOWN_PRINT:-0}" == "1" ]]; then
-      printf 'program = %s\n' "$program"
-      printf 'path = %s\n' "$plist"
-      printf 'environment = {\n  PATH => %s\n  FOREIGN => one\n  FOREIGN => two\n}\n' "$path"
-      exit 0
-    fi
-    printf 'service = %s\n' "$domain/$label"
-    printf 'program = %s\n' "$program"
-    printf 'path = %s\n' "$plist"
-    printf 'default environment = {\n'
-    printf '  PATH => /usr/bin:/bin:/usr/sbin:/sbin\n'
-    printf '}\n'
-    oslog=64
-    xpc="$label"
-    [[ "\${FAKE_LAUNCHCTL_WRONG_OSLOG_PRINT:-0}" == "1" ]] && oslog=63
-    [[ "\${FAKE_LAUNCHCTL_WRONG_XPC_PRINT:-0}" == "1" ]] && xpc=foreign
-    printf 'environment = {\n'
-    printf '  OSLogRateLimit => %s\n' "$oslog"
-    printf '  PATH => %s\n' "$path"
-    printf '  XPC_SERVICE_NAME => %s\n' "$xpc"
-    printf '}\n'
-    ;;
-  bootout)
-    [[ $# -eq 2 ]] || exit 1
-    if [[ "\${FAKE_LAUNCHCTL_FAIL_BOOTOUT:-0}" == "1" ]]; then
-      printf 'transient bootout failure\n' >&2
-      exit 75
-    fi
-    if [[ ! -f "$state_file" ]]; then
-      exit 0
-    fi
-    source "$state_file"
-    [[ "$2" == "$domain/$label" ]] || exit 1
-    rm -f "$state_file"
-    ;;
-  *)
-    echo "unsupported fake launchctl command: \${1:-}" >&2
-    exit 1
-    ;;
-esac
-`,
-  );
-
   const preseedSnapshots = options.preseedSnapshots !== false;
   const fullSnapshots =
     options.fullSnapshots === true || options.fastSnapshotVerification === false;
@@ -500,8 +342,6 @@ esac
     PATH: `${tools}:/usr/bin:/bin:/usr/sbin:/sbin`,
     AGENTSCRAPE_FAKE_BUN_LOG: bunLog,
     AGENTSCRAPE_FAKE_PLUTIL_LOG: plutilLog,
-    AGENTSCRAPE_FAKE_LAUNCHCTL_LOG: launchctlLog,
-    AGENTSCRAPE_FAKE_LAUNCHCTL_STATE: serviceState,
     AGENTSCRAPE_FAKE_PRODUCTION_TEMPLATE: suiteProductionTemplate,
     AGENTSCRAPE_FAKE_FAST_SNAPSHOT_VERIFY:
       preseedSnapshots && options.fastSnapshotVerification !== false ? "1" : "0",
@@ -511,20 +351,11 @@ esac
     ...overrides,
   };
 
-  return { home, tools, state, bunLog, plutilLog, launchctlLog, serviceState, env };
+  return { home, tools, state, bunLog, plutilLog, env };
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-function xmlEscape(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
 }
 
 async function seedCheckoutInstallation(
@@ -546,13 +377,7 @@ async function seedCheckoutInstallation(
   const service = join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist");
   const state = join(fixture.home, ".local/state/agentscrape");
   const share = join(fixture.home, ".local/share/agentscrape");
-  for (const directory of [
-    dirname(commandPath),
-    dirname(service),
-    state,
-    share,
-    join(share, "queue"),
-  ]) {
+  for (const directory of [dirname(commandPath), state, share, join(share, "queue")]) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
   }
@@ -562,20 +387,11 @@ async function seedCheckoutInstallation(
   const bun = join(fixture.tools, "bun");
   const queue = join(canonicalShare, "queue");
   const log = join(canonicalState, "process-queue.log");
-  const servicePath = `${dirname(bun)}:${dirname(commandPath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
   writeFileSync(
     commandPath,
     `#!/usr/bin/env bash\nset -euo pipefail\n# agentscrape-installer-owned: agentscrape.command.v1\n# label: agentscrape.process-queue\n# source-root: ${checkout}\n# source-sha: ${sha}\n# bun: ${bun}\nexport AGENTSCRAPE_DATA_HOME=${shellQuote(canonicalShare)}\nexec ${shellQuote(bun)} ${shellQuote(source)} "$@"\n`,
   );
   chmodSync(commandPath, 0o755);
-  const plist = text(join(checkout, "plist/agentscrape.process-queue.plist"))
-    .replace(/\n$/, "")
-    .replaceAll("__AGENTSCRAPE_PROGRAM__", xmlEscape(commandPath))
-    .replaceAll("__AGENTSCRAPE_PATH__", xmlEscape(servicePath))
-    .replaceAll("__AGENTSCRAPE_QUEUE__", xmlEscape(queue))
-    .replaceAll("__AGENTSCRAPE_LOG__", xmlEscape(log));
-  writeFileSync(service, plist);
-  chmodSync(service, 0o600);
   const receiptLines = [
     "marker=agentscrape-installer-owned: agentscrape.install-receipt.v1",
     "label=agentscrape.process-queue",
@@ -583,10 +399,12 @@ async function seedCheckoutInstallation(
     `source=${source}`,
     `bun=${bun}`,
     `command=${commandPath}`,
-    `service=${service}`,
+    // The current format stops at the fields this installer owns; the legacy
+    // one is kept verbatim, service path and all, because reading it is the
+    // migration this change has to keep working.
     ...(format === "current"
-      ? [`share=${canonicalShare}`, `queue=${queue}`, `log=${log}`, `path=${servicePath}`]
-      : []),
+      ? [`share=${canonicalShare}`, `queue=${queue}`]
+      : [`service=${service}`]),
     `sha=${sha}`,
   ];
   writeFileSync(join(canonicalState, "install-receipt"), `${receiptLines.join("\n")}\n`);
@@ -598,11 +416,6 @@ async function seedCheckoutInstallation(
     log,
   ])
     chmodSync(path, 0o600);
-  const loaded = await command(
-    [join(fixture.tools, "launchctl"), "bootstrap", `gui/${process.getuid?.() ?? 0}`, service],
-    { env: fixture.env },
-  );
-  expect(loaded.code, loaded.stderr).toBe(0);
 }
 
 function fixtureSha(value: number): string {
@@ -634,7 +447,7 @@ async function createTinySnapshot(
 ): Promise<string> {
   const assetsRoot = options.assetsRoot ?? sourceRoot;
   const snapshot = join(runtime, sha);
-  for (const path of ["src", "config/presets", "plist", "scripts", "test/corpus", "node_modules"])
+  for (const path of ["src", "config/presets", "scripts", "test/corpus", "node_modules"])
     mkdirSync(join(snapshot, path), { recursive: true, mode: 0o700 });
   writeFileSync(join(snapshot, "src/cli.ts"), "console.log('tiny runtime');\n");
   for (const name of [
@@ -645,10 +458,6 @@ async function createTinySnapshot(
     writeFileSync(join(snapshot, "config", name), "{}\n");
   writeFileSync(join(snapshot, "package.json"), "{}\n");
   writeFileSync(join(snapshot, "bun.lock"), "");
-  cpSync(
-    join(assetsRoot, "plist/agentscrape.process-queue.plist"),
-    join(snapshot, "plist/agentscrape.process-queue.plist"),
-  );
   cpSync(join(assetsRoot, "scripts/install.sh"), join(snapshot, "scripts/install.sh"));
   cpSync(
     join(assetsRoot, "scripts/runtime-snapshot.ts"),
@@ -713,20 +522,11 @@ async function seedSnapshotInstallation(
   }
   const bun = join(fixture.tools, "bun");
   const source = join(snapshot, "src/cli.ts");
-  const servicePath = `${dirname(bun)}:${dirname(commandPath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
   writeFileSync(
     commandPath,
     `#!/usr/bin/env bash\nset -euo pipefail\n# agentscrape-installer-owned: agentscrape.command.v1\n# label: agentscrape.process-queue\n# source-root: ${snapshot}\n# source-sha: ${sha}\n# bun: ${bun}\nexport AGENTSCRAPE_DATA_HOME=${shellQuote(layout.share)}\nexec ${shellQuote(bun)} ${shellQuote(source)} "$@"\n`,
   );
   chmodSync(commandPath, 0o755);
-  const plist = text(join(snapshot, "plist/agentscrape.process-queue.plist"))
-    .replace(/\n$/, "")
-    .replaceAll("__AGENTSCRAPE_PROGRAM__", xmlEscape(commandPath))
-    .replaceAll("__AGENTSCRAPE_PATH__", xmlEscape(servicePath))
-    .replaceAll("__AGENTSCRAPE_QUEUE__", xmlEscape(queue))
-    .replaceAll("__AGENTSCRAPE_LOG__", xmlEscape(log));
-  writeFileSync(service, plist);
-  chmodSync(service, 0o600);
   writeFileSync(
     receipt,
     [
@@ -736,29 +536,21 @@ async function seedSnapshotInstallation(
       `source=${source}`,
       `bun=${bun}`,
       `command=${commandPath}`,
-      `service=${service}`,
       `share=${layout.share}`,
       `queue=${queue}`,
-      `log=${log}`,
-      `path=${servicePath}`,
       `sha=${sha}`,
       "",
     ].join("\n"),
   );
   writeFileSync(deployed, `${sha}\n`);
   writeFileSync(log, "");
-  for (const path of [service, receipt, deployed, log]) chmodSync(path, 0o600);
-  const loaded = await command(
-    [join(fixture.tools, "launchctl"), "bootstrap", `gui/${process.getuid?.() ?? 0}`, service],
-    { env: fixture.env },
-  );
-  expect(loaded.code, loaded.stderr).toBe(0);
+  for (const path of [receipt, deployed, log]) chmodSync(path, 0o600);
   return {
     state: layout.state,
     runtime: layout.runtime,
     snapshot,
     sha,
-    publicPaths: [commandPath, service, receipt, deployed],
+    publicPaths: [commandPath, receipt, deployed],
   };
 }
 
@@ -926,15 +718,10 @@ beforeAll(async () => {
     suiteSnapshotTemplates.push({ kind, sha, root: stage });
 
     // Most installer tests deliberately fake the authenticated verifier. They need only the
-    // sealed plist template used to render public bytes, not a 26 MB / 3,200-entry runtime copy
-    // in every disposable HOME. Tests that inspect, corrupt, or execute a snapshot opt into full.
+    // sealed helper and manifest, not a 26 MB / 3,200-entry runtime copy in every disposable
+    // HOME. Tests that inspect, corrupt, or execute a snapshot opt into full.
     const fastStage = join(suiteCheckoutParent, `snapshot-fast-${name}`);
-    mkdirSync(join(fastStage, "plist"), { recursive: true, mode: 0o700 });
     mkdirSync(join(fastStage, "scripts"), { recursive: true, mode: 0o700 });
-    cpSync(
-      join(stage, "plist/agentscrape.process-queue.plist"),
-      join(fastStage, "plist/agentscrape.process-queue.plist"),
-    );
     cpSync(
       join(stage, "scripts/runtime-snapshot.ts"),
       join(fastStage, "scripts/runtime-snapshot.ts"),
@@ -943,10 +730,8 @@ beforeAll(async () => {
       join(stage, ".agentscrape-runtime-manifest.json"),
       join(fastStage, ".agentscrape-runtime-manifest.json"),
     );
-    chmodSync(join(fastStage, "plist/agentscrape.process-queue.plist"), 0o400);
     chmodSync(join(fastStage, "scripts/runtime-snapshot.ts"), 0o400);
     chmodSync(join(fastStage, ".agentscrape-runtime-manifest.json"), 0o400);
-    chmodSync(join(fastStage, "plist"), 0o500);
     chmodSync(join(fastStage, "scripts"), 0o500);
     chmodSync(fastStage, 0o500);
     suiteFastSnapshotTemplates.push({ kind, sha, root: fastStage });
@@ -979,7 +764,6 @@ describe("installer", () => {
     expect(first.code, first.stderr).toBe(0);
     const state = join(fixture.home, ".local/state/agentscrape");
     const commandPath = join(fixture.home, ".local/bin/agentscrape");
-    const plistPath = join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist");
     const shaPath = join(state, "deployed-sha");
     const receiptPath = join(state, "install-receipt");
     const sha = text(shaPath).trim();
@@ -1006,20 +790,19 @@ describe("installer", () => {
         (entry: { path: string }) => entry.path === "node_modules/cheerio/package.json",
       ),
     ).toBeTrue();
-    expect(text(receiptPath).trimEnd().split("\n")).toHaveLength(12);
+    expect(text(receiptPath).trimEnd().split("\n")).toHaveLength(9);
     expect(text(commandPath)).toContain(`/runtime/${sha}`);
-    expect(text(plistPath)).toContain("agentscrape.process-queue");
     expect(text(fixture.bunLog)).toContain(
       "install --frozen-lockfile --production --ignore-scripts --backend=copyfile",
     );
-    const identities = [commandPath, plistPath, receiptPath, shaPath, runtime].map(
+    const identities = [commandPath, receiptPath, shaPath, runtime].map(
       (path) => statSync(path).ino,
     );
     const second = await command(["bash", "scripts/install.sh"], { env: fixture.env });
     expect(second.code, second.stderr).toBe(0);
-    expect(
-      [commandPath, plistPath, receiptPath, shaPath, runtime].map((path) => statSync(path).ino),
-    ).toEqual(identities);
+    expect([commandPath, receiptPath, shaPath, runtime].map((path) => statSync(path).ino)).toEqual(
+      identities,
+    );
   });
 
   test("explicit installed GC preserves public/current state, deletes stale roots, and is idempotent", async () => {
@@ -1144,7 +927,7 @@ describe("installer", () => {
     unlinkSync(linkedRoot);
   });
 
-  test("GC refuses current mismatch, foreign service, and a missing protected root", async () => {
+  test("GC refuses a current mismatch and a missing protected root", async () => {
     const fixture = installEnv({}, { preseedSnapshots: false });
     const installed = await seedSnapshotInstallation(fixture, fixtureSha(12));
     const stale = await createTinySnapshot(installed.runtime, fixtureSha(13));
@@ -1157,12 +940,6 @@ describe("installer", () => {
     expect(mismatch.code).toBe(1);
     expect(existsSync(stale)).toBeTrue();
     writeFileSync(deployed, `${installed.sha}\n`);
-
-    const foreign = await command(["bash", "scripts/install.sh", "--gc-runtime"], {
-      env: { ...fixture.env, FAKE_LAUNCHCTL_FOREIGN_PRINT: "1" },
-    });
-    expect(foreign.code).toBe(1);
-    expect(existsSync(stale)).toBeTrue();
 
     makeWritable(installed.snapshot);
     rmSync(installed.snapshot, { recursive: true });
@@ -1259,7 +1036,7 @@ describe("installer", () => {
     expect(existsSync(join(fixture.home, ".local/bin/agentscrape"))).toBeFalse();
   });
 
-  test("pins data home in wrapper and plist", async () => {
+  test("pins data home in the wrapper", async () => {
     const fixture = installEnv({}, { fullSnapshots: true });
     const share = join(fixture.home, "custom-data");
     const installed = await command(["bash", "scripts/install.sh"], {
@@ -1267,9 +1044,6 @@ describe("installer", () => {
     });
     expect(installed.code, installed.stderr).toBe(0);
     expect(text(join(fixture.home, ".local/bin/agentscrape"))).toContain(share);
-    expect(
-      text(join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist")),
-    ).toContain(join(share, "queue"));
   });
 
   test("migrates an authorized helperless checkout receipt", async () => {
@@ -1300,11 +1074,10 @@ describe("installer", () => {
     await seedCheckoutInstallation(fixture, prior);
     const state = realpathSync(join(fixture.home, ".local/state/agentscrape"));
     const commandPath = join(fixture.home, ".local/bin/agentscrape");
-    const service = join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist");
     const receipt = join(state, "install-receipt");
     const deployed = join(state, "deployed-sha");
     const priorSha = text(deployed).trim();
-    const before = [commandPath, service, receipt, deployed].map(text);
+    const before = [commandPath, receipt, deployed].map(text);
     const failed = await command(["bash", "scripts/install.sh"], {
       env: { ...fixture.env, AGENTSCRAPE_INSTALL_TEST_FAILPOINT: "after-command" },
     });
@@ -1334,7 +1107,7 @@ describe("installer", () => {
     const interrupted = installEnv();
     const complete = await command(["bash", "scripts/install.sh"], { env: interrupted.env });
     expect(complete.code, complete.stderr).toBe(0);
-    rmSync(join(interrupted.home, "Library/LaunchAgents/agentscrape.process-queue.plist"));
+    rmSync(join(interrupted.home, ".local/bin/agentscrape"));
     const refusedInterrupted = await command(["bash", "scripts/install.sh"], {
       env: interrupted.env,
     });
@@ -1351,7 +1124,6 @@ describe("installer", () => {
     expect(failed.stderr).toContain("restored previous owned state");
     for (const path of [
       join(fixture.home, ".local/bin/agentscrape"),
-      join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist"),
       join(fixture.home, ".local/state/agentscrape/install-receipt"),
       join(fixture.home, ".local/state/agentscrape/deployed-sha"),
     ])
@@ -1399,26 +1171,6 @@ describe("installer", () => {
     await new Response(first.stderr).text();
   });
 
-  test("strict launchctl identity and errors fail closed", async () => {
-    const fixture = installEnv();
-    const installed = await command(["bash", "scripts/install.sh"], { env: fixture.env });
-    expect(installed.code, installed.stderr).toBe(0);
-    for (const overrides of [
-      { FAKE_LAUNCHCTL_FAIL_PRINT: "1" },
-      { FAKE_LAUNCHCTL_FOREIGN_PRINT: "1" },
-      { FAKE_LAUNCHCTL_WRONG_PATH_PRINT: "1" },
-      { FAKE_LAUNCHCTL_WRONG_OSLOG_PRINT: "1" },
-      { FAKE_LAUNCHCTL_WRONG_XPC_PRINT: "1" },
-      { FAKE_LAUNCHCTL_BASH_ENV_PRINT: "1" },
-    ]) {
-      const refused = await command(["bash", "scripts/install.sh", "--uninstall"], {
-        env: { ...fixture.env, ...overrides },
-      });
-      expect(refused.code).not.toBe(0);
-      expect(existsSync(join(fixture.home, ".local/bin/agentscrape"))).toBeTrue();
-    }
-  });
-
   test("uninstall validates exact ownership, retains snapshots, and is idempotent", async () => {
     const fixture = installEnv();
     const installed = await command(["bash", "scripts/install.sh"], { env: fixture.env });
@@ -1426,11 +1178,6 @@ describe("installer", () => {
     const state = join(fixture.home, ".local/state/agentscrape");
     const runtime = join(realpathSync(state), "runtime");
     const roots = readdirSync(runtime);
-    const failed = await command(["bash", "scripts/install.sh", "--uninstall"], {
-      env: { ...fixture.env, FAKE_LAUNCHCTL_FAIL_BOOTOUT: "1" },
-    });
-    expect(failed.code).not.toBe(0);
-    expect(existsSync(join(fixture.home, ".local/bin/agentscrape"))).toBeTrue();
     const removed = await command(["bash", "scripts/install.sh", "--uninstall"], {
       env: fixture.env,
     });
@@ -1449,7 +1196,6 @@ describe("installer", () => {
     await seedCheckoutInstallation(fixture, prior);
     const paths = [
       join(fixture.home, ".local/bin/agentscrape"),
-      join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist"),
       join(fixture.home, ".local/state/agentscrape/install-receipt"),
       join(fixture.home, ".local/state/agentscrape/deployed-sha"),
     ];
@@ -1511,9 +1257,6 @@ describe("installer", () => {
     });
     expect(removed.code, removed.stderr).toBe(0);
     expect(existsSync(join(fixture.home, ".local/bin/agentscrape"))).toBeFalse();
-    expect(
-      existsSync(join(fixture.home, "Library/LaunchAgents/agentscrape.process-queue.plist")),
-    ).toBeFalse();
     expect(existsSync(join(state, "deployed-sha"))).toBeFalse();
     expect(existsSync(join(state, "install-receipt"))).toBeFalse();
     expect(existsSync(snapshot)).toBeTrue();
