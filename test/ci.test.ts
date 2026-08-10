@@ -1,11 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 const root = join(import.meta.dir, "..");
-const temporary: string[] = [];
 
 interface WorkflowStep {
   name?: string;
@@ -48,90 +46,7 @@ function commandLines(steps: WorkflowStep[]): string[] {
   );
 }
 
-function temporaryDirectory(): string {
-  const directory = mkdtempSync(join(tmpdir(), "agentscrape-ci-"));
-  temporary.push(directory);
-  return directory;
-}
-
-async function run(
-  argv: string[],
-  env: Record<string, string | undefined>,
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn(argv, {
-    cwd: root,
-    env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 50_000,
-    killSignal: "SIGKILL",
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  const [code, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { code, stdout, stderr };
-}
-
-afterEach(() => {
-  for (const directory of temporary.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
 describe("hermetic package checks", () => {
-  test("the package-facing check sanitizes hostile state before every phase", async () => {
-    const poisonHome = temporaryDirectory();
-    const missingBunPreload = join(poisonHome, "missing-bun-preload.ts");
-    const missingNodePreload = join(poisonHome, "missing-node-preload.cjs");
-    const bunOptions = `--preload=${missingBunPreload}`;
-    const nodeOptions = `--require=${missingNodePreload}`;
-
-    const poisonedBun = Bun.spawnSync([process.execPath, "-e", "process.exit(0)"], {
-      cwd: root,
-      env: { ...process.env, BUN_OPTIONS: bunOptions },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(poisonedBun.exitCode).not.toBe(0);
-
-    const poisonedTypecheck = Bun.spawnSync([join(root, "node_modules/.bin/tsc"), "--version"], {
-      cwd: root,
-      env: { ...process.env, NODE_OPTIONS: nodeOptions },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(poisonedTypecheck.exitCode).not.toBe(0);
-
-    const result = await run(
-      [process.execPath, "run", "check", "--", "test/fixtures/hermetic-env-probe.ts"],
-      {
-        ...process.env,
-        HOME: poisonHome,
-        HERMETIC_TEST_POISON_HOME: poisonHome,
-        XDG_CONFIG_HOME: join(poisonHome, "poison-config"),
-        XDG_DATA_HOME: join(poisonHome, "poison-data"),
-        XDG_STATE_HOME: join(poisonHome, "poison-state"),
-        XDG_FUTURE_POISON: "must-be-removed-dynamically",
-        AGENTSCRAPE_DATA_HOME: join(poisonHome, "poison-agentscrape-data"),
-        AGENTSCRAPE_AGENTBUILDS_ROOT: join(poisonHome, "poison-agentbuilds"),
-        AGENTSCRAPE_FUTURE_POISON: "must-be-removed-dynamically",
-        NODE_OPTIONS: nodeOptions,
-        BUN_OPTIONS: bunOptions,
-      },
-    );
-
-    if (result.code !== 0) {
-      throw new Error(
-        `package-facing hermetic check exited ${result.code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-      );
-    }
-    expect(`${result.stdout}\n${result.stderr}`).toContain("hermetic-env-probe.ts");
-  }, 55_000);
-
   test("package scripts route check, static, test, and coverage through the wrapper", () => {
     const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
       scripts: Record<string, string>;

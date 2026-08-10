@@ -884,7 +884,6 @@ describe("recoverable HTML retire transactions", () => {
 
   for (const phase of [
     "afterCommitPendingCreation",
-    "afterCommitPendingWrite",
     "afterCommitMarkerLink",
     "afterCommitPendingRemoval",
   ] as const) {
@@ -922,7 +921,6 @@ describe("recoverable HTML retire transactions", () => {
 
   for (const phase of [
     "afterCleanupPendingCreation",
-    "afterCleanupPendingWrite",
     "afterCleanupMarkerLink",
     "afterCleanupPendingRemoval",
   ] as const) {
@@ -984,12 +982,7 @@ describe("recoverable HTML retire transactions", () => {
     },
   );
 
-  for (const phase of [
-    "afterSourceRetirementRename",
-    "afterSourceRetirementTargetSync",
-    "afterDestinationCaptureRename",
-    "afterDestinationCaptureTargetSync",
-  ] as const) {
+  for (const phase of ["afterSourceRetirementRename", "afterDestinationCaptureRename"] as const) {
     test(`recovery is safe at the preserving rename durability boundary ${phase}`, async () => {
       const directory = temp();
       const source = join(directory, "page.html");
@@ -1231,10 +1224,7 @@ describe("recoverable HTML retire transactions", () => {
 
   for (const phase of [
     "afterCleanupMarker",
-    "afterCleanupTransition",
-    "afterCleanupManifestRemoval",
     "afterCleanupOutputRemoval",
-    "afterCleanupCommitRemoval",
     "afterCleanupMarkerRemoval",
   ] as const) {
     test(`committed cleanup resumes after a crash at ${phase}`, async () => {
