@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml)
 
-Fetch and extract web content through an agent-friendly Bun CLI: Markdown from any URL, navigation links, live or recorded feeds, and strict provider presets.
+Give it a URL and get what is actually on the page — Markdown, navigation links, live or recorded feeds, and strict provider presets — through an agent-friendly Bun CLI.
 
-Agentscrape never writes back to remote providers, but it is not read-only locally — commands write destinations, corpus fixtures, queue state, and browser session state, and the installer mutates the user command and LaunchAgent paths it owns. See the [threat model](docs/threat-model.md) for claimed boundaries.
+Agentscrape never writes back to remote providers, but it is not read-only locally. Commands write destination files, corpus fixtures, queue state, and browser session state, and the installer changes the user command and LaunchAgent paths it owns. See the [threat model](docs/threat-model.md) for the claimed boundaries.
 
 ## Install
 
@@ -30,7 +30,7 @@ agentscrape discover-feed --source-url https://example.com/blog
 
 ## Without the private toolchain
 
-Several routes delegate to local tools that are not published. Agentscrape degrades to a smaller working CLI rather than failing to install:
+Several routes delegate to local tools that are not published. Agentscrape then degrades to a smaller working CLI rather than failing to install:
 
 | Works with no extra tools | Needs an unpublished tool |
 | --- | --- |
@@ -39,7 +39,7 @@ Several routes delegate to local tools that are not published. Agentscrape degra
 | GitHub and Gist reads, when `gh` is installed and authenticated | Queue records that request `summarize` (`summaryctl`) |
 | Recorded feed parsing, corpus replay, HTML conversion, preset inspection, `doctor` | — |
 
-`agentscrape doctor` reports which of these are present. Missing optional tools are informational: routes that need them fail closed with a classified error rather than silently returning worse content.
+`agentscrape doctor` reports which of these are present. A missing optional tool is informational: the routes that need it fail closed with a classified error, rather than silently returning worse content.
 
 ## Develop
 
