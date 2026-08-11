@@ -74,13 +74,14 @@ updated in the same change:
   only.
 
 `AGENTSCRAPE_CONDUIT_SOCKET` and `AGENTSCRAPE_CONDUIT_TOKEN_FILE` are set by
-agentbrain's worker plist and asserted by funk; renaming them breaks an
+agentbrain's worker plist and asserted when the machine's services are
+verified; renaming them breaks an
 installed deployment, not just this repo.
 
 ## The skill is the advertised runbook
 
-`skills/scrape/SKILL.md` is the canonical deep runbook for this CLI. Funk's
-skills scanner installs it globally — `npx skills add` against this checkout,
+`skills/scrape/SKILL.md` is the canonical deep runbook for this CLI. AgentStart's
+skills scan installs it globally — `npx skills add` against this checkout,
 discovering nested `skills/<name>/SKILL.md` — so every Claude Code, Codex, and
 Pi session lists its name and frontmatter description without loading the body.
 That description is all most sessions ever see; it has to route on its own. `--agent-help` stays in the binary as the fallback for a
@@ -99,7 +100,7 @@ This checkout is one of the agent* fleet under `~/code`. Shared machinery
 lives in two siblings, and some changes here must cascade:
 
 - Skills under `skills/<name>/` ship globally through AgentStart's scan
-  (`~/code/agentstart/scripts/sync-skills`, run six-hourly by Funk's
+  (`~/code/agentstart/scripts/sync-skills`, run six-hourly by the scheduled
   updater): a SKILL.md edit is live within six hours, or on demand by
   running that script. Whether a new skill earns a TOOLS.md advertisement
   line is a deliberate decision — `agentwiki get tool-advertisement-policy`.
