@@ -90,6 +90,20 @@ describe("hermetic package checks", () => {
       "coverage)\n    run_tests\n    bun scripts/check-coverage.ts coverage/lcov.info 0.70",
     );
   });
+
+  test("installer migrates the previous service label without weakening receipt ownership", () => {
+    const installer = readFileSync(join(root, "scripts/install.sh"), "utf8");
+    expect(installer).toContain("LEGACY_LABEL=agentscrape.process-queue");
+    expect(installer).toContain(
+      '"$RECEIPT_LABEL" == "$LABEL" || "$RECEIPT_LABEL" == "$LEGACY_LABEL"',
+    );
+    expect(installer).toContain(
+      '"$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_SHA" "$RECEIPT_LABEL"',
+    );
+    expect(installer).toContain(
+      'RECEIPT_FORMAT" == current && "$RECEIPT_KIND" == snapshot && "$RECEIPT_LABEL" == "$LABEL"',
+    );
+  });
 });
 
 describe("CI workflow contract", () => {

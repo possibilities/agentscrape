@@ -364,8 +364,9 @@ escape_sed() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
 
 
 render_receipt() {
+  local label="${8:-$LABEL}"
   printf 'marker=%s\nlabel=%s\nroot=%s\nsource=%s\nbun=%s\ncommand=%s\nshare=%s\nqueue=%s\nsha=%s\n' \
-    "$RECEIPT_MARKER" "$LABEL" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+    "$RECEIPT_MARKER" "$label" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 }
 
 file_matches() {
@@ -397,7 +398,7 @@ load_receipt() {
     RECEIPT_FORMAT=current; RECEIPT_SHARE="${lines[6]#share=}"; RECEIPT_QUEUE="${lines[7]#queue=}"
     RECEIPT_SHA="${lines[8]#sha=}"
     [[ "${lines[6]}" == share=* && "${lines[7]}" == queue=* && "${lines[8]}" == sha=* ]] || return 1
-    cmp -s "$file" <(render_receipt "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_SHA") || return 1
+    cmp -s "$file" <(render_receipt "$RECEIPT_ROOT" "$RECEIPT_SOURCE" "$RECEIPT_BUN" "$RECEIPT_COMMAND" "$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_SHA" "$RECEIPT_LABEL") || return 1
   elif (( ${#lines[@]} == 12 )); then
     # Written while this installer still owned the LaunchAgent. The three extra
     # fields describe a service AgentStart owns now; the identity fields are
