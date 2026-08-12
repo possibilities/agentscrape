@@ -33,7 +33,8 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ROOT_DIR="$ROOT"
-LABEL=agentscrape.process-queue
+LABEL=agentscrape.queue-processor
+LEGACY_LABEL=agentscrape.process-queue
 OWNER_UID="$(id -u)"
 PLATFORM="$(uname -s)"
 BIN_DIR="${AGENTSCRAPE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
@@ -42,7 +43,7 @@ STATE_DIR="${AGENTSCRAPE_INSTALL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state
 SHARE_DIR="${AGENTSCRAPE_INSTALL_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agentscrape}"
 QUEUE_DIR="$SHARE_DIR/queue"
 FAILED_DIR="$SHARE_DIR/failed"
-LOG_PATH="$STATE_DIR/process-queue.log"
+LOG_PATH="$STATE_DIR/queue-processor.log"
 RUNTIME_DIR="$STATE_DIR/runtime"
 DEPLOYED_SHA_PATH="$STATE_DIR/deployed-sha"
 RECEIPT_PATH="$STATE_DIR/install-receipt"
@@ -98,6 +99,7 @@ DEPLOYED_INODE=""
 DEPLOYED_DEVICE=""
 RECEIPT_FORMAT=""
 RECEIPT_KIND=""
+RECEIPT_LABEL=""
 RECEIPT_ROOT=""
 RECEIPT_SOURCE=""
 RECEIPT_SHA=""
@@ -224,7 +226,7 @@ canonicalize_data_paths() {
   if [[ -d "$SHARE_DIR" && ! -L "$SHARE_DIR" ]]; then SHARE_DIR="$(cd "$SHARE_DIR" && pwd -P)"; fi
   QUEUE_DIR="$SHARE_DIR/queue"
   FAILED_DIR="$SHARE_DIR/failed"
-  LOG_PATH="$STATE_DIR/process-queue.log"
+  LOG_PATH="$STATE_DIR/queue-processor.log"
   RUNTIME_DIR="$STATE_DIR/runtime"
   DEPLOYED_SHA_PATH="$STATE_DIR/deployed-sha"
   RECEIPT_PATH="$STATE_DIR/install-receipt"
@@ -348,9 +350,9 @@ shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
 
 render_wrapper() {
-  local root="$1" sha="$2" bun="$3" source="$4" share="$5"
+  local root="$1" sha="$2" bun="$3" source="$4" share="$5" label="${6:-$LABEL}"
   printf '#!/usr/bin/env bash\nset -euo pipefail\n# %s\n# label: %s\n# source-root: %s\n# source-sha: %s\n# bun: %s\n' \
-    "$COMMAND_MARKER" "$LABEL" "$root" "$sha" "$bun"
+    "$COMMAND_MARKER" "$label" "$root" "$sha" "$bun"
   printf 'export AGENTSCRAPE_DATA_HOME=%s\nexec %s %s "$@"\n' "$(shell_quote "$share")" "$(shell_quote "$bun")" "$(shell_quote "$source")"
 }
 
@@ -373,18 +375,20 @@ file_matches() {
   cmp -s "$path" <("$@")
 }
 
-wrapper_matches_values() { file_matches "$1" 755 render_wrapper "$2" "$3" "$4" "$5" "$6"; }
+wrapper_matches_values() { file_matches "$1" 755 render_wrapper "$2" "$3" "$4" "$5" "$6" "${7:-$LABEL}"; }
 deployed_matches() { file_matches "$1" 600 printf '%s\n' "$2"; }
 
 load_receipt() {
   local file="${1:-$RECEIPT_PATH}" line extra=""
   local -a lines=()
-  RECEIPT_FORMAT=""; RECEIPT_KIND=""
+  RECEIPT_FORMAT=""; RECEIPT_KIND=""; RECEIPT_LABEL=""
   [[ -f "$file" && ! -L "$file" && "$(path_owner_uid "$file")" == "$OWNER_UID" &&
     "$(path_mode "$file")" == 600 && "$(path_nlink "$file")" == 1 ]] || return 1
   while IFS= read -r line; do lines+=("$line"); done <"$file"
   (( ${#lines[@]} == 9 || ${#lines[@]} == 12 || ${#lines[@]} == 8 )) || return 1
-  [[ "${lines[0]}" == "marker=$RECEIPT_MARKER" && "${lines[1]}" == "label=$LABEL" ]] || return 1
+  [[ "${lines[0]}" == "marker=$RECEIPT_MARKER" ]] || return 1
+  RECEIPT_LABEL="${lines[1]#label=}"
+  [[ "${lines[1]}" == label=* && ( "$RECEIPT_LABEL" == "$LABEL" || "$RECEIPT_LABEL" == "$LEGACY_LABEL" ) ]] || return 1
   RECEIPT_ROOT="${lines[2]#root=}"; RECEIPT_SOURCE="${lines[3]#source=}"; RECEIPT_BUN="${lines[4]#bun=}"
   RECEIPT_COMMAND="${lines[5]#command=}"
   [[ "${lines[2]}" == root=* && "${lines[3]}" == source=* && "${lines[4]}" == bun=* &&
@@ -561,10 +565,10 @@ receipt_is_authorized() {
   [[ "$(resolve_commit_tree "$RECEIPT_ROOT" "$RECEIPT_SHA" 2>/dev/null)" == "$tree" ]] || return 1
 }
 
-receipt_command_matches() { wrapper_matches_values "$COMMAND_PATH" "$RECEIPT_ROOT" "$RECEIPT_SHA" "$RECEIPT_BUN" "$RECEIPT_SOURCE" "$RECEIPT_SHARE"; }
+receipt_command_matches() { wrapper_matches_values "$COMMAND_PATH" "$RECEIPT_ROOT" "$RECEIPT_SHA" "$RECEIPT_BUN" "$RECEIPT_SOURCE" "$RECEIPT_SHARE" "$RECEIPT_LABEL"; }
 
 current_receipt_matches() {
-  [[ "$RECEIPT_FORMAT" == current && "$RECEIPT_KIND" == snapshot ]] || return 1
+  [[ "$RECEIPT_FORMAT" == current && "$RECEIPT_KIND" == snapshot && "$RECEIPT_LABEL" == "$LABEL" ]] || return 1
   cmp -s "$RECEIPT_PATH" <(render_receipt "$SNAPSHOT_ROOT" "$SNAPSHOT_SOURCE" "$BUN_BIN" "$COMMAND_PATH" "$SHARE_DIR" "$QUEUE_DIR" "$DEPLOYED_SHA")
 }
 
@@ -878,5 +882,5 @@ else
   trap 'release_lock "$?"' EXIT
 fi
 printf 'installed %s\n' "$COMMAND_PATH"
-printf 'the agentscrape.process-queue service is installed by AgentStart: %s\n' \
+printf 'the agentscrape.queue-processor service is installed by AgentStart: %s\n' \
   "$HOME/code/agentstart/scripts/install-launchagents --install"

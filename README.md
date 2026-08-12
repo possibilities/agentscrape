@@ -13,7 +13,7 @@ Requires Bun ≥ 1.3.14. The supported distribution is the macOS standalone snap
 ```sh
 ./scripts/install.sh
 agentscrape --help
-launchctl print "gui/$(id -u)/agentscrape.process-queue"
+launchctl print "gui/$(id -u)/agentscrape.queue-processor"
 ```
 
 Uninstall, snapshot GC, rollback, and every environment variable are covered in [docs/operations.md](docs/operations.md).

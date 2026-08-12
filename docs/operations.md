@@ -93,7 +93,7 @@ verified, sealed result with an atomic no-replace rename as
 `0500`, with a hashed manifest recording the commit, tree, and complete
 inventory. It then installs an owned `~/.local/bin/agentscrape` wrapper
 pointing at that snapshot, creates private queue data, and loads
-`~/Library/LaunchAgents/agentscrape.process-queue.plist`. Every state override
+`~/Library/LaunchAgents/agentscrape.queue-processor.plist`. Every state override
 sharing a HOME is serialized by one fail-closed
 `~/.local/state/.agentscrape-installer` owner lock.
 
@@ -101,7 +101,7 @@ Verify after install:
 
 ```sh
 agentscrape --help
-launchctl print "gui/$(id -u)/agentscrape.process-queue"
+launchctl print "gui/$(id -u)/agentscrape.queue-processor"
 ```
 
 The loaded service should reference `~/.local/bin/agentscrape`, the
