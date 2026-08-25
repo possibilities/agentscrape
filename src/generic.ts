@@ -1,5 +1,10 @@
 import * as cheerio from "cheerio";
-import { openPage, requireAgentBrowserSuccess, runAgentBrowser } from "./browser";
+import {
+  currentBrowserArtifactRetention,
+  openPage,
+  requireAgentBrowserSuccess,
+  runAgentBrowser,
+} from "./browser";
 import { decodeBrowserEval, decodeBrowserEvalString } from "./browser-eval";
 import { cssSelectorProblem } from "./css-selector";
 import { AgentscrapeBrowserError, AgentscrapeUsageError } from "./errors";
@@ -62,12 +67,6 @@ export async function scrapePage(
     throw new AgentscrapeUsageError(`Invalid selector '${defaultedSelector}': ${selectorProblem}`);
   await openPage(url, options.session, options.media);
   const chosen = callerSelector ? defaultedSelector : await detectContentSelector(options);
-  const full = await runAgentBrowser(
-    ["eval", "document.documentElement.outerHTML"],
-    options.session,
-  );
-  requireAgentBrowserSuccess(full, "Failed to get page HTML");
-  const fullHtml = decodeBrowserEvalString(full.stdout, "Failed to get page HTML");
   const selection = await runAgentBrowser(
     [
       "eval",
@@ -95,6 +94,15 @@ export async function scrapePage(
   if (typeof value.html !== "string")
     throw new AgentscrapeBrowserError("Failed to query selector: invalid eval result");
   const selectedHtml = value.html;
+  let fullHtml = "";
+  if (currentBrowserArtifactRetention()) {
+    const full = await runAgentBrowser(
+      ["eval", "document.documentElement.outerHTML"],
+      options.session,
+    );
+    requireAgentBrowserSuccess(full, "Failed to get page HTML");
+    fullHtml = decodeBrowserEvalString(full.stdout, "Failed to get page HTML");
+  }
   const $ = cheerio.load(selectedHtml);
   $("script,style,noscript,svg,iframe,button").remove();
   const markdown = convertHtml($.html());

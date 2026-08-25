@@ -33,6 +33,7 @@ import {
   validateProviderFinalUrl,
 } from "../src/envelope";
 import {
+  AgentscrapeArtifactError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
   AgentscrapeHttpError,
@@ -730,6 +731,22 @@ esac`,
       expect(message).not.toContain("example.com");
       expect(message).not.toContain("SECRET");
     }
+
+    let overflow: unknown;
+    try {
+      requireAgentBrowserSuccess({
+        argv: ["agent-browser", "eval", "document.documentElement.outerHTML"],
+        exitCode: 1,
+        stdout: "partial",
+        stderr: "",
+        timedOut: false,
+        truncated: true,
+      });
+    } catch (error) {
+      overflow = error;
+    }
+    expect(overflow).toBeInstanceOf(AgentscrapeArtifactError);
+    expect(classifyFailure(overflow).slice(0, 2)).toEqual(["output_limit_exceeded", false]);
   });
 
   test("best-effort browser probes ignore incidental stderr on successful commands", async () => {

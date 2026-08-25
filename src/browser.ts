@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { isMap, parseDocument } from "yaml";
 import { attachSession, conduitConfigured, resolveOrigin, resolveSession } from "./conduit";
 import {
+  AgentscrapeArtifactError,
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
@@ -42,6 +43,7 @@ export const AGENT_BROWSER_TIMEOUT_ENV = "AGENTSCRAPE_AGENT_BROWSER_TIMEOUT";
  */
 export const AGENT_BROWSER_SESSION_ENV = "AGENTSCRAPE_BROWSER_SESSION";
 export const AGENT_BROWSER_TIMEOUT_PREFIX = "agent-browser timed out after ";
+export const AGENT_BROWSER_OUTPUT_MAX_BYTES = 8_000_000;
 export const UPSTREAM_DOWN_PREFIX = "upstream down: ";
 export const CLAUDE_APP_READY_SELECTOR = "[data-testid='account-settings'], main";
 const OUTAGE_CACHE_TTL_MS = 30_000;
@@ -436,7 +438,7 @@ export async function runAgentBrowser(
   try {
     result = await runProcess(argv, {
       timeoutMs: timeoutMs(timeoutOverrideMs),
-      maxOutputBytes: 8_000_000,
+      maxOutputBytes: AGENT_BROWSER_OUTPUT_MAX_BYTES,
       ...(selectedSignal ? { signal: selectedSignal } : {}),
     });
   } catch (error) {
@@ -497,6 +499,10 @@ export function requireAgentBrowserSuccess(
     throw new AgentscrapeUpstreamDownError(result.stderr);
   if (isTimeoutResult(result))
     throw new AgentscrapeTimeoutError("agent-browser operation timed out");
+  if (result.truncated)
+    throw new AgentscrapeArtifactError(
+      `agent-browser output exceeds the ${AGENT_BROWSER_OUTPUT_MAX_BYTES}-byte limit`,
+    );
   throw new AgentscrapeBrowserError(`${command}: ${detail}`, retryable);
 }
 export async function setMediaMode(

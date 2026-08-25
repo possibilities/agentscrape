@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  AgentscrapeArtifactError,
   AgentscrapeAuthError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
@@ -209,6 +210,8 @@ export function classifyFailure(error: unknown): [FailureClass, boolean, string]
     return ["authentication_required", false, value.message];
   if (value instanceof AgentscrapeCancelledError) return ["cancelled", false, value.message];
   if (value instanceof AgentscrapeTimeoutError) return ["timeout", true, value.message];
+  if (value instanceof AgentscrapeArtifactError)
+    return ["output_limit_exceeded", false, value.message];
   if (value instanceof AgentscrapeBrowserError)
     return ["browser_error", value.retryable, value.message];
   if (value instanceof AgentscrapeProviderError)

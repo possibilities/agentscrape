@@ -281,6 +281,28 @@ describe("owned browser session scopes", () => {
     }
   });
 
+  test("generic extraction does not materialize oversized raw HTML without retention", async () => {
+    const value = fixture();
+    process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML = "1";
+
+    const result = await fetchMarkdown("https://example.com/large-shell", {
+      generic: true,
+      selector: "main",
+      allowPrivateNetwork: true,
+    });
+
+    expect(result).toMatchObject({
+      full_html: "",
+      selected_html: "<main>Session body</main>",
+      markdown: "Session body",
+    });
+    expect(
+      events(value).some(
+        (item) => item.command.join(" ") === "eval document.documentElement.outerHTML",
+      ),
+    ).toBeFalse();
+  });
+
   test("envelope retention rejects before any browser command or file write", async () => {
     const value = fixture();
     const destination = join(value.root, "forbidden.json");

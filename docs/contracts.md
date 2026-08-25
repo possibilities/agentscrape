@@ -255,7 +255,10 @@ screenshots. Retention is available only on `fetch-markdown`, through CLI
 `--retain-artifacts` or API `retainArtifacts: true`; `fetch-links` and direct
 `scrapeWithPreset` calls cannot opt in, and retention cannot be combined with
 envelope output. In-memory `full_html` and `selected_html` result fields are
-unchanged.
+populated only for evidence the extractor actually needs: generic extraction
+keeps its selected HTML, while its full-page HTML is materialized only when
+retention is explicitly enabled. This keeps an irrelevant oversized rendered
+DOM from preventing bounded Markdown extraction.
 
 With retention enabled and a Markdown `DEST`, each nonempty HTML field is
 written as `<stem>.raw.html` or `<stem>.selected.html`, capped at exactly
