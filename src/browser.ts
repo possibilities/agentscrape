@@ -16,7 +16,6 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMap, parseDocument } from "yaml";
-import { attachSession, conduitConfigured, resolveOrigin, resolveSession } from "./conduit";
 import {
   AgentscrapeArtifactError,
   AgentscrapeAuthError,
@@ -673,52 +672,6 @@ function reachedNavigationTarget(
   return before !== null && current !== before;
 }
 
-/**
- * Best-effort attach of an operator-established session for this URL. Returns
- * the session name when one was attached, or null when no conduit is
- * configured, none is stored for the origin, or the daemon is unreachable.
- */
-async function attachConduitSession(url: string, session?: string | null): Promise<string | null> {
-  if (!conduitConfigured()) return null;
-  const resolved = await resolveSession(url);
-  if (resolved === null) return null;
-  const attached = await attachSession(resolved, (args) => runAgentBrowser(args, session));
-  return attached ? resolved.sessionName : null;
-}
-
-/**
- * Stop before navigating when this origin needs a signed-in browser and no
- * session exists for it.
- *
- * The signal is deliberately the absence of a stored session rather than
- * anything read off the page. An origin's signed-in rule answers "is this
- * session live?" at its probe URL; it cannot answer "is this arbitrary page a
- * login wall?" — a signed-in LinkedIn user reading a job posting is not on
- * /feed. Judging every page by that rule would report a block on every fetch.
- *
- * Failing here rather than after navigating also avoids the worse outcome:
- * extracting a login wall and storing it as though it were the requested
- * content.
- */
-async function assertConduitSignedIn(requestedUrl: string, attached: string | null): Promise<void> {
-  if (attached !== null || !conduitConfigured()) return;
-  const rule = await resolveOrigin(requestedUrl);
-  if (rule === null || rule.escalation !== "human_signin") return;
-  // Naming which of the two it is matters: "no session" sends a reader looking
-  // for something to create, "expired" sends them to replace what is there.
-  if (rule.staleSession !== null) {
-    throw new AgentscrapeAuthError(
-      `${rule.origin} requires a signed-in browser and the stored session ` +
-        `'${rule.staleSession.sessionName}' has expired. ` +
-        `Replace it with: agentweb signin --origin ${rule.origin}`,
-    );
-  }
-  throw new AgentscrapeAuthError(
-    `${rule.origin} requires a signed-in browser and no session is stored. ` +
-      `Capture one with: agentweb signin --origin ${rule.origin}`,
-  );
-}
-
 export async function openPage(
   url: string,
   session?: string | null,
@@ -729,14 +682,7 @@ export async function openPage(
   throwIfAborted(active.signal);
   if (!active.allowPrivateNetwork)
     throw new AgentscrapeNetworkPolicyError("browser_egress_unverifiable");
-  const requestedUrl = url;
   await setMediaMode(media, session);
-  // Attach an operator-established session for this origin before navigating,
-  // when a conduit is configured and knows one. Best effort by contract: an
-  // absent or unreachable conduit means unauthenticated extraction, never a
-  // failed fetch.
-  const attachedSession = await attachConduitSession(url, session);
-  await assertConduitSignedIn(requestedUrl, attachedSession);
   const before = await currentUrl(session);
   const opened = await runAgentBrowser(["open", url], session);
   throwUpstream(opened);

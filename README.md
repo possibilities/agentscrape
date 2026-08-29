@@ -34,8 +34,8 @@ Several routes delegate to local tools that are not published. Agentscrape then 
 
 | Works with no extra tools | Needs an unpublished tool |
 | --- | --- |
-| Direct `.md` over bounded, DNS-pinned HTTP | Any browser-rendered page — generic extraction and every X, ChatGPT, and DeepWiki preset (`agent-browser`) |
-| PDFs, when `pdftotext` from poppler is on `PATH` | Reusing a signed-in browser session for authenticated pages (`agentweb`, through the conduit env vars) |
+| Direct `.md` over bounded, DNS-pinned HTTP | Any browser-rendered page — generic extraction and every X, ChatGPT, and DeepWiki preset (`agent-browser` plus its configured provider) |
+| PDFs, when `pdftotext` from poppler is on `PATH` | Durable signed-in Browser profile reuse (`agentbrowse`; human interaction routes through `agentattention`) |
 | GitHub and Gist reads, when `gh` is installed and authenticated | Queue records that request `summarize` (`summaryctl`) |
 | Recorded feed parsing, corpus replay, HTML conversion, preset inspection, `doctor` | — |
 

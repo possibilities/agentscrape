@@ -73,10 +73,11 @@ updated in the same change:
   `"agentscrape"`, and the artifact/failure shapes. Keys and enums are additive
   only.
 
-`AGENTSCRAPE_CONDUIT_SOCKET` and `AGENTSCRAPE_CONDUIT_TOKEN_FILE` are set by
-agentbrain's worker plist and asserted when the machine's services are
-verified; renaming them breaks an
-installed deployment, not just this repo.
+Browser-backed routes drive the configured `agent-browser` provider directly.
+An explicit `--session` or `AGENTSCRAPE_BROWSER_SESSION` selects a stable
+session; with the Agentbrowse provider, that name maps to its durable Browser
+profile. Authentication handoff belongs to the fleet's `browser` and
+`attention` skills rather than a private Agentscrape origin registry.
 
 ## The skill is the advertised runbook
 
