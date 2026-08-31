@@ -618,14 +618,14 @@ function doctorCommand(args: string[]): number {
  * pays for it at startup, and so this file and `mcp-server.ts` — which
  * dispatches back through `main` — do not have to resolve each other eagerly.
  */
-async function mcpCommand(args: string[]): Promise<number> {
+async function mcpCommand(args: string[], signal?: AbortSignal): Promise<number> {
   const parsed = parseArgs("mcp", args);
   const helpCode = commandHelp(parsed, "mcp");
   if (helpCode !== null) return helpCode;
   if (parsed.positionals.length)
     throw new AgentscrapeUsageError("mcp takes no positional arguments");
   const { serveAgentscrapeMcp } = await import("./mcp");
-  await serveAgentscrapeMcp();
+  await serveAgentscrapeMcp(signal);
   return 0;
 }
 
@@ -718,7 +718,7 @@ async function dispatch(argv: string[], signal?: AbortSignal): Promise<number> {
   if (["open-session", "close-session"].includes(command))
     return sessionCommand(command, args, signal);
   if (command === "guide") return guideCommand(args);
-  if (command === "mcp") return mcpCommand(args);
+  if (command === "mcp") return mcpCommand(args, signal);
   if (command === "doctor") return doctorCommand(args);
   return queueCommand(args, signal);
 }

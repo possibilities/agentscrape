@@ -464,3 +464,31 @@ describe("a live stdio server", () => {
     expect(tools.length).toBe(TOOLS.length);
   });
 });
+
+describe("signal handling", () => {
+  test("exits on SIGTERM instead of needing SIGKILL", async () => {
+    // The entrypoint installs SIGINT/SIGTERM handlers, which suppresses the
+    // runtime's own terminate-on-signal. Serving once reached nothing that
+    // listened to the resulting abort, so a `timeout 20 ... mcp` in a test
+    // harness left a resident server behind on every run — SIGTERM is what
+    // `timeout` sends, and it does not escalate without --kill-after.
+    const child = Bun.spawn(["bun", "src/cli.ts", "mcp"], {
+      cwd: import.meta.dir.replace(/\/test$/, ""),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // Give the transport time to attach before signalling.
+    await Bun.sleep(1500);
+    child.kill("SIGTERM");
+    const exited = await Promise.race([
+      child.exited,
+      Bun.sleep(8000).then(() => "timeout" as const),
+    ]);
+    if (exited === "timeout") {
+      child.kill("SIGKILL");
+      throw new Error("the MCP server ignored SIGTERM and had to be SIGKILLed");
+    }
+    expect(typeof exited).toBe("number");
+  }, 20000);
+});

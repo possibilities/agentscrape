@@ -11,7 +11,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createAgentscrapeMcpServer } from "./mcp-server";
 
-export async function serveAgentscrapeMcp(): Promise<void> {
+export async function serveAgentscrapeMcp(signal?: AbortSignal): Promise<void> {
   const server = createAgentscrapeMcpServer();
   await server.connect(new StdioServerTransport());
   // connect() returns as soon as the transport is listening. The process stays
@@ -28,5 +28,16 @@ export async function serveAgentscrapeMcp(): Promise<void> {
     };
     process.stdin.once("end", closed);
     process.stdin.once("close", closed);
+
+    // The entrypoint installs SIGINT and SIGTERM handlers, which suppresses the
+    // runtime's own terminate-on-signal. Every other command reaches that
+    // controller through its `signal`; serving reached nothing, so a SIGTERM
+    // aborted a controller no one was listening to and the process stayed
+    // resident until SIGKILL. A stdio server is built to outlive its caller,
+    // which is exactly why it has to be told to stop.
+    if (signal !== undefined) {
+      if (signal.aborted) closed();
+      else signal.addEventListener("abort", closed, { once: true });
+    }
   });
 }
