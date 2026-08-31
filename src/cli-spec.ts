@@ -14,10 +14,28 @@ export type ArgumentFormat = "path" | "url" | "duration" | "ref" | "json";
 export type ArgumentDirection = "in" | "out";
 export type CommandAudience = "agent" | "operator" | "internal";
 export type ContractScalar = "string" | "integer" | "number";
+/**
+ * What kind of knob an argument is, in the fleet contract's vocabulary. Only a
+ * `call` argument is a parameter a caller chooses; everything else is output
+ * shape, store selection, or meta, which a consumer building a call surface has
+ * already fixed. Agentscrape declares it on the global options, where the
+ * distinction decides what the MCP surface may ask a model to pick.
+ */
+export type ArgumentRole = "call" | "output-format" | "store-selection" | "meta";
 export const COMMAND_AUDIENCES: readonly CommandAudience[] = ["agent", "operator", "internal"];
 const ARGUMENT_FORMATS: readonly ArgumentFormat[] = ["path", "url", "duration", "ref", "json"];
 const CONTRACT_SCALARS: readonly ContractScalar[] = ["string", "integer", "number"];
-const CONSTRAINT_KINDS = ["one_of", "conflicts", "requires"] as const;
+// The contract's four kinds, all of them. Agentscrape authors three today;
+// `at_least_one` is the one that states "give me one of these" the way round
+// `one_of` cannot, and a spec that omitted it would refuse the day a command
+// needs it rather than the day someone widened this list.
+const CONSTRAINT_KINDS = ["one_of", "at_least_one", "conflicts", "requires"] as const;
+const ARGUMENT_ROLES: readonly ArgumentRole[] = [
+  "call",
+  "output-format",
+  "store-selection",
+  "meta",
+];
 
 interface OptionBase {
   readonly long: LongOptionName;
@@ -29,6 +47,8 @@ interface OptionBase {
   readonly global?: true;
   readonly format?: ArgumentFormat;
   readonly direction?: ArgumentDirection;
+  /** `call` when unstated, which is what the contract reports. */
+  readonly role?: ArgumentRole;
 }
 
 export interface FlagOptionSpec extends OptionBase {
@@ -50,6 +70,17 @@ export interface ValueOptionSpec extends OptionBase {
   readonly default?: string | number;
   /** Contract scalar; `string` when unstated, which is what --help-json reports. */
   readonly valueType?: ContractScalar;
+  /**
+   * The bound the parser already enforces, said where a consumer can read it.
+   * `numberOption` refuses an out-of-range value at the terminal; a generated
+   * call surface that could not see the same number would let a caller spend a
+   * whole round trip discovering it.
+   */
+  readonly minimum?: number;
+  readonly maximum?: number;
+  /** The option takes one comma-joined string rather than repeating. Composes
+   * with `repeatable`; agentscrape declares no such option today. */
+  readonly csv?: true;
 }
 
 export type OptionSpec = FlagOptionSpec | ValueOptionSpec;
@@ -84,6 +115,8 @@ export interface CommandSpec {
   readonly audience: CommandAudience;
   /** Whether a successful call can change durable state: disk, network, or another process. */
   readonly mutates: boolean;
+  /** The command waits on something outside itself and may not return promptly. */
+  readonly blocking?: true;
   readonly guidance?: string;
   readonly paragraphs: readonly string[];
   readonly positionals: readonly PositionalSpec[];
@@ -118,6 +151,7 @@ interface FlagSettings {
   readonly required?: boolean;
   readonly inventory?: true;
   readonly global?: true;
+  readonly role?: ArgumentRole;
 }
 
 interface ValueSettings {
@@ -130,6 +164,10 @@ interface ValueSettings {
   readonly format?: ArgumentFormat;
   readonly direction?: ArgumentDirection;
   readonly global?: true;
+  readonly role?: ArgumentRole;
+  readonly minimum?: number;
+  readonly maximum?: number;
+  readonly csv?: true;
 }
 
 interface PositionalSettings {
@@ -150,6 +188,7 @@ function flag(
     ...(settings.aliases ? { aliases: settings.aliases } : {}),
     ...(settings.inventory ? { inventory: true as const } : {}),
     ...(settings.global ? { global: true as const } : {}),
+    ...(settings.role ? { role: settings.role } : {}),
   };
 }
 
@@ -174,6 +213,10 @@ function value(
     ...(settings.format ? { format: settings.format } : {}),
     ...(settings.direction ? { direction: settings.direction } : {}),
     ...(settings.global ? { global: true as const } : {}),
+    ...(settings.role ? { role: settings.role } : {}),
+    ...(settings.minimum !== undefined ? { minimum: settings.minimum } : {}),
+    ...(settings.maximum !== undefined ? { maximum: settings.maximum } : {}),
+    ...(settings.csv ? { csv: true as const } : {}),
   };
 }
 
@@ -210,10 +253,12 @@ function formatOption(
   description = "Compatibility option (no-op)",
   choices: readonly string[] = GENERIC_FORMAT_CHOICES,
   defaultValue?: string,
+  role?: ArgumentRole,
 ): ValueOptionSpec {
   return value("--format", ["FORMAT"], description, {
     choices,
     ...(defaultValue === undefined ? {} : { default: defaultValue }),
+    ...(role ? { role } : {}),
   });
 }
 
@@ -245,13 +290,17 @@ const rawCliSpec = {
   name: "agentscrape",
   version: AGENTSCRAPE_VERSION,
   description: "Fetch and extract web content through an agent-friendly Bun CLI",
+  // Not one global is a call knob: the compatibility --format is output shape
+  // and the rest describe the CLI rather than parameterize a run. A consumer
+  // building a call surface exposes only `call`, which is why every one of them
+  // carries its role explicitly instead of defaulting into a tool schema.
   globalOptions: [
-    formatOption("Compatibility output preference"),
-    flag("--help", "Show help", { aliases: ["-h"] }),
-    flag("--version", "Show version", { aliases: ["-v"] }),
-    flag("--help-json", "Show machine-readable JSON help"),
-    flag("--agent-help", "Show concise guidance for agents"),
-    flag("--agent-teaser", "Show the command inventory for agents"),
+    formatOption("Compatibility output preference", undefined, undefined, "output-format"),
+    flag("--help", "Show help", { aliases: ["-h"], role: "meta" }),
+    flag("--version", "Show version", { aliases: ["-v"], role: "meta" }),
+    flag("--help-json", "Show machine-readable JSON help", { role: "meta" }),
+    flag("--agent-help", "Show concise guidance for agents", { role: "meta" }),
+    flag("--agent-teaser", "Show the command inventory for agents", { role: "meta" }),
   ],
   commands: [
     {
@@ -289,10 +338,12 @@ const rawCliSpec = {
         value("--max-content-bytes", ["INTEGER"], "Envelope content limit (integer >= 1)", {
           default: 1_000_000,
           valueType: "integer",
+          minimum: 1,
         }),
         value("--max-relations", ["INTEGER"], "Envelope relation limit (integer >= 0)", {
           default: 256,
           valueType: "integer",
+          minimum: 0,
         }),
       ]),
       constraints: [
@@ -324,9 +375,13 @@ const rawCliSpec = {
         value("--section-selector", ["CSS"], "Section/navigation selector"),
         value("--category-selector", ["CSS"], "Category selector for two-level navigation"),
         value("--toggle-selector", ["CSS"], "Toggle/tab selector"),
-        value("--limit", ["INTEGER"], "Positive X timeline item limit", { valueType: "integer" }),
+        value("--limit", ["INTEGER"], "Positive X timeline item limit", {
+          valueType: "integer",
+          minimum: 1,
+        }),
         value("--max-scrolls", ["INTEGER"], "Positive X timeline scroll limit", {
           valueType: "integer",
+          minimum: 1,
         }),
         value("--since-id", ["ID"], "Numeric X status cursor"),
         flag("--include-replies", "Include X replies"),
@@ -387,19 +442,28 @@ const rawCliSpec = {
             "--max-response-bytes",
             ["INTEGER"],
             "Per-response byte limit from 1 through 20000000",
-            { default: 2_000_000, valueType: "integer" },
+            { default: 2_000_000, valueType: "integer", minimum: 1, maximum: 20_000_000 },
           ),
+          // 100 is the parser's own ceiling. The live ceiling is 10, and it
+          // depends on whether FILE was given, which no per-argument bound can
+          // say — the description carries that half.
           value("--max-pages", ["INTEGER"], "Recorded 1..100; live 1..10", {
             default: 10,
             valueType: "integer",
+            minimum: 1,
+            maximum: 100,
           }),
           value("--max-items", ["INTEGER"], "Entry limit from 1 through 10000", {
             default: 1000,
             valueType: "integer",
+            minimum: 1,
+            maximum: 10_000,
           }),
           value("--timeout-seconds", ["FLOAT"], "Overall timeout from 0.001 through 300 seconds", {
             default: 10,
             valueType: "number",
+            minimum: 0.001,
+            maximum: 300,
           }),
           value("--archive-start-url", ["URL"], "Optional configured archive start URL", {
             format: "url",
@@ -595,6 +659,18 @@ const rawCliSpec = {
       options: commandOptions(),
     },
     {
+      name: "mcp",
+      summary: "Serve this CLI's agent commands over MCP on stdio",
+      audience: "internal",
+      mutates: true,
+      blocking: true,
+      guidance:
+        "Serves until the host closes stdio, so it is started by a host's MCP configuration rather than called from a session. The tools are generated from this contract — exactly the agent-audience commands — and every call dispatches in this process, with nothing spawned.",
+      paragraphs: [],
+      positionals: [],
+      options: commandOptions(),
+    },
+    {
       name: "doctor",
       summary: "Inspect offline runtime readiness and optional capabilities",
       audience: "operator",
@@ -684,6 +760,8 @@ function validateOptions(options: readonly OptionSpec[], scope: string): void {
     }
     if (option.inventory && option.kind !== "flag")
       specError(`${path}.inventory`, "inventory options must be flags");
+    if (option.role !== undefined && !ARGUMENT_ROLES.includes(option.role as ArgumentRole))
+      specError(`${path}.role`, `invalid role '${String(option.role)}'`);
     validateContractRefinement(option, path);
     if (option.kind === "flag") {
       for (const property of ["valueCount", "valueLabels", "choices", "default"])
@@ -702,6 +780,24 @@ function validateOptions(options: readonly OptionSpec[], scope: string): void {
     }
     if (option.repeatable !== undefined && option.repeatable !== true)
       specError(`${path}.repeatable`, "must be true when present");
+    if (option.csv !== undefined && option.csv !== true)
+      specError(`${path}.csv`, "must be true when present");
+    // A bound belongs to a number. Declaring one on a string would publish a
+    // rule the parser does not enforce, which is the exact drift this spec
+    // exists to prevent — the same reason the bounds are authored here at all
+    // rather than only in the description prose.
+    for (const bound of ["minimum", "maximum"] as const) {
+      const bounded = option[bound];
+      if (bounded === undefined) continue;
+      if (typeof bounded !== "number" || !Number.isFinite(bounded))
+        specError(`${path}.${bound}`, "must be a finite number");
+      if (option.valueType !== "integer" && option.valueType !== "number")
+        specError(`${path}.${bound}`, "applies only to an integer or number option");
+    }
+    const minimum = option.minimum as number | undefined;
+    const maximum = option.maximum as number | undefined;
+    if (minimum !== undefined && maximum !== undefined && minimum > maximum)
+      specError(`${path}.maximum`, "must not be below minimum");
     if (option.choices !== undefined) {
       if (option.valueCount !== 1)
         specError(`${path}.choices`, "are valid only for one-value options");
@@ -734,6 +830,8 @@ function validateCommand(command: CommandSpec, path: string): void {
   if (!COMMAND_AUDIENCES.includes(command.audience))
     specError(`${path}.audience`, `invalid audience '${String(command.audience)}'`);
   if (typeof command.mutates !== "boolean") specError(`${path}.mutates`, "must be a boolean");
+  if (command.blocking !== undefined && command.blocking !== true)
+    specError(`${path}.blocking`, "must be true when present");
   if (command.guidance !== undefined && command.guidance.length === 0)
     specError(`${path}.guidance`, "must be non-empty when present");
   for (let index = 0; index < command.paragraphs.length; index += 1)

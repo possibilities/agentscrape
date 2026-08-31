@@ -83,6 +83,17 @@ agent contract (`~/code/agentstart/config/agent-contract/README.md`); the
 normative check is `~/code/agentstart/scripts/validate-agent-contract.ts
 agentscrape`.
 
+`agentscrape mcp` is generated from that same contract: its tools are exactly
+the `audience: agent` commands, their schemas are those commands' declared
+arguments, and every call dispatches through `main` in this process with an
+output sink, because stdout is the protocol channel there. So an `audience`
+verdict is now an exposure decision for a second surface, and a bound the
+parser enforces belongs in `cli-spec.ts` as `minimum`/`maximum` rather than in
+prose alone — a bound the contract does not carry is one the generated tool
+lets a caller violate. `~/code/agentstart/config/agent-contract/MCP.md` is the
+normative mapping; `src/mcp-tools.ts` implements it and nothing else decides
+what is exposed.
+
 ## Cross-tool compatibility
 
 Agentbrain machine-parses this CLI, so two things are frozen until it is

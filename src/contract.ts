@@ -37,6 +37,28 @@ export interface ContractArgument {
   readonly choices?: readonly string[];
   readonly default?: string | number;
   readonly aliases?: readonly string[];
+  /**
+   * The flag takes one comma-joined string of values rather than repeating.
+   * Declared because a caller that guesses wrong silently passes one value;
+   * agentscrape has no such argument today, and the type is here so the day it
+   * grows one the mapping already knows how to spell it.
+   */
+  readonly csv?: boolean;
+  /** Inclusive bounds for an integer or number argument, as the parser enforces
+   * them. A bound the contract does not carry is a bound a generated call
+   * surface lets a caller violate. */
+  readonly minimum?: number;
+  readonly maximum?: number;
+  /** `call` when absent. A consumer building a call surface exposes only `call`. */
+  readonly role?: "call" | "output-format" | "store-selection" | "meta";
+  /**
+   * How many values the flag takes, present only when it takes two. The
+   * contract's argument type describes one scalar, so an arity a caller has to
+   * satisfy would otherwise survive only in prose; `--help-json` already
+   * reports the same fact as `value_count`. `x_` is the contract's reserved
+   * space for a CLI's own extension.
+   */
+  readonly x_value_count?: 2;
 }
 
 export interface ContractCommand {
@@ -44,11 +66,13 @@ export interface ContractCommand {
   readonly summary: string;
   readonly audience: "agent" | "operator" | "internal";
   readonly mutates: boolean;
+  /** Present when the command waits on something outside itself. */
+  readonly blocking?: boolean;
   readonly guidance?: string;
   readonly arguments: readonly ContractArgument[];
   readonly stdin?: { accepts: "text" | "json"; required?: boolean; description: string };
   readonly constraints?: ReadonlyArray<{
-    kind: "one_of" | "conflicts" | "requires";
+    kind: "one_of" | "at_least_one" | "conflicts" | "requires";
     arguments: readonly string[];
     required?: boolean;
     description?: string;
@@ -280,6 +304,11 @@ function optionArgument(option: ReadonlyOptionSpec): ContractArgument {
     ...(option.kind === "value" && option.choices ? { choices: [...option.choices] } : {}),
     ...(option.kind === "value" && option.default !== undefined ? { default: option.default } : {}),
     ...(option.aliases ? { aliases: [...option.aliases] } : {}),
+    ...(option.kind === "value" && option.csv ? { csv: true } : {}),
+    ...(option.kind === "value" && option.minimum !== undefined ? { minimum: option.minimum } : {}),
+    ...(option.kind === "value" && option.maximum !== undefined ? { maximum: option.maximum } : {}),
+    ...(option.role ? { role: option.role } : {}),
+    ...(option.kind === "value" && option.valueCount === 2 ? { x_value_count: 2 as const } : {}),
   };
 }
 
@@ -314,6 +343,7 @@ function contractCommand(command: ReadonlyCommandSpec): ContractCommand {
     summary: command.summary,
     audience: command.audience,
     mutates: command.mutates,
+    ...(command.blocking ? { blocking: true } : {}),
     ...(command.guidance ? { guidance: command.guidance } : {}),
     arguments: commandArguments(command),
     ...(command.stdin

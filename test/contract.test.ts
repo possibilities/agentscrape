@@ -32,6 +32,7 @@ const COMMAND_KEYS = [
   "summary",
   "audience",
   "mutates",
+  "blocking",
   "guidance",
   "arguments",
   "subcommands",
@@ -50,6 +51,11 @@ const ARGUMENT_KEYS = [
   "choices",
   "default",
   "aliases",
+  "csv",
+  "minimum",
+  "maximum",
+  "role",
+  "x_value_count",
 ];
 const ARGUMENT_TYPES = ["string", "boolean", "integer", "number"];
 const AUDIENCES = ["agent", "operator", "internal"];
@@ -108,6 +114,13 @@ describe("fleet agent contract", () => {
     expect(contract.commands.find(({ name }) => name === "process-queue")?.audience).toBe(
       "internal",
     );
+    // The MCP server is a command like any other, and an internal one: a server
+    // that is not in its own CLI's contract is the drift this project prevents.
+    expect(contract.commands.find(({ name }) => name === "mcp")).toMatchObject({
+      audience: "internal",
+      mutates: true,
+      blocking: true,
+    });
     for (const command of leaves()) expect(AUDIENCES).toContain(command.audience);
   });
 
