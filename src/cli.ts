@@ -31,6 +31,7 @@ import {
   renderHumanHelp,
   renderJsonHelp,
 } from "./cli-spec";
+import { renderAgentHelp, renderContractJson } from "./contract";
 import { captureCorpus, testCorpus } from "./corpus";
 import { currentDoctorReport, doctorExitCode, renderDoctorReport } from "./doctor";
 import { AgentscrapeError, AgentscrapeUsageError, cancellationError } from "./errors";
@@ -565,6 +566,15 @@ async function queueCommand(args: string[], signal?: AbortSignal): Promise<numbe
   );
   return 0;
 }
+function guideCommand(args: string[]): number {
+  const parsed = parseArgs("guide", args);
+  const helpCode = commandHelp(parsed, "guide");
+  if (helpCode !== null) return helpCode;
+  if (parsed.positionals.length)
+    throw new AgentscrapeUsageError("guide takes no positional arguments");
+  console.log(parsed.flags.has("--json") ? renderContractJson() : renderAgentHelp());
+  return 0;
+}
 function doctorCommand(args: string[]): number {
   const parsed = parseArgs("doctor", args);
   const helpCode = commandHelp(parsed, "doctor");
@@ -603,7 +613,7 @@ export async function main(
       return 0;
     }
     if (parsed.name === "--agent-help") {
-      console.log(CLI_SPEC.agentHelp);
+      console.log(renderAgentHelp());
       return 0;
     }
     if (parsed.name === "--agent-teaser") {
@@ -646,6 +656,7 @@ export async function main(
   if (command === "convert-html") return convertCommand(args);
   if (["open-session", "close-session"].includes(command))
     return sessionCommand(command, args, signal);
+  if (command === "guide") return guideCommand(args);
   if (command === "doctor") return doctorCommand(args);
   return queueCommand(args, signal);
 }

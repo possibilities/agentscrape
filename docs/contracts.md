@@ -22,6 +22,7 @@ rules, and queue semantics. Deployment lifecycle lives in
 | `open-session NAME` / `close-session NAME` | Manage reusable browser sessions | Writes or removes local browser session state |
 | `process-queue` | Process durable standalone scrape-artifact jobs | Mutates queue, failed-job, destination, and log state |
 | `doctor [--format human\|json]` | Inspect the Bun runtime and inventory optional executables using offline filesystem/PATH lookups | None |
+| `guide [--json]` | Print the fleet agent contract: purpose, guidance, concepts, error codes, and every command with its audience, mutation verdict, and typed arguments | None |
 
 `doctor` and `check-presets --live` answer different questions and are not
 aliases. `doctor` is an offline inventory: it executes no capability and checks

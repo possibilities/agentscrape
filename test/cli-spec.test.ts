@@ -30,6 +30,7 @@ const visibleInventory = [
   ["close-session", "Close a browser session"],
   ["process-queue", "Process standalone artifact jobs"],
   ["doctor", "Inspect offline runtime readiness and optional capabilities"],
+  ["guide", "Print the fleet agent contract for this CLI"],
 ] as const;
 
 function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
