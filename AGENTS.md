@@ -84,7 +84,7 @@ profile. Authentication handoff belongs to the fleet's `browser` and
 `skills/scrape/SKILL.md` is the canonical deep runbook for this CLI. AgentStart's
 skills scan copies it into the fixed private fleet resources — `npx skills add --copy`
 against this checkout, discovering nested `skills/<name>/SKILL.md` — so every
-Claude Code, Codex, and Pi session lists its name and frontmatter description
+Claude Code and Codex session lists its name and frontmatter description
 without loading the body.
 That description is all most sessions ever see; it has to route on its own. `--agent-help` stays in the binary as the fallback for a
 session without the skill and points at it.
@@ -104,8 +104,8 @@ lives in two siblings, and some changes here must cascade:
 - Skills under `skills/<name>/` ship into AgentStart's fixed private
   fleet resources (`~/code/agentstart/scripts/sync-skills`, run six-hourly
   by the scheduled updater). AgentLaunch loads them into every managed
-  session: Claude Code exposes `/agent:<name>`, Codex uses
-  `$agent:<name>`, and Pi uses `/<name>`. A SKILL.md edit is live within
+  session: Claude Code exposes `/agent:<name>`, and Codex uses
+  `$agent:<name>`. A SKILL.md edit is live within
   six hours, or on demand by running that script. Whether a new skill earns a TOOLS.md
   advertisement line is a deliberate decision —
   `agentwiki get tool-advertisement-policy`.
