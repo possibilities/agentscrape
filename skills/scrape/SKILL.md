@@ -368,6 +368,7 @@ Not ordinary fetching — reach for these only when asked.
 The CLI teaches itself; prefer asking it over trusting this document:
 
 ```bash
+agentscrape guide --json          # the fleet agent contract: everything below, machine-readable
 agentscrape --agent-teaser        # every command with its summary
 agentscrape --agent-help          # the in-binary runbook (this skill is the deep version)
 agentscrape COMMAND --help        # human flags for one command
@@ -375,8 +376,11 @@ agentscrape COMMAND --help-json   # machine-readable per-command help
 agentscrape --version
 ```
 
-`--help-json` is the authority on flags, types, defaults, choices, and
-which positionals are required — parse it rather than guessing. When the
+`guide --json` is the authority on which verbs are for agents, which of
+them mutate durable state, how arguments relate, and every failure code;
+`--help-json` is the authority on one command's flags, types, defaults,
+choices, and which positionals are required. Parse them rather than
+guessing. When the
 installed version differs from the one at the top of this file, re-verify
 any claim you are about to lean on. The skill lives in the agentscrape
 checkout and is re-verified against the live CLI whenever behavior changes.

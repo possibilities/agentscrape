@@ -61,6 +61,39 @@ no handler touches: auth bootstrap JSON, account state, tokens.
 `test/`, and it is the reason the shipped samples are subtrees rather than
 whole pages.
 
+## One authored self-description
+
+`src/cli-spec.ts` is the only place a command or an argument is described.
+`--help`, `--help-json`, `--agent-teaser`, and the mechanical half of
+`guide --json` are all renders of it, so a flag cannot be documented
+differently from how it is parsed. The conceptual half — purpose, routing
+guidance, the domain model, the output contract, and every failure code — is
+authored once in `src/contract.ts`, and `--agent-help` renders that. Never
+write agent-facing prose a second time in this CLI; if help text needs a
+judgment, it belongs in a command's `guidance` field.
+
+Adding a command means declaring its `audience` (`agent`, `operator`, or
+`internal`) and its `mutates` verdict — can a successful call change durable
+state anywhere, disk, network, or another process. Every command appears in
+the contract, hidden ones included: audience decides exposure, because a
+missing command is indistinguishable from an oversight.
+`concepts.read_only_commands` is derived from those verdicts, never listed by
+hand. `test/contract.test.ts` is this repository's conformance to the fleet
+agent contract (`~/code/agentstart/config/agent-contract/README.md`); the
+normative check is `~/code/agentstart/scripts/validate-agent-contract.ts
+agentscrape`.
+
+`agentscrape mcp` is generated from that same contract: its tools are exactly
+the `audience: agent` commands, their schemas are those commands' declared
+arguments, and every call dispatches through `main` in this process with an
+output sink, because stdout is the protocol channel there. So an `audience`
+verdict is now an exposure decision for a second surface, and a bound the
+parser enforces belongs in `cli-spec.ts` as `minimum`/`maximum` rather than in
+prose alone — a bound the contract does not carry is one the generated tool
+lets a caller violate. `~/code/agentstart/config/agent-contract/MCP.md` is the
+normative mapping; `src/mcp-tools.ts` implements it and nothing else decides
+what is exposed.
+
 ## Cross-tool compatibility
 
 Agentbrain machine-parses this CLI, so two things are frozen until it is

@@ -81,6 +81,16 @@ import { resolveQueuePaths } from "./queue-paths";
 import { sanitizeErrorInPlace } from "./redaction";
 import { findExecutable, runProcess } from "./subprocess";
 
+// The library surface publishes the same self-description the CLI does, so an
+// embedder reads one contract rather than shelling out for it.
+export {
+  type AgentContract,
+  buildContract,
+  type ContractArgument,
+  type ContractCommand,
+  type ContractEnvelope,
+  contractEnvelope,
+} from "./contract";
 export {
   type ContentHandlerCapabilities,
   type ContentHandlerRegistration,

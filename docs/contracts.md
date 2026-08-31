@@ -21,7 +21,21 @@ rules, and queue semantics. Deployment lifecycle lives in
 | `convert-html [FILE]` | Convert one file/stdin, or recursively convert `--dir` | Writes converted Markdown beside source HTML or to stdout |
 | `open-session NAME` / `close-session NAME` | Manage reusable browser sessions | Writes or removes local browser session state |
 | `process-queue` | Process durable standalone scrape-artifact jobs | Mutates queue, failed-job, destination, and log state |
+| `mcp` | Serve the agent-audience commands over MCP on stdio, in this process | Whatever the tool the caller invokes mutates; the server itself writes nothing |
 | `doctor [--format human\|json]` | Inspect the Bun runtime and inventory optional executables using offline filesystem/PATH lookups | None |
+| `guide [--json]` | Print the fleet agent contract: purpose, guidance, concepts, error codes, and every command with its audience, mutation verdict, and typed arguments | None |
+
+`mcp` is generated, not authored. Its tool list is exactly the `audience: agent`
+commands in `guide --json`, named as the command is, so a command added to
+`cli-spec.ts` is a tool with no second edit and an `operator` or `internal` one
+— `capture-corpus`, `check-presets`, the session pair, `mcp` itself — is never
+exposed. Each tool's schema is the command's own arguments with the bounds the
+parser enforces; the server's instructions are the contract's guidance, error
+codes with their recovery, and opening moves, which is where the standing
+network rules reach a caller that only ever sees tool schemas. Every call
+dispatches through this process's own `main` with an output sink, because stdout
+is the protocol channel there. `agentstart/config/agent-contract/MCP.md` is the
+normative mapping and `src/mcp-tools.ts` implements exactly it.
 
 `doctor` and `check-presets --live` answer different questions and are not
 aliases. `doctor` is an offline inventory: it executes no capability and checks

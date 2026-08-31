@@ -31,6 +31,7 @@ import {
   renderHumanHelp,
   renderJsonHelp,
 } from "./cli-spec";
+import { renderAgentHelp, renderContractJson } from "./contract";
 import { captureCorpus, testCorpus } from "./corpus";
 import { currentDoctorReport, doctorExitCode, renderDoctorReport } from "./doctor";
 import { AgentscrapeError, AgentscrapeUsageError, cancellationError } from "./errors";
@@ -141,11 +142,39 @@ function format(
   if (selected.length > 1) throw new AgentscrapeUsageError("choose only one output format");
   return (selected[0]?.[1] as ReturnType<typeof format>) ?? fallback;
 }
+/**
+ * Where a command's own output goes.
+ *
+ * A terminal run writes fd 1 and fd 2, which is what `null` means. An in-process
+ * caller — `agentscrape mcp`, where fd 1 is the MCP protocol channel and a
+ * stray byte on it corrupts the session — installs a sink instead, and every
+ * print site below routes through `say`, `write`, and `note` so that no command
+ * has its own way to reach stdout. Nothing outside this file prints.
+ */
+export interface OutputSink {
+  /** stdout: the command's payload, verbatim, newlines included. */
+  write(chunk: string): void;
+  /** stderr: the asides — "Saved to …" — that are not the payload. */
+  note(line: string): void;
+}
+let sink: OutputSink | null = null;
+function write(value: string): void {
+  if (sink) sink.write(value);
+  else process.stdout.write(value);
+}
+/** `console.log`'s contract: the value, then a newline. */
+function say(value: string): void {
+  write(`${value}\n`);
+}
+function note(line: string): void {
+  if (sink) sink.note(line);
+  else console.error(line);
+}
 function output(value: string, destination?: string): void {
   if (destination) {
     writeFileSync(destination, value);
-    console.error(`Saved to ${destination}`);
-  } else process.stdout.write(value.endsWith("\n") ? value : `${value}\n`);
+    note(`Saved to ${destination}`);
+  } else write(value.endsWith("\n") ? value : `${value}\n`);
 }
 function resultOutput(result: ScrapeResult, selected: "json" | "yaml" | "markdown"): string {
   if (selected === "markdown") return result.markdown;
@@ -154,18 +183,18 @@ function resultOutput(result: ScrapeResult, selected: "json" | "yaml" | "markdow
 }
 function commandHelp(parsed: Parsed, command: string): number | null {
   if (parsed.flags.has("--help-json")) {
-    console.log(renderJsonHelp(command));
+    say(renderJsonHelp(command));
     return 0;
   }
   if (parsed.flags.has("--help")) {
-    process.stdout.write(renderHumanHelp(command));
+    write(renderHumanHelp(command));
     return 0;
   }
   return null;
 }
 function writeHtmlArtifacts(artifacts: readonly PreparedTextArtifact[]): void {
   writePreparedTextArtifacts(artifacts);
-  for (const artifact of artifacts) console.error(`Saved to ${artifact.path}`);
+  for (const artifact of artifacts) note(`Saved to ${artifact.path}`);
 }
 async function fetchMarkdownCommand(args: string[], signal?: AbortSignal): Promise<number> {
   const parsed = parseArgs("fetch-markdown", args);
@@ -414,34 +443,31 @@ async function presetsCommand(command: string, args: string[]): Promise<number> 
       );
       return 1;
     }
-    console.log(`OK: ${basename(path)}`);
+    say(`OK: ${basename(path)}`);
     return 0;
   }
   const registry = loadRegistry();
   if (command === "show-preset") {
     const preset = registry.byName(parsed.positionals[0] ?? "");
     if (!preset) throw new Error(`preset '${parsed.positionals[0]}' not found`);
-    console.log(
+    say(
       `Name:    ${preset.name}\nSummary: ${preset.summary}\nDomain:  ${preset.domain}${preset.aliases.length ? `\nAliases: ${preset.aliases.join(", ")}` : ""}\nMode:    ${preset.mode}`,
     );
     if (preset.mode === "content") {
-      console.log(`Handler: ${preset.handler}`);
+      say(`Handler: ${preset.handler}`);
       if (preset.url_patterns.length)
-        console.log(
-          `URL Patterns:\n${preset.url_patterns.map((item) => `  - ${item}`).join("\n")}`,
-        );
+        say(`URL Patterns:\n${preset.url_patterns.map((item) => `  - ${item}`).join("\n")}`);
       if (preset.schema) {
-        console.log(`Schema: ${preset.schema}`);
+        say(`Schema: ${preset.schema}`);
         const fields = SCHEMA_FIELDS[preset.schema];
-        if (fields?.length)
-          console.log(`Fields:\n${fields.map((item) => `  - ${item}`).join("\n")}`);
+        if (fields?.length) say(`Fields:\n${fields.map((item) => `  - ${item}`).join("\n")}`);
       }
     } else if (preset.mode === "links")
-      console.log(
+      say(
         `Selector: ${preset.selector}${preset.toggle_selector ? `\nToggle:   ${preset.toggle_selector}` : ""}`,
       );
     else
-      console.log(
+      say(
         `Section Selector:  ${preset.section_selector}\nCategory Selector: ${preset.category_selector}${preset.toggle_selector ? `\nToggle Selector:   ${preset.toggle_selector}` : ""}`,
       );
     return 0;
@@ -449,9 +475,9 @@ async function presetsCommand(command: string, args: string[]): Promise<number> 
   for (const mode of ["content", "links", "nav-links"]) {
     const values = registry.presets.filter((preset) => preset.mode === mode);
     if (!values.length) continue;
-    console.log(`\n${mode}:`);
+    say(`\n${mode}:`);
     for (const preset of values)
-      console.log(
+      say(
         `  ${(preset.name + (preset.source === "local" ? " (local)" : "")).padEnd(38)} ${(preset.domain + (preset.aliases.length ? ` (${preset.aliases.join(", ")})` : "")).padEnd(25)} ${preset.summary}`,
       );
   }
@@ -466,13 +492,13 @@ async function convertCommand(args: string[]): Promise<number> {
   const directory = one(parsed, "--dir");
   if (directory) {
     const count = convertHtmlDirectory(directory);
-    if (count) console.log(`  Converted ${count} HTML files to markdown`);
+    if (count) say(`  Converted ${count} HTML files to markdown`);
     return 0;
   }
   const content = parsed.positionals[0]
     ? readRegularFileNoFollow(parsed.positionals[0])
     : await Bun.stdin.text();
-  console.log(convertHtml(content));
+  say(convertHtml(content));
   return 0;
 }
 async function corpusCommand(
@@ -492,15 +518,13 @@ async function corpusCommand(
       allowPrivateNetwork: parsed.flags.has("--allow-private-network") || undefined,
       signal,
     });
-    console.error(`Captured corpus sample: ${path}`);
+    note(`Captured corpus sample: ${path}`);
     return 0;
   }
   if (parsed.positionals.length)
     throw new AgentscrapeUsageError("test-corpus takes no positional arguments");
   const result = await testCorpus(one(parsed, "--preset"));
-  console.log(
-    `${result.lines.join("\n")}\n\nResults: ${result.passed} passed, ${result.failed} failed`,
-  );
+  say(`${result.lines.join("\n")}\n\nResults: ${result.passed} passed, ${result.failed} failed`);
   return result.failed ? 1 : 0;
 }
 export function checkPresetResultsExitCode(
@@ -565,6 +589,15 @@ async function queueCommand(args: string[], signal?: AbortSignal): Promise<numbe
   );
   return 0;
 }
+function guideCommand(args: string[]): number {
+  const parsed = parseArgs("guide", args);
+  const helpCode = commandHelp(parsed, "guide");
+  if (helpCode !== null) return helpCode;
+  if (parsed.positionals.length)
+    throw new AgentscrapeUsageError("guide takes no positional arguments");
+  say(parsed.flags.has("--json") ? renderContractJson() : renderAgentHelp());
+  return 0;
+}
 function doctorCommand(args: string[]): number {
   const parsed = parseArgs("doctor", args);
   const helpCode = commandHelp(parsed, "doctor");
@@ -578,36 +611,75 @@ function doctorCommand(args: string[]): number {
   output(renderDoctorReport(report, selected));
   return doctorExitCode(report);
 }
+/**
+ * `agentscrape mcp`: the stdio MCP server, in this process.
+ *
+ * The SDK is loaded here rather than at module scope so that no other command
+ * pays for it at startup, and so this file and `mcp-server.ts` — which
+ * dispatches back through `main` — do not have to resolve each other eagerly.
+ */
+async function mcpCommand(args: string[], signal?: AbortSignal): Promise<number> {
+  const parsed = parseArgs("mcp", args);
+  const helpCode = commandHelp(parsed, "mcp");
+  if (helpCode !== null) return helpCode;
+  if (parsed.positionals.length)
+    throw new AgentscrapeUsageError("mcp takes no positional arguments");
+  const { serveAgentscrapeMcp } = await import("./mcp");
+  await serveAgentscrapeMcp(signal);
+  return 0;
+}
+
 export interface MainOptions {
   signal?: AbortSignal;
+  /**
+   * Where this run's output goes. Absent means fd 1 and fd 2, which is what a
+   * terminal run wants; `agentscrape mcp` passes a sink because fd 1 is the
+   * protocol channel there.
+   */
+  output?: OutputSink;
 }
 
 export async function main(
   argv = process.argv.slice(2),
   options: MainOptions = {},
 ): Promise<number> {
+  if (options.output === undefined) return dispatch(argv, options.signal);
+  // The sink is module state, so two captured runs cannot overlap. The MCP
+  // server serializes its calls for exactly this reason; anything else that
+  // captures output gets a refusal here rather than another run's bytes.
+  if (sink !== null)
+    throw new Error("an output sink is already installed; captured runs may not overlap");
+  sink = options.output;
+  try {
+    return await dispatch(argv, options.signal);
+  } finally {
+    sink = null;
+  }
+}
+
+async function dispatch(argv: string[], signal?: AbortSignal): Promise<number> {
   let index = 0;
   let globalFormat: string | undefined;
   while (index < argv.length && argv[index]!.startsWith("-")) {
     const parsed = parseGlobalOption(argv, index);
     if (parsed.name === "--help") {
-      process.stdout.write(renderHumanHelp());
+      write(renderHumanHelp());
       return 0;
     }
     if (parsed.name === "--version") {
-      console.log(`${CLI_SPEC.name} ${CLI_SPEC.version}`);
+      say(`${CLI_SPEC.name} ${CLI_SPEC.version}`);
       return 0;
     }
     if (parsed.name === "--help-json") {
-      console.log(renderJsonHelp());
+      say(renderJsonHelp());
       return 0;
     }
     if (parsed.name === "--agent-help") {
-      console.log(CLI_SPEC.agentHelp);
+      say(renderAgentHelp());
       return 0;
     }
     if (parsed.name === "--agent-teaser") {
-      console.log(renderAgentTeaser());
+      say(renderAgentTeaser());
       return 0;
     }
     if (parsed.name === "--format") {
@@ -629,12 +701,11 @@ export async function main(
     const target = parsed.positionals[0];
     if (target && !findVisibleCommandSpec(target))
       throw new AgentscrapeUsageError(`unknown command '${target}'`);
-    process.stdout.write(renderHumanHelp(target));
+    write(renderHumanHelp(target));
     return 0;
   }
   if (!findVisibleCommandSpec(command))
     throw new AgentscrapeUsageError(`unknown command '${command}'`);
-  const signal = options.signal;
   if (command === "fetch-markdown") return fetchMarkdownCommand(args, signal);
   if (command === "fetch-links") return fetchLinksCommand(args, signal);
   if (command === "discover-feed") return discoverFeedCommand(args, signal, globalFormat);
@@ -646,6 +717,8 @@ export async function main(
   if (command === "convert-html") return convertCommand(args);
   if (["open-session", "close-session"].includes(command))
     return sessionCommand(command, args, signal);
+  if (command === "guide") return guideCommand(args);
+  if (command === "mcp") return mcpCommand(args, signal);
   if (command === "doctor") return doctorCommand(args);
   return queueCommand(args, signal);
 }

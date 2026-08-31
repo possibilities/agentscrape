@@ -26,7 +26,7 @@ agentscrape fetch-links https://example.com/docs --preset docs-sidebar
 agentscrape discover-feed --source-url https://example.com/blog
 ```
 
-`agentscrape --help` lists all commands, `agentscrape --agent-help` prints the agent runbook, `--agent-teaser` the one-screen command inventory, and `COMMAND --help-json` is machine-readable. Behavioral contracts — routing, egress policy, output shapes, corpus, queue — live in [docs/contracts.md](docs/contracts.md).
+`agentscrape guide --json` is the fleet agent contract — the single authored self-description that `--agent-help`, `--agent-teaser`, and `--help` all render from. `agentscrape --help` lists all commands, `agentscrape --agent-help` prints the agent runbook, `--agent-teaser` the one-screen command inventory, and `COMMAND --help-json` is machine-readable. Behavioral contracts — routing, egress policy, output shapes, corpus, queue — live in [docs/contracts.md](docs/contracts.md).
 
 ## Without the private toolchain
 

@@ -33,6 +33,7 @@
     "check": "bash scripts/check-hermetic.sh check"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "cheerio": "1.2.0",
     "fast-xml-parser": "5.10.1",
     "markdown-it": "14.1.0",
