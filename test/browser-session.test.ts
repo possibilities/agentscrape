@@ -28,12 +28,15 @@ import {
 import { checkPresets } from "../src/canary";
 import { captureCorpus } from "../src/corpus";
 import {
+  AgentscrapeAuthError,
   AgentscrapeBrowserError,
   AgentscrapeCancelledError,
   AgentscrapeNetworkPolicyError,
   AgentscrapeUpstreamDownError,
   AgentscrapeUsageError,
 } from "../src/errors";
+import { captureXStatusPage } from "../src/handlers/x";
+import { X_APP_PROBE, X_SIGNED_OUT_MESSAGE } from "../src/handlers/x-page";
 import { loadRegistry, scrapeWithPreset } from "../src/presets";
 
 const temporary: string[] = [];
@@ -42,6 +45,7 @@ const originalHome = process.env.HOME;
 const originalInterleave = process.env.AGENTSCRAPE_TEST_INTERLEAVE;
 const originalState = process.env.AGENTSCRAPE_TEST_STATE;
 const originalMissingSelector = process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR;
+const originalTestidCount = process.env.AGENTSCRAPE_TEST_TESTID_COUNT;
 const originalTruncatedHtml = process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML;
 const originalCloseExit = process.env.AGENTSCRAPE_TEST_CLOSE_EXIT;
 const originalCloseStderr = process.env.AGENTSCRAPE_TEST_CLOSE_STDERR;
@@ -59,6 +63,8 @@ afterEach(() => {
   else process.env.AGENTSCRAPE_TEST_STATE = originalState;
   if (originalMissingSelector === undefined) delete process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR;
   else process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR = originalMissingSelector;
+  if (originalTestidCount === undefined) delete process.env.AGENTSCRAPE_TEST_TESTID_COUNT;
+  else process.env.AGENTSCRAPE_TEST_TESTID_COUNT = originalTestidCount;
   if (originalTruncatedHtml === undefined) delete process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML;
   else process.env.AGENTSCRAPE_TEST_TRUNCATED_HTML = originalTruncatedHtml;
   if (originalCloseExit === undefined) delete process.env.AGENTSCRAPE_TEST_CLOSE_EXIT;
@@ -156,6 +162,8 @@ if (expression === "window.location.href") {
   console.log(JSON.stringify({ html: "<main>Session body</main>" }));
 } else if (expression.includes("const hasText")) {
   console.log(JSON.stringify("body"));
+} else if (expression === ${JSON.stringify(X_APP_PROBE)}) {
+  console.log(process.env.AGENTSCRAPE_TEST_TESTID_COUNT ?? "1");
 } else {
   console.log("null");
 }
@@ -795,6 +803,40 @@ describe("browser-free and low-level session behavior", () => {
       { session: secondName, command: ["eval", "window.location.href"] },
       { session: secondName, command: ["close"] },
     ]);
+  });
+});
+
+describe("X signed-out page detection", () => {
+  test("a selector miss on X's reduced signed-out page is authentication, not a transient browser error", async () => {
+    fixture();
+    process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR = "1";
+    process.env.AGENTSCRAPE_TEST_TESTID_COUNT = "0";
+    let failure: unknown;
+    try {
+      await withBrowserNetworkPolicy(true, () =>
+        captureXStatusPage("https://x.com/alice/status/1"),
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AgentscrapeAuthError);
+    expect((failure as Error).message).toBe(X_SIGNED_OUT_MESSAGE);
+  });
+
+  test("a selector miss on the full X application keeps its browser diagnosis", async () => {
+    fixture();
+    process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR = "1";
+    process.env.AGENTSCRAPE_TEST_TESTID_COUNT = "42";
+    let failure: unknown;
+    try {
+      await withBrowserNetworkPolicy(true, () =>
+        captureXStatusPage("https://x.com/alice/status/1"),
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AgentscrapeBrowserError);
+    expect((failure as Error).message).toContain("Content not found for the requested selector");
   });
 });
 

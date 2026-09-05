@@ -88,6 +88,26 @@ export function authorInfo(
   return [name, handle, url];
 }
 
+// X's signed-out rendering is a different, reduced page: it carries no data-testid
+// attributes at all, and every selector this handler reads is one. A selector miss
+// on such a page is therefore a sign-in problem, not a transient one, and is
+// reported as authentication so a queue owner blocks it with the reason instead of
+// retrying a page that will never change. Seen 2026-08-30 through 2026-09-05, when
+// the browser stack moved to fresh per-fetch profiles and every X post failed the
+// same way five times before blocking as an item problem.
+export const X_APP_PROBE = "document.querySelectorAll('[data-testid]').length";
+export const X_SIGNED_OUT_MESSAGE =
+  "X.com authentication required - a signed-out browser receives X's reduced page without the elements the extractor reads; sign the browser profile agentscrape uses into x.com";
+
+export async function requireXApp(session?: string | null): Promise<void> {
+  const count = await browserEval(X_APP_PROBE, session, "Failed to check the X page shape");
+  if (typeof count !== "number")
+    throw new AgentscrapeBrowserError(
+      "Failed to check the X page shape: expected a numeric result",
+    );
+  if (count === 0) throw new AgentscrapeAuthError(X_SIGNED_OUT_MESSAGE);
+}
+
 export async function checkXAuth(session?: string | null): Promise<void> {
   const required = await browserEval(
     "(document.querySelector('[data-testid=\"BottomBar\"]')?.getBoundingClientRect().height ?? 0) > 0",

@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import { currentBrowserNetworkPolicy, openPage } from "../browser";
 import { browserEvalString } from "../browser-eval";
-import { AgentscrapeUsageError, PresetDriftError } from "../errors";
+import { AgentscrapeBrowserError, AgentscrapeUsageError, PresetDriftError } from "../errors";
 import { convertHtml } from "../html";
 import { resolveNetworkAddress } from "../network-policy";
 import { pinnedHeader, requestPinnedHttp } from "../pinned-http";
@@ -15,6 +15,7 @@ import {
   isReservedXRoute,
   isXHost,
   ownedDescendants,
+  requireXApp,
 } from "./x-page";
 
 export {
@@ -285,7 +286,18 @@ async function browserHtml(
   options: HandlerOptions,
   selector: string,
 ): Promise<string> {
-  await openPage(url, options.session, options.media, selector);
+  try {
+    await openPage(url, options.session, options.media, selector);
+  } catch (error) {
+    // A missing selector on X's reduced signed-out page is a sign-in problem,
+    // reported as such; any other miss keeps its original browser diagnosis.
+    if (
+      error instanceof AgentscrapeBrowserError &&
+      error.message.includes("Content not found for the requested selector")
+    )
+      await requireXApp(options.session);
+    throw error;
+  }
   await checkXAuth(options.session);
   return browserEvalString(
     "document.documentElement.outerHTML",
