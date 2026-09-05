@@ -906,6 +906,36 @@ exit 1`,
     }
   });
 
+  test("a provider plugin refusing to supply a browser is a cached upstream outage", async () => {
+    // agent-browser prints only this line when its provider plugin answers
+    // success=false, dropping the plugin's reason. On 2026-09-05 agentbrowse
+    // refused its own config that way and every browser-backed fetch died in
+    // under a second as a retryable browser_error, so each queued item burned
+    // its whole retry budget in forty seconds and blocked.
+    const directory = temp();
+    const home = temp();
+    const calls = join(directory, "calls");
+    const browser = executable(
+      directory,
+      "agent-browser",
+      `printf 'call\\n' >> ${JSON.stringify(calls)}
+printf "\\342\\234\\227 Plugin 'agentbrowse' returned success=false\\n" >&2
+exit 1`,
+    );
+    process.env.HOME = home;
+    process.env[AGENT_BROWSER_BIN_ENV] = browser;
+    const first = await runAgentBrowser(["open", "https://example.com/"], "shared");
+    expect(first.exitCode).toBe(1);
+    expect(first.stderr).toStartWith("upstream down: ");
+    expect(first.stderr).toContain("Plugin 'agentbrowse' returned success=false");
+    // Same session, same (absent) profile: the page open answers from the cache
+    // as an upstream outage without spawning a second process.
+    await expect(
+      withBrowserNetworkPolicy(true, () => openPage("https://example.com/", "shared")),
+    ).rejects.toBeInstanceOf(AgentscrapeUpstreamDownError);
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
   test("a concurrent success clears an outage cached by the same-key failure", async () => {
     const directory = temp();
     const home = temp();

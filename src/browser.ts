@@ -44,6 +44,14 @@ export const AGENT_BROWSER_SESSION_ENV = "AGENTSCRAPE_BROWSER_SESSION";
 export const AGENT_BROWSER_TIMEOUT_PREFIX = "agent-browser timed out after ";
 export const AGENT_BROWSER_OUTPUT_MAX_BYTES = 8_000_000;
 export const UPSTREAM_DOWN_PREFIX = "upstream down: ";
+// agent-browser reports "no browser could be acquired" in two shapes: browserctl's
+// own acquisition failure, and a provider plugin answering success=false, whose
+// reason agent-browser drops before it reaches stderr. Both mean the extraction
+// dependency is down, not that this page failed, so both become a cached upstream
+// outage that queue owners retry indefinitely instead of a per-item browser error
+// that burns a bounded retry budget in seconds.
+const BROWSER_ACQUISITION_FAILURE =
+  /failed to acquire browser from browserctl|Plugin '[^']*' returned success=false/;
 export const CLAUDE_APP_READY_SELECTOR = "[data-testid='account-settings'], main";
 const OUTAGE_CACHE_TTL_MS = 30_000;
 const OUTAGE_CACHE_MAX_ENTRIES = 64;
@@ -458,7 +466,7 @@ export async function runAgentBrowser(
     result.exitCode !== 0 &&
     !isCancelledResult(result) &&
     !isTimeoutResult(result) &&
-    result.stderr.includes("failed to acquire browser from browserctl")
+    BROWSER_ACQUISITION_FAILURE.test(result.stderr)
   ) {
     const reason = upstreamReason(result.stderr.trim());
     const outageNow = Date.now();
