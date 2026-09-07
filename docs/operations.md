@@ -18,7 +18,7 @@ lives in the [threat model](threat-model.md).
 | `pandoc` | Optional | Conversion of GitHub `.rst` content, including repository READMEs and blob routes |
 | `summaryctl` | Optional | Queue jobs whose record requests `summarize` |
 | Trusted Git checkout plus `git`, `tar`, Bash, and core operating-system tools | Install/deploy only | Resolve and archive the exact commit, prepare the snapshot, and publish owned files |
-| macOS `launchctl` and `plutil` | Supported standalone install only | Validate and manage the user LaunchAgent |
+| macOS `launchctl` | Standalone uninstall only | Best-effort stop of the AgentStart-owned user LaunchAgent |
 
 Several of these are unpublished local tools; see the README for what
 Agentscrape does without them. Agentbuilds is commonly the trusted deployment
@@ -56,7 +56,7 @@ semantic-version equality does not establish deployment-byte identity.
 | `AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_DELAY_SECONDS` | Retry cap; finite values from 0.1 through 3600 seconds are accepted, otherwise the default is 60. The effective cap is never below the initial delay. |
 | `AGENTSCRAPE_PROCESS_QUEUE_RETRY_MAX_ATTEMPTS` | Total attempts including the initial failed attempt; default 5. When present it must be an integer from 1 through 100 or queue processing fails closed. |
 | `XDG_STATE_HOME` | Installer state defaults to `$XDG_STATE_HOME/agentscrape`, otherwise `$HOME/.local/state/agentscrape`. The HOME-scoped installer lock remains under `$HOME/.local/state/.agentscrape-installer`. |
-| Installer overrides | The approved deployment overrides are `AGENTSCRAPE_INSTALL_BIN_DIR`, `AGENTSCRAPE_INSTALL_LAUNCH_AGENTS_DIR`, `AGENTSCRAPE_INSTALL_STATE_DIR`, `AGENTSCRAPE_INSTALL_SHARE_DIR`, `AGENTSCRAPE_INSTALL_BUN`, `AGENTSCRAPE_INSTALL_LAUNCHCTL`, and `AGENTSCRAPE_INSTALL_PLUTIL`. |
+| Installer overrides | The approved deployment overrides are `AGENTSCRAPE_INSTALL_BIN_DIR`, `AGENTSCRAPE_INSTALL_STATE_DIR`, `AGENTSCRAPE_INSTALL_SHARE_DIR`, `AGENTSCRAPE_INSTALL_BUN`, and `AGENTSCRAPE_INSTALL_LAUNCHCTL`. |
 
 Queue resolution is explicit and shared by `submitScrapeJob()` and every
 worker: `AGENTSCRAPE_DATA_HOME/queue` when that root is set, otherwise
@@ -67,11 +67,10 @@ failures - 1))`. The policy is captured when a retry chain begins, so later
 environment changes do not rewrite an existing chain.
 
 The managed wrapper always exports the installer-resolved share directory as
-`AGENTSCRAPE_DATA_HOME`. The LaunchAgent plist receives only the `PATH` rendered
-at installation and executes that wrapper; it does not inherit later
-interactive-shell XDG, retry, or browser overrides. Interactive invocations of
-the wrapper still inherit their calling shell except for the wrapper-fixed data
-home.
+`AGENTSCRAPE_DATA_HOME`. AgentStart's LaunchAgent executes that wrapper with
+its rendered `PATH`; it does not inherit later interactive-shell XDG, retry, or
+browser overrides. Interactive invocations of the wrapper still inherit their
+calling shell except for the wrapper-fixed data home.
 
 Parser and option mistakes exit 2, separate from the runtime failures that exit
 1; the full exit-code contract is in [contracts.md](contracts.md).
@@ -81,6 +80,7 @@ Parser and option mistakes exit 2, separate from the runtime failures that exit
 ```sh
 ./scripts/install.sh              # install or upgrade
 ./scripts/install.sh --uninstall  # idempotent removal
+../agentstart/scripts/install-launchagents --install  # converge the service
 ```
 
 The installer resolves `HEAD^{commit}` and its exact tree once, archives only
@@ -90,29 +90,31 @@ verified, sealed result with an atomic no-replace rename as
 `~/.local/state/agentscrape/runtime/<sha>` — files `0400`/`0500`, directories
 `0500`, with a hashed manifest recording the commit, tree, and complete
 inventory. It then installs an owned `~/.local/bin/agentscrape` wrapper
-pointing at that snapshot, creates private queue data, and loads
-`~/Library/LaunchAgents/agentscrape.queue-processor.plist`. Every state override
-sharing a HOME is serialized by one fail-closed
+pointing at that snapshot and creates private queue data. AgentStart separately
+owns and loads
+`~/Library/LaunchAgents/io.arthack.agentscrape.process-queue.plist`. Every state
+override sharing a HOME is serialized by one fail-closed
 `~/.local/state/.agentscrape-installer` owner lock.
 
 Verify after install:
 
 ```sh
 agentscrape --help
-launchctl print "gui/$(id -u)/agentscrape.queue-processor"
+launchctl print "gui/$(id -u)/io.arthack.agentscrape.process-queue"
 ```
 
 The loaded service should reference `~/.local/bin/agentscrape`, the
-installer-resolved queue directory, and the installer-rendered `PATH`.
+installer-resolved queue directory, and the AgentStart-rendered `PATH`.
 
-Uninstall requires an exactly inspectable `launchctl` state plus correlated
-command, plist, receipt, and deployed-SHA bytes; `<snapshot>/scripts/install.sh
---uninstall` stays usable after the source checkout is removed. It unloads the
-service, removes only revalidated files, and fsyncs their parents under the
-same lock. Ambiguous or foreign evidence is retained rather than deleted. Queue
-files, failed jobs, browser/session data, logs, corpus captures, and every
-published runtime snapshot survive uninstall; removing them is a separate
-explicit operation.
+Uninstall requires correlated command, receipt, and deployed-SHA bytes;
+`<snapshot>/scripts/install.sh --uninstall` stays usable after the source
+checkout is removed. It stops the current or historical service label
+best-effort, leaves the AgentStart-owned plist in place, removes only
+revalidated Agentscrape files, and fsyncs their parents under the same lock.
+Ambiguous or foreign evidence is retained rather than deleted. Queue files,
+failed jobs, browser/session data, logs, corpus captures, and every published
+runtime snapshot survive uninstall; removing them is a separate explicit
+operation.
 
 ## Rollback, cutover, and runtime GC
 

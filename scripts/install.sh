@@ -6,7 +6,8 @@ usage() {
   cat <<'EOF'
 Usage: scripts/install.sh [--install|--uninstall|--gc-runtime|--help]
 
-Install creates the standalone agentscrape command and its user LaunchAgent.
+Install creates the standalone agentscrape command. AgentStart owns its
+`io.arthack.agentscrape.process-queue` LaunchAgent.
 Uninstall removes only exact installer-owned public files. Runtime snapshots and
 queue, failed-job, corpus, and log data are retained. GC explicitly removes only
 verified, unprotected runtime snapshots; it is never automatic.
@@ -33,7 +34,8 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ROOT_DIR="$ROOT"
-LABEL=agentscrape.queue-processor
+LABEL=io.arthack.agentscrape.process-queue
+PREVIOUS_LABEL=agentscrape.queue-processor
 LEGACY_LABEL=agentscrape.process-queue
 OWNER_UID="$(id -u)"
 PLATFORM="$(uname -s)"
@@ -50,7 +52,6 @@ RECEIPT_PATH="$STATE_DIR/install-receipt"
 LOCK_DIR="$HOME/.local/state/.agentscrape-installer"
 LOCK_PATH="$LOCK_DIR/install.lock"
 BUN_CMD="${AGENTSCRAPE_INSTALL_BUN:-bun}"
-PLUTIL_CMD="${AGENTSCRAPE_INSTALL_PLUTIL:-plutil}"
 COMMAND_MARKER='agentscrape-installer-owned: agentscrape.command.v1'
 RECEIPT_MARKER='agentscrape-installer-owned: agentscrape.install-receipt.v1'
 
@@ -389,7 +390,8 @@ load_receipt() {
   (( ${#lines[@]} == 9 || ${#lines[@]} == 12 || ${#lines[@]} == 8 )) || return 1
   [[ "${lines[0]}" == "marker=$RECEIPT_MARKER" ]] || return 1
   RECEIPT_LABEL="${lines[1]#label=}"
-  [[ "${lines[1]}" == label=* && ( "$RECEIPT_LABEL" == "$LABEL" || "$RECEIPT_LABEL" == "$LEGACY_LABEL" ) ]] || return 1
+  [[ "${lines[1]}" == label=* && ( "$RECEIPT_LABEL" == "$LABEL" ||
+    "$RECEIPT_LABEL" == "$PREVIOUS_LABEL" || "$RECEIPT_LABEL" == "$LEGACY_LABEL" ) ]] || return 1
   RECEIPT_ROOT="${lines[2]#root=}"; RECEIPT_SOURCE="${lines[3]#source=}"; RECEIPT_BUN="${lines[4]#bun=}"
   RECEIPT_COMMAND="${lines[5]#command=}"
   [[ "${lines[2]}" == root=* && "${lines[3]}" == source=* && "${lines[4]}" == bun=* &&
@@ -811,7 +813,10 @@ uninstall() {
   # boot out the operator's real service.
   local launchctl_cmd="${AGENTSCRAPE_INSTALL_LAUNCHCTL:-launchctl}"
   if [[ "$launchctl_cmd" != none ]] && command -v "$launchctl_cmd" >/dev/null 2>&1; then
-    "$launchctl_cmd" bootout "gui/$OWNER_UID/$LABEL" >/dev/null 2>&1 || true
+    local service_label
+    for service_label in "$LABEL" "$PREVIOUS_LABEL" "$LEGACY_LABEL"; do
+      "$launchctl_cmd" bootout "gui/$OWNER_UID/$service_label" >/dev/null 2>&1 || true
+    done
   fi
   UNINSTALL_ROLLBACK=1
   trap rollback_uninstall EXIT HUP INT TERM
@@ -828,7 +833,6 @@ uninstall() {
 
 command -v "$BUN_CMD" >/dev/null 2>&1 || fail "Bun is required"
 BUN_BIN="$(command -v "$BUN_CMD")"
-if [[ "$ACTION" == install ]]; then command -v "$PLUTIL_CMD" >/dev/null 2>&1 || fail "plutil is required"; fi
 safe_absolute_path "$BUN_BIN" || fail "tool must resolve to an absolute path"
 [[ -f "$BUN_BIN" && -x "$BUN_BIN" ]] || fail "tool is not executable"
 validate_paths
@@ -883,5 +887,5 @@ else
   trap 'release_lock "$?"' EXIT
 fi
 printf 'installed %s\n' "$COMMAND_PATH"
-printf 'the agentscrape.queue-processor service is installed by AgentStart: %s\n' \
+printf 'the io.arthack.agentscrape.process-queue service is installed by AgentStart: %s\n' \
   "$HOME/code/agentstart/scripts/install-launchagents --install"

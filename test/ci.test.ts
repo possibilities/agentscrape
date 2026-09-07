@@ -93,9 +93,11 @@ describe("hermetic package checks", () => {
 
   test("installer migrates the previous service label without weakening receipt ownership", () => {
     const installer = readFileSync(join(root, "scripts/install.sh"), "utf8");
+    expect(installer).toContain("PREVIOUS_LABEL=agentscrape.queue-processor");
     expect(installer).toContain("LEGACY_LABEL=agentscrape.process-queue");
+    expect(installer).toContain('for service_label in "$LABEL" "$PREVIOUS_LABEL" "$LEGACY_LABEL"');
     expect(installer).toContain(
-      '"$RECEIPT_LABEL" == "$LABEL" || "$RECEIPT_LABEL" == "$LEGACY_LABEL"',
+      '"$RECEIPT_LABEL" == "$PREVIOUS_LABEL" || "$RECEIPT_LABEL" == "$LEGACY_LABEL"',
     );
     expect(installer).toContain(
       '"$RECEIPT_SHARE" "$RECEIPT_QUEUE" "$RECEIPT_SHA" "$RECEIPT_LABEL"',

@@ -4,7 +4,7 @@
 
 Give it a URL and get what is actually on the page — Markdown, navigation links, live or recorded feeds, and strict provider presets — through an agent-friendly Bun CLI.
 
-Agentscrape never writes back to remote providers, but it is not read-only locally. Commands write destination files, corpus fixtures, queue state, and browser session state, and the installer changes the user command and LaunchAgent paths it owns. See the [threat model](docs/threat-model.md) for the claimed boundaries.
+Agentscrape never writes back to remote providers, but it is not read-only locally. Commands write destination files, corpus fixtures, queue state, and browser session state, and the installer changes the user command paths it owns. AgentStart separately owns the fleet LaunchAgent. See the [threat model](docs/threat-model.md) for the claimed boundaries.
 
 ## Install
 
@@ -12,8 +12,9 @@ Requires Bun ≥ 1.3.14. The supported distribution is the macOS standalone snap
 
 ```sh
 ./scripts/install.sh
+../agentstart/scripts/install-launchagents --install
 agentscrape --help
-launchctl print "gui/$(id -u)/agentscrape.queue-processor"
+launchctl print "gui/$(id -u)/io.arthack.agentscrape.process-queue"
 ```
 
 Uninstall, snapshot GC, rollback, and every environment variable are covered in [docs/operations.md](docs/operations.md).
