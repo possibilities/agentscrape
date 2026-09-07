@@ -379,6 +379,7 @@ describe("a live stdio server", () => {
     };
     expect(result.isError ?? false).toBe(false);
     expect(result.content[0]!.text).toContain("content:");
+    expect(result).not.toHaveProperty("structuredContent");
     expect(result.content[0]!.text).toContain("chatgpt-conversation");
   });
 
@@ -402,6 +403,7 @@ describe("a live stdio server", () => {
     })) as { isError?: boolean; content: { text: string }[] };
     expect(result.isError ?? false).toBe(false);
     const document = JSON.parse(result.content[0]!.text);
+    expect(result).toHaveProperty("structuredContent", document);
     expect(document).toMatchObject({ schema_version: "1", status: "success" });
     expect(document.items.length).toBeGreaterThan(0);
   });
@@ -413,9 +415,9 @@ describe("a live stdio server", () => {
     })) as { isError?: boolean; content: { text: string }[] };
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toStartWith("agentscrape discover-feed exited 1");
-    expect(
-      JSON.parse(result.content[0]!.text.slice(result.content[0]!.text.indexOf("{"))),
-    ).toMatchObject({ status: "failure" });
+    const document = JSON.parse(result.content[1]!.text);
+    expect(document).toMatchObject({ status: "failure" });
+    expect(result).toHaveProperty("structuredContent", document);
   });
 
   test("a thrown refusal leads with its failure code", async () => {
@@ -426,6 +428,10 @@ describe("a live stdio server", () => {
     expect(result.isError).toBe(true);
     const [code] = result.content[0]!.text.split(":");
     expect(DOCUMENT.concepts.error_codes.map((entry) => entry.code)).toContain(code!);
+    const document = JSON.parse(result.content[1]!.text);
+    expect(document.error.code).toBe(code);
+    expect(document.error).toHaveProperty("retryable");
+    expect(result).toHaveProperty("structuredContent", document);
   });
 
   test("a value outside the contract's bound is refused before the CLI runs", async () => {
@@ -460,6 +466,7 @@ describe("a live stdio server", () => {
     };
     expect(result.isError ?? false).toBe(false);
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({ ok: true, schema_version: 1 });
+    expect(result).toHaveProperty("structuredContent", JSON.parse(result.content[0]!.text));
     const { tools } = await client.listTools();
     expect(tools.length).toBe(TOOLS.length);
   });

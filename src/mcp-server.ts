@@ -72,6 +72,7 @@ export function createAgentscrapeMcpServer(): McpServer {
 interface Captured {
   code: number;
   text: string;
+  notes: string[];
 }
 
 async function run(argv: string[], signal?: AbortSignal): Promise<Captured> {
@@ -88,8 +89,35 @@ async function run(argv: string[], signal?: AbortSignal): Promise<Captured> {
   const code = await main(argv, { output: sink, ...(signal ? { signal } : {}) });
   // A command whose whole result is a side effect — `fetch-markdown URL DEST`
   // writes the file and says so on stderr — would otherwise come back empty.
-  const text = [...notes, ...(out.length ? [out.join("")] : [])].join("\n");
-  return { code, text };
+  return { code, text: out.join(""), notes };
+}
+
+function capturedResult(captured: Captured, name: string): CallToolResult {
+  const content: CallToolResult["content"] = captured.notes.map((text) => ({
+    type: "text",
+    text,
+  }));
+  if (captured.text) content.push({ type: "text", text: captured.text });
+  let structuredContent: Record<string, unknown> | undefined;
+  try {
+    const value: unknown = JSON.parse(captured.text);
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      structuredContent = value as Record<string, unknown>;
+    }
+  } catch {
+    // Markdown and file-write notices have no JSON contract to project.
+  }
+  if (captured.code !== 0) {
+    content.unshift({
+      type: "text",
+      text: `${CLI_SPEC.name} ${name} exited ${captured.code}. The result below carries the failure.`,
+    });
+  }
+  return {
+    content,
+    ...(structuredContent === undefined ? {} : { structuredContent }),
+    ...(captured.code === 0 ? {} : { isError: true }),
+  };
 }
 
 /**
@@ -111,19 +139,10 @@ async function callTool(
   } catch (error) {
     return toolError(error, recoveries);
   }
-  if (captured.code === 0) return { content: [{ type: "text", text: captured.text }] };
   // A nonzero exit with no thrown error is a command that classified its own
   // failure and printed it — `--envelope`'s failure field, a feed discovery
   // result. The document IS the answer, so it is returned rather than summarized.
-  return {
-    isError: true,
-    content: [
-      {
-        type: "text",
-        text: `${CLI_SPEC.name} ${tool.name} exited ${captured.code}. The result below carries the failure.\n${captured.text}`,
-      },
-    ],
-  };
+  return capturedResult(captured, tool.name);
 }
 
 /**
@@ -149,5 +168,15 @@ function toolError(error: unknown, recoveries: Map<string, string | undefined>):
   const recovery = recoveries.get(code);
   if (recovery !== undefined) lines.push(`recovery: ${recovery}`);
   if (retryable) lines.push("This failure is retryable.");
-  return { isError: true, content: [{ type: "text", text: lines.join("\n") }] };
+  const structuredContent = {
+    error: { code, message, retryable, ...(recovery === undefined ? {} : { recovery }) },
+  };
+  return {
+    isError: true,
+    structuredContent,
+    content: [
+      { type: "text", text: lines.join("\n") },
+      { type: "text", text: JSON.stringify(structuredContent, null, 2) },
+    ],
+  };
 }
