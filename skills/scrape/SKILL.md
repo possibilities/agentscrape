@@ -1,6 +1,9 @@
 ---
 name: scrape
-description: Fetch one specific URL and get what is actually on it, with the agentscrape CLI — a page as Markdown, a GitHub README or Gist, a PDF, a page's navigation links, an X timeline, or a site's feed inventory, plus provider-structured output for X posts and articles, ChatGPT shares, and DeepWiki. Reach for it whenever you have a URL and want its content, and prefer it over curl, which returns a JavaScript shell for most modern pages. Finding URLs you do not have yet — web search — is the `search` skill's job.
+description: >-
+  Read a known URL with agentscrape: extract page text, links, feeds, PDFs,
+  GitHub content, or X posts. Use for content retrieval; use browser for live
+  interaction and search to discover URLs.
 ---
 
 # Scrape — fetch a URL, get its content
