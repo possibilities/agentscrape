@@ -1,8 +1,8 @@
 # Extraction details
 
 Discover the current MCP schema before choosing less common parameters.
-Hyphenated argument keys remain quoted JSON keys even when Executor normalizes
-the tool's name.
+Hyphenated argument keys remain quoted JSON keys; native tool names use
+underscores between command words.
 
 ## Routes and presets
 
@@ -53,8 +53,7 @@ what was extracted. X metadata distinguishes a post, same-author thread, and
 article; quoted posts do not increase the thread count.
 
 A failure carries `failure_class`, `retryable`, message, and evidence. Inspect
-these fields instead of inferring success from Executor's outer execution
-status. A byte/relation overflow is `output_limit_exceeded`; increase bounds
+these fields and MCP `isError` before claiming successful extraction. A byte/relation overflow is `output_limit_exceeded`; increase bounds
 only when needed. An empty PDF extraction may mean a scan with no text layer;
 use the document/image tools appropriate to that source.
 

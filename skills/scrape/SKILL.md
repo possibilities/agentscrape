@@ -8,10 +8,12 @@ description: >-
 
 # Scrape — read a source
 
-Use Agentscrape's MCP tools through Executor to extract a known URL. Discover
-an operation in the `agentscrape` namespace and inspect its schema. Executor
-normalizes names such as `fetch-markdown` to `fetch_markdown`; use the returned
-path instead of constructing it. The `guide` tool supplies deeper contracts.
+Use the `agentscrape` MCP server directly. Select the tool from the harness's
+catalog or tool search, inspect its input schema, and call it with JSON
+arguments. The host may prefix tool names with the server name. `guide`
+provides the installed command contract and recovery guidance.
+The native Markdown operation is `fetch_markdown`; its argument keys retain
+their declared spelling, including hyphens.
 
 Use `search` to find sources and `browser` for page interaction or sign-in.
 Agentscrape chooses the extraction route: a provider preset, GitHub through
@@ -67,9 +69,9 @@ to repair one failed fetch.
 
 On failure, inspect the classification and retryability. A policy refusal,
 authentication requirement, or missing preset structure needs a changed
-condition, not an identical retry. Through Executor, structured extraction
-data is in the upstream MCP result's `structuredContent`; domain errors keep
-a separate JSON block in `error.details.content`. Plain Markdown stays text.
+condition before retrying. Read MCP `isError` and the extraction data in
+`structuredContent`, or its standalone JSON text block. Plain Markdown
+stays text; inspect the domain outcome before reporting success.
 
 For X timelines, link and feed inventories, preset routing, and specific
 extraction failures, read [extraction details](references/extraction.md).
