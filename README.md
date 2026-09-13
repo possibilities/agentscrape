@@ -1,3 +1,5 @@
+> *Slop Made With Sweat: Made with a lot of love by someone who loves code but read none of it.*
+
 # AgentScrape
 
 [![CI](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/possibilities/agentscrape/actions/workflows/ci.yml)
