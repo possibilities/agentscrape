@@ -312,6 +312,8 @@ case "$*" in
       printf '"about:blank"'
     fi ;;
   *" open "*) touch ${JSON.stringify(opened)} ;;
+  *" set media "*) ;;
+  *" network route "*) ;;
   *" wait --load networkidle") ;;
   *" eval document.documentElement.outerHTML")
     printf '"<html><body><main>Offline browser page</main></body></html>"' ;;
@@ -356,6 +358,8 @@ printf '%s\n' "$*" >> "$BROWSER_MARKER"
 case "$*" in
   *" eval window.location.href") printf '"about:blank"' ;;
   *" open "*) ;;
+  *" set media "*) ;;
+  *" network route "*) ;;
   *" wait --load networkidle") ;;
   *" eval document.documentElement.outerHTML") printf '"<html><body>Selected body</body></html>"' ;;
   *'querySelectorAll("body")'*) printf '{"html":"<body>Selected body</body>"}' ;;
@@ -393,6 +397,8 @@ printf '%s\\n' "$*" >> "$BROWSER_MARKER"
 case "$*" in
   *" eval window.location.href") printf '"about:blank"' ;;
   *" open "*) ;;
+  *" set media "*) ;;
+  *" network route "*) ;;
   *" wait --load networkidle") ;;
   *" eval document.documentElement.outerHTML") printf '"<html><body><main>Body</main></body></html>"' ;;
   *querySelectorAll*) printf '%s' ${JSON.stringify(selection)} ;;

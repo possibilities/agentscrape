@@ -115,6 +115,9 @@ An explicit `--session` or `AGENTSCRAPE_BROWSER_SESSION` selects a stable
 session; with the Agentbrowse provider, that name maps to its durable Browser
 profile. Authentication handoff belongs to the fleet's `browser` and
 `attention` skills rather than a private Agentscrape origin registry.
+`AGENTSCRAPE_OWN_PINNED_SESSION=1` is the supervised-worker exception: it
+retains that profile but owns and closes each target, with non-content browser
+resources disabled for the scrape. Explicit `--session` callers remain owners.
 
 ## The skill is the discoverable runbook
 

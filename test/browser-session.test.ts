@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { fetchLinks, fetchMarkdown } from "../src/api";
 import {
   AGENT_BROWSER_BIN_ENV,
+  AGENT_BROWSER_OWN_PINNED_SESSION_ENV,
   AGENT_BROWSER_SESSION_ENV,
   closeSession,
   currentBrowserArtifactRetention,
@@ -41,6 +42,7 @@ import { loadRegistry, scrapeWithPreset } from "../src/presets";
 
 const temporary: string[] = [];
 const originalBrowser = process.env[AGENT_BROWSER_BIN_ENV];
+const originalOwnPinned = process.env[AGENT_BROWSER_OWN_PINNED_SESSION_ENV];
 const originalHome = process.env.HOME;
 const originalInterleave = process.env.AGENTSCRAPE_TEST_INTERLEAVE;
 const originalState = process.env.AGENTSCRAPE_TEST_STATE;
@@ -55,6 +57,8 @@ afterEach(() => {
   resetBrowserUnavailableCache();
   if (originalBrowser === undefined) delete process.env[AGENT_BROWSER_BIN_ENV];
   else process.env[AGENT_BROWSER_BIN_ENV] = originalBrowser;
+  if (originalOwnPinned === undefined) delete process.env[AGENT_BROWSER_OWN_PINNED_SESSION_ENV];
+  else process.env[AGENT_BROWSER_OWN_PINNED_SESSION_ENV] = originalOwnPinned;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (originalInterleave === undefined) delete process.env.AGENTSCRAPE_TEST_INTERLEAVE;
@@ -144,7 +148,7 @@ if (
   process.env.AGENTSCRAPE_TEST_MISSING_SELECTOR === "1" &&
   command[1] !== "--load"
 ) process.exit(1);
-if (command[0] === "wait" || command[0] === "set") process.exit(0);
+if (command[0] === "wait" || command[0] === "set" || command[0] === "network") process.exit(0);
 if (command[0] !== "eval") process.exit(93);
 const expression = command[1] || "";
 const urlPath = join(sessionRoot, "url");
@@ -860,6 +864,26 @@ describe("operator-pinned browser session", () => {
 
     expect(events(value).map((event) => event.session)).toEqual(["operator-x"]);
     expect(events(value).some((event) => event.command[0] === "close")).toBeFalse();
+  });
+
+  test("a supervising worker constrains and closes its pinned target without changing the profile name", async () => {
+    const value = fixture();
+    process.env[AGENT_BROWSER_SESSION_ENV] = "attention-x-signin-test";
+    process.env[AGENT_BROWSER_OWN_PINNED_SESSION_ENV] = "1";
+
+    const result = await fetchMarkdown("https://example.com/page", genericOptions);
+
+    expect(result).toMatchObject({ status: "success" });
+    const items = events(value);
+    expect(new Set(items.map((item) => item.session))).toEqual(
+      new Set(["attention-x-signin-test"]),
+    );
+    expect(items.slice(0, 3).map((item) => item.command)).toEqual([
+      ["open", "about:blank"],
+      ["set", "media", "light", "reduced-motion"],
+      ["network", "route", "**/*", "--abort", "--resource-type", "image,media,font"],
+    ]);
+    expect(items.at(-1)?.command).toEqual(["close"]);
   });
 
   test("rejects an unsafe pinned name and falls back to an owned ephemeral session", async () => {

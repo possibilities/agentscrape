@@ -37,10 +37,18 @@ export const AGENT_BROWSER_TIMEOUT_ENV = "AGENTSCRAPE_AGENT_BROWSER_TIMEOUT";
  * Pins every otherwise-ephemeral operation to one operator-managed browser
  * session. Sites that require authentication (X, and any other logged-in
  * provider) need a session an operator has already signed in; a per-process
- * throwaway session can never satisfy them. Agentscrape never creates, closes,
- * or authenticates the pinned session — it only reuses it.
+ * throwaway session can never satisfy them. By default Agentscrape never
+ * creates, closes, or authenticates the pinned session — it only reuses it.
+ * A supervised worker may separately opt into closing targets while retaining
+ * the persistent profile.
  */
 export const AGENT_BROWSER_SESSION_ENV = "AGENTSCRAPE_BROWSER_SESSION";
+/**
+ * Makes the process responsible for closing the target behind its configured
+ * stable session. Agentbrain uses this with a persistent Agentbrowse profile:
+ * credentials survive, while an idle worker does not retain a browser VM.
+ */
+export const AGENT_BROWSER_OWN_PINNED_SESSION_ENV = "AGENTSCRAPE_OWN_PINNED_SESSION";
 export const AGENT_BROWSER_TIMEOUT_PREFIX = "agent-browser timed out after ";
 export const AGENT_BROWSER_OUTPUT_MAX_BYTES = 8_000_000;
 export const UPSTREAM_DOWN_PREFIX = "upstream down: ";
@@ -62,6 +70,7 @@ const UPSTREAM_REASON_MAX_BYTES = 1024;
 const SCREENSHOT_MAX_BYTES = 10_000_000n;
 const SCREENSHOT_DIRECTORY_PREFIX = "agentscrape-artifacts-";
 const outageCache = new Map<string, { reason: string; expiresAtMs: number }>();
+const constrainedSessions = new WeakSet<BrowserSessionScope>();
 export interface BrowserSessionScope {
   name: string;
   owned: boolean;
@@ -370,12 +379,14 @@ export async function withBrowserSession<T>(
       fn(active.session!, false),
     );
 
-  // A pinned session is operator-owned: reuse it, but never close it.
+  // A pinned session is operator-owned unless its supervising process explicitly
+  // accepts target cleanup responsibility. The durable profile remains separate.
   const pinned = pinnedSession();
+  const ownsPinned = pinned !== null && process.env[AGENT_BROWSER_OWN_PINNED_SESSION_ENV] === "1";
   const scope: BrowserSessionScope = requested
     ? { name: requested, owned: false, used: false }
     : pinned !== null
-      ? { name: pinned, owned: false, used: false }
+      ? { name: pinned, owned: ownsPinned, used: false }
       : { name: freshSession(), owned: true, used: false };
   const owner = scope.owned;
   const capturedName = scope.name;
@@ -522,13 +533,36 @@ export async function setMediaMode(
   if (!["light", "dark"].includes(mode))
     throw new AgentscrapeUsageError(`Invalid media mode '${media}'. Expected light or dark`);
   const result = await runAgentBrowser(
-    ["set", "media", mode],
+    ["set", "media", mode, ...(context().session?.owned ? ["reduced-motion"] : [])],
     session,
     undefined,
     undefined,
     signal,
   );
   requireAgentBrowserSuccess(result, `Failed to set media mode: ${mode}`);
+}
+
+async function constrainOwnedScrapeSession(session?: string | null): Promise<void> {
+  const scope = context().session;
+  if (!scope?.owned || (session && session !== scope.name) || constrainedSessions.has(scope))
+    return;
+
+  requireAgentBrowserSuccess(
+    await runAgentBrowser(["open", "about:blank"], session),
+    "Failed to initialize the scrape browser",
+  );
+  requireAgentBrowserSuccess(
+    await runAgentBrowser(["set", "media", "light", "reduced-motion"], session),
+    "Failed to reduce browser motion",
+  );
+  requireAgentBrowserSuccess(
+    await runAgentBrowser(
+      ["network", "route", "**/*", "--abort", "--resource-type", "image,media,font"],
+      session,
+    ),
+    "Failed to block non-content browser resources",
+  );
+  constrainedSessions.add(scope);
 }
 async function currentUrl(session?: string | null): Promise<string | null> {
   const result = await runAgentBrowser(["eval", "window.location.href"], session);
@@ -690,6 +724,7 @@ export async function openPage(
   throwIfAborted(active.signal);
   if (!active.allowPrivateNetwork)
     throw new AgentscrapeNetworkPolicyError("browser_egress_unverifiable");
+  await constrainOwnedScrapeSession(session);
   await setMediaMode(media, session);
   const before = await currentUrl(session);
   const opened = await runAgentBrowser(["open", url], session);
