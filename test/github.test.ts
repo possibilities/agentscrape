@@ -618,6 +618,34 @@ printf 'offline issue'`);
     expect(result?.markdown).toContain("SLASH BRANCH");
   });
 
+  test("tree URLs resolve slash-containing branches before listing the directory", async () => {
+    const process = sequence(
+      { stderr: "not found (HTTP 404)", exitCode: 1 },
+      { stdout: "main\ncodex/unity-docs-portable-guidance\n" },
+      {
+        stdout: JSON.stringify([
+          {
+            name: "SKILL.md",
+            type: "file",
+            size: 42,
+            html_url:
+              "https://github.com/o/r/blob/codex/unity-docs-portable-guidance/skills/3d-gaming/unity-docs/SKILL.md",
+          },
+        ]),
+      },
+    );
+    const result = await fetchGithubIfApplicable(
+      "https://github.com/o/r/tree/codex/unity-docs-portable-guidance/skills/3d-gaming/unity-docs",
+      undefined,
+      { runProcess: process.runProcess },
+    );
+    expect(result?.markdown).toContain("Branch: `codex/unity-docs-portable-guidance`");
+    expect(result?.markdown).toContain("[`SKILL.md`]");
+    expect(process.calls[2]?.argv).toContain(
+      "repos/o/r/contents/skills/3d-gaming/unity-docs?ref=codex%2Funity-docs-portable-guidance",
+    );
+  });
+
   test("exit status maps authentication, rate limits, not found, and legal blocks", async () => {
     const auth = sequence({ exitCode: 4 });
     await expect(

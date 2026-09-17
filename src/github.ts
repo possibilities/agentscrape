@@ -338,6 +338,35 @@ async function asMarkdown(
 function apiPath(target: GithubTarget, branch = target.branch!, path = target.path!): string {
   return `repos/${target.owner}/${target.repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(branch)}`;
 }
+
+async function resolveSlashBranch(
+  target: GithubTarget,
+  context: GithubOperationContext,
+): Promise<{ branch: string; path: string } | null> {
+  if (!target.path?.includes("/")) return null;
+  const branches = (
+    await gh(
+      [
+        "api",
+        "--paginate",
+        "-q",
+        ".[].name",
+        "--",
+        `repos/${target.owner}/${target.repo}/branches`,
+      ],
+      context,
+    )
+  )
+    .split(/\r?\n/)
+    .filter(Boolean);
+  const full = `${target.branch}/${target.path}`;
+  const branch = branches
+    .filter((item) => full.startsWith(`${item}/`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!branch) return null;
+  return { branch, path: full.slice(branch.length + 1) };
+}
+
 async function fetchBlob(target: GithubTarget, context: GithubOperationContext): Promise<string> {
   try {
     return asMarkdown(await raw(apiPath(target), context), target.path!, context);
@@ -348,29 +377,47 @@ async function fetchBlob(target: GithubTarget, context: GithubOperationContext):
       !target.path?.includes("/")
     )
       throw error;
-    const branches = (
-      await gh(
-        [
-          "api",
-          "--paginate",
-          "-q",
-          ".[].name",
-          "--",
-          `repos/${target.owner}/${target.repo}/branches`,
-        ],
-        context,
-      )
-    )
-      .split(/\r?\n/)
-      .filter(Boolean);
-    const full = `${target.branch}/${target.path}`;
-    const branch = branches
-      .filter((item) => full.startsWith(`${item}/`))
-      .sort((a, b) => b.length - a.length)[0];
-    if (!branch) throw error;
-    const path = full.slice(branch.length + 1);
-    return asMarkdown(await raw(apiPath(target, branch, path), context), path, context);
+    const resolved = await resolveSlashBranch(target, context);
+    if (!resolved) throw error;
+    return asMarkdown(
+      await raw(apiPath(target, resolved.branch, resolved.path), context),
+      resolved.path,
+      context,
+    );
   }
+}
+
+async function fetchTree(target: GithubTarget, context: GithubOperationContext): Promise<string> {
+  let branch = target.branch!;
+  let path = target.path!;
+  let response: string;
+  try {
+    response = await gh(["api", "--", apiPath(target, branch, path)], context);
+  } catch (error) {
+    if (!(error instanceof AgentscrapeProviderError) || error.status !== 404) throw error;
+    const resolved = await resolveSlashBranch(target, context);
+    if (!resolved) throw error;
+    branch = resolved.branch;
+    path = resolved.path;
+    response = await gh(["api", "--", apiPath(target, branch, path)], context);
+  }
+  checkpoint(context);
+  const data = JSON.parse(response) as any;
+  checkpoint(context);
+  if (!Array.isArray(data))
+    return asMarkdown(await raw(apiPath(target, branch, path), context), path, context);
+  const lines = [
+    `# ${target.owner}/${target.repo}/${path}`,
+    "",
+    `Branch: \`${branch}\``,
+    "",
+    "## Directory contents",
+  ];
+  for (const item of data)
+    lines.push(
+      `- ${item.html_url ? markdownLink(`\`${item.name}\``, String(item.html_url)) : `\`${item.name}\``} (${item.type}${item.size ? `, ${item.size} bytes` : ""})`,
+    );
+  return `${lines.join("\n")}\n`;
 }
 
 interface GistFile {
@@ -481,6 +528,7 @@ async function fetchTarget(target: GithubTarget, context: GithubOperationContext
     return asMarkdown(await raw(path, context), name, context);
   }
   if (target.type === "blob") return fetchBlob(target, context);
+  if (target.type === "tree") return fetchTree(target, context);
   if (target.type === "issue")
     return gh(
       ["issue", "view", "--repo", `${target.owner}/${target.repo}`, "--", target.number!],
@@ -566,24 +614,7 @@ async function fetchTarget(target: GithubTarget, context: GithubOperationContext
     }
     return `${lines.join("\n")}\n`;
   }
-  const response = await gh(["api", "--", apiPath(target)], context);
-  checkpoint(context);
-  const data = JSON.parse(response) as any;
-  checkpoint(context);
-  if (!Array.isArray(data))
-    return asMarkdown(await raw(apiPath(target), context), target.path!, context);
-  const lines = [
-    `# ${target.owner}/${target.repo}/${target.path}`,
-    "",
-    `Branch: \`${target.branch}\``,
-    "",
-    "## Directory contents",
-  ];
-  for (const item of data)
-    lines.push(
-      `- ${item.html_url ? markdownLink(`\`${item.name}\``, String(item.html_url)) : `\`${item.name}\``} (${item.type}${item.size ? `, ${item.size} bytes` : ""})`,
-    );
-  return `${lines.join("\n")}\n`;
+  throw new AgentscrapeError(`unsupported GitHub target: '${target.type}'`, "usage");
 }
 
 export async function fetchGithubIfApplicable(
