@@ -116,6 +116,12 @@ function csvNote(argument: ContractArgument): string {
  * takes a URL and the recorded file for it, so one entry is a pair rather than
  * a scalar. The contract carries the arity as `x_value_count`; without it the
  * mapping would have to guess from prose.
+ *
+ * A Zod tuple is draft-07 `items: [schema, schema]`. The MCP SDK converts at
+ * that target and does not expose another, and a host that validates tool
+ * schemas as JSON Schema 2020-12 rejects the array (it wants `prefixItems`).
+ * Both values are strings, so a length-2 array is the same call and a schema
+ * those hosts accept. The description still states their order.
  */
 function pairs(argument: ContractArgument): boolean {
   return argument.x_value_count === 2;
@@ -160,7 +166,7 @@ function scalar(argument: ContractArgument): z.ZodType {
 }
 
 function property(argument: ContractArgument): z.ZodType {
-  const one = pairs(argument) ? z.tuple([z.string(), z.string()]) : scalar(argument);
+  const one = pairs(argument) ? z.array(z.string()).length(2) : scalar(argument);
   // `repeatable` without `csv` is an array of the scalar; `repeatable` AND `csv`
   // is also an array, and is comma-joined when invoked. A `csv` argument that is
   // not repeatable stays the single string it already is.

@@ -183,7 +183,13 @@ describe("the input schema", () => {
   test("a repeatable two-value flag is an array of its pairs", () => {
     const page = schemaOf("discover-feed").properties.page;
     expect(page.type).toBe("array");
-    expect(page.items.prefixItems ?? page.items.items).toHaveLength(2);
+    expect(page.items).toMatchObject({
+      type: "array",
+      minItems: 2,
+      maxItems: 2,
+      items: { type: "string" },
+    });
+    expect(Array.isArray(page.items.items)).toBe(false);
     expect(
       argvFor(tool("discover-feed"), {
         "source-url": "https://e.test/f.xml",
@@ -390,6 +396,24 @@ describe("a live stdio server", () => {
     })) as { isError?: boolean; content: { text: string }[] };
     expect(result.isError ?? false).toBe(false);
     expect(result.content[0]!.text).toContain("Name:    chatgpt-conversation");
+  });
+
+  test("discover-feed page is a length-2 array, not a draft-07 tuple", async () => {
+    const { tools } = await client.listTools();
+    const schema = tools.find((candidate) => candidate.name === "discover-feed")?.inputSchema;
+    if (schema === undefined) throw new Error("discover-feed was not advertised");
+    const page = (
+      schema as unknown as {
+        properties: { page: { items: { items: unknown; minItems: number; maxItems: number } } };
+      }
+    ).properties.page;
+    expect(page.items).toMatchObject({
+      type: "array",
+      minItems: 2,
+      maxItems: 2,
+      items: { type: "string" },
+    });
+    expect(Array.isArray(page.items.items)).toBe(false);
   });
 
   test("a recorded discovery dispatches its pairs and its positional", async () => {
