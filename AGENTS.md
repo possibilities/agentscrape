@@ -4,7 +4,7 @@ Read [ADR 0001](docs/adr/0001-fail-closed-scraping-presets.md) before
 changing route claims or fallback, and [ADR 0002](docs/adr/0002-preserve-captured-fixture-evidence.md)
 before changing the fixture/corpus workflow.
 
-Read `CONTEXT.md` for the glossary and `docs/contracts.md` for what each
+Read `GLOSSARY.md` for the glossary and `docs/contracts.md` for what each
 command promises. These are the constraints those documents will not warn you
 about in time.
 

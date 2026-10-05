@@ -51,7 +51,7 @@ bun install --frozen-lockfile
 bun run check   # hermetic: typecheck + lint + serial tests under a private HOME
 ```
 
-`AGENTS.md` holds the constraints worth knowing before changing anything; `CONTEXT.md` holds the domain glossary; `docs/adr/` records the fail-closed preset decision.
+`AGENTS.md` holds the constraints worth knowing before changing anything; `GLOSSARY.md` holds the domain glossary; `docs/adr/` records the fail-closed preset decision.
 
 ## License
 
