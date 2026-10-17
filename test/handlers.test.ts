@@ -61,6 +61,23 @@ describe("conversation and social fail-closed handlers", () => {
       }),
     ).rejects.toBeInstanceOf(PresetDriftError);
   });
+  test("X public status capture retains the target post and excludes other authors", async () => {
+    const html = fixture("x-public-post.html");
+    const result = await scrapeTweet("https://x.com/rockorager/status/2106969460330697045", {
+      html,
+    });
+    expect(result.structured.author_name).toBe("Tim Culverhouse");
+    expect(result.structured.author_handle).toBe("rockorager");
+    expect(result.structured.tweets).toHaveLength(1);
+    expect(result.structured.tweets[0]).toMatchObject({
+      text: "Delete your tests until t(test suite) << t(commit rate).\n\nIf your test suite is massively less than your commit rate, don’t bother.",
+      timestamp: "4:47 AM · Oct 5, 2026",
+      permalink: "https://x.com/rockorager/status/2106969460330697045",
+    });
+    await expect(scrapeTweet("https://x.com/rockorager/status/1", { html })).rejects.toBeInstanceOf(
+      PresetDriftError,
+    );
+  });
   test("X status validation accepts canonical URLs and trailing pathname segments", async () => {
     const html = `<article data-testid="tweet">
       <div data-testid="User-Name"><a href="/alice"><span>Alice</span><span>@alice</span></a></div>

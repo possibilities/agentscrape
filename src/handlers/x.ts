@@ -67,9 +67,11 @@ function xRouteUrl(value: string): URL | null {
     return null;
   }
 }
+function requireStatusRouteOrNull(url: string): string | null {
+  return xRouteUrl(url)?.pathname.match(/^\/[A-Za-z0-9_]+\/status\/(\d+)(?:\/.*)?$/)?.[1] ?? null;
+}
 function requireStatusRoute(url: string): string {
-  const parsed = xRouteUrl(url);
-  const status = parsed?.pathname.match(/^\/[A-Za-z0-9_]+\/status\/(\d+)(?:\/.*)?$/)?.[1];
+  const status = requireStatusRouteOrNull(url);
   if (!status) throw new AgentscrapeUsageError(`Could not extract status ID from URL: ${url}`);
   return status;
 }
@@ -141,6 +143,91 @@ function tweetAuthor(
 ): string | null {
   return authorInfo($, tweet, owned)[1].toLowerCase() || null;
 }
+// The public X page uses semantic articles instead of the signed-in app's
+// test IDs. Require a body, matching author link and the exact status permalink;
+// a login shell or another post on the page cannot satisfy this contract.
+function buildPublicThread($: cheerio.CheerioAPI, statusId: string): TweetThread {
+  const articles = $("article").filter((_index, element) => !$(element).parents("article").length);
+  const posts = articles.toArray().map((element) => {
+    const article = $(element);
+    const owned = (selector: string) =>
+      article
+        .find(selector)
+        .filter((_index, child) => $(child).parents("article").first()[0] === element);
+    const permalink = owned("a[href]")
+      .filter((_index, anchor) => {
+        const url = xRouteUrl(absoluteX($(anchor).attr("href") ?? ""));
+        return Boolean(
+          url &&
+            /^\/\w+\/status\/\d+$/.test(url.pathname) &&
+            $(anchor).attr("data-base-ui-tooltip-trigger") !== undefined &&
+            !$(anchor).children().length &&
+            $(anchor).text().trim(),
+        );
+      })
+      .first();
+    const url = absoluteX(permalink.attr("href") ?? "");
+    const handle = extractAuthorHandle(url);
+    if (!handle) return null;
+    const authorLinks = owned("a[href]").filter((_index, anchor) => {
+      const parsed = xRouteUrl(absoluteX($(anchor).attr("href") ?? ""));
+      return parsed?.pathname.toLowerCase() === `/${handle}`;
+    });
+    if (
+      !authorLinks
+        .toArray()
+        .some((anchor) => $(anchor).text().trim().toLowerCase() === `@${handle}`)
+    )
+      return null;
+    const name =
+      authorLinks
+        .toArray()
+        .map((anchor) => $(anchor).text().trim())
+        .find((text) => text && !text.startsWith("@")) ?? "";
+    const bodies = owned('[dir="auto"].whitespace-pre-wrap');
+    const body = bodies.first();
+    const text = body
+      .text()
+      .replace(/\u00a0/g, " ")
+      .trim();
+    const links = body
+      .find("a[href]")
+      .toArray()
+      .map((anchor) => absoluteX($(anchor).attr("href") ?? ""))
+      .filter((href) => /^https?:/.test(href));
+    return {
+      handle,
+      name,
+      status: extractStatusId(url),
+      bodyCount: bodies.length,
+      content: new TweetContent({
+        text,
+        timestamp: permalink.text().trim(),
+        permalink: url,
+        links: [...new Set(links)],
+      }),
+    };
+  });
+  const firstIndex = posts.findIndex((post) => post?.status === statusId);
+  const first = posts[firstIndex];
+  if (!first)
+    throw new PresetDriftError(`X public page is missing the requested status ${statusId}`);
+  const tweets: TweetContent[] = [];
+  for (const post of posts.slice(firstIndex)) {
+    if (!post || post.handle !== first.handle) break;
+    if (post.bodyCount !== 1 || !post.content.text || !post.name)
+      throw new PresetDriftError("X public post body or author structure is incomplete");
+    tweets.push(post.content);
+  }
+  return new TweetThread({
+    author_name: first.name,
+    author_handle: first.handle,
+    author_url: `https://x.com/${first.handle}`,
+    tweets,
+    quoted_tweet: null,
+  });
+}
+
 function buildThread(html: string, fallbackHandle = "", statusId?: string | null): TweetThread {
   const $ = cheerio.load(html);
   let tweets = $('[data-testid="tweet"]').filter(
@@ -156,6 +243,8 @@ function buildThread(html: string, fallbackHandle = "", statusId?: string | null
       tweets = $(all.slice(all.indexOf(matched[0]!)));
     }
   }
+  if (!tweets.length && statusId && $('article [dir="auto"].whitespace-pre-wrap').length)
+    return buildPublicThread($, statusId);
   if (!tweets.length) {
     throw new PresetDriftError("X tweet core structure missing (no [data-testid=tweet])");
   }
@@ -298,12 +387,17 @@ async function browserHtml(
       await requireXApp(options.session);
     throw error;
   }
-  await checkXAuth(options.session);
-  return browserEvalString(
+  const html = await browserEvalString(
     "document.documentElement.outerHTML",
     options.session,
     "Failed to get X page HTML",
   );
+  if (
+    !requireStatusRouteOrNull(url) ||
+    !cheerio.load(html)('article [dir="auto"].whitespace-pre-wrap').length
+  )
+    await checkXAuth(options.session);
+  return html;
 }
 export type XStatusPageKind = "tweet" | "article";
 export interface CapturedXStatusPage {
@@ -323,7 +417,7 @@ export async function captureXStatusPage(
     (await browserHtml(
       url,
       options,
-      '[data-testid="twitterArticleReadView"], [data-testid="tweetText"]',
+      '[data-testid="twitterArticleReadView"], [data-testid="tweetText"], article [dir="auto"].whitespace-pre-wrap',
     ));
   const $ = cheerio.load(html);
   return {
@@ -359,7 +453,13 @@ export async function scrapeTweet(
 ): Promise<ScrapeResult<TweetThread>> {
   requireStatusRoute(url);
   const live = options.html === undefined || options.html === null;
-  const captured = options.html ?? (await browserHtml(url, options, '[data-testid="tweet"]'));
+  const captured =
+    options.html ??
+    (await browserHtml(
+      url,
+      options,
+      '[data-testid="tweet"], article [dir="auto"].whitespace-pre-wrap',
+    ));
   return scrapeCapturedTweet(url, captured, options, live);
 }
 
