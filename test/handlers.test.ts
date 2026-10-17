@@ -9,7 +9,14 @@ import {
   scrapeSearchConversation,
   scrapeWikiPage,
 } from "../src/handlers/deepwiki";
-import { scrapeArticle, scrapeProfile, scrapeTimeline, scrapeTweet } from "../src/handlers/x";
+import {
+  captureXStatusPage,
+  scrapeArticle,
+  scrapeCapturedXStatus,
+  scrapeProfile,
+  scrapeTimeline,
+  scrapeTweet,
+} from "../src/handlers/x";
 
 const fixtures = join(import.meta.dir, "fixtures");
 const corpus = join(import.meta.dir, "corpus");
@@ -77,6 +84,35 @@ describe("conversation and social fail-closed handlers", () => {
     await expect(scrapeTweet("https://x.com/rockorager/status/1", { html })).rejects.toBeInstanceOf(
       PresetDriftError,
     );
+  });
+  test("X public status selects a link-only target without adopting its parent post", async () => {
+    const result = await scrapeTweet("https://x.com/Ibelick/status/2109963468421890120", {
+      html: fixture("x-public-link-post.html"),
+    });
+    expect(result.structured.tweets).toHaveLength(1);
+    expect(result.structured.tweets[0]).toMatchObject({
+      text: "https://t.co/rP1I6bE29M",
+      links: ["https://t.co/rP1I6bE29M"],
+      permalink: "https://x.com/Ibelick/status/2109963468421890120",
+    });
+    expect(result.markdown).not.toContain("new skill:");
+  });
+  test("X public article status preserves the complete article and excludes author bio and replies", async () => {
+    const url = "https://x.com/__morse/status/2104253317241098511";
+    const captured = await captureXStatusPage(url, { html: fixture("x-public-article.html") });
+    expect(captured.kind).toBe("article");
+    const result = await scrapeCapturedXStatus(url, captured);
+    expect(result.structured).toMatchObject({
+      title: "npx is the new app store: ship native desktop apps as npm packages with GPUIX",
+      author_handle: "__morse",
+    });
+    expect(result.markdown).toContain(
+      "shipping a desktop app is still a surprisingly painful thing to do",
+    );
+    expect(result.markdown).toContain("publishing one is npm publish");
+    expect(result.markdown).toContain("render(<DisktreeApp");
+    expect(result.markdown).not.toContain("Christ is king");
+    expect(result.markdown).not.toContain("This is glorious");
   });
   test("X status validation accepts canonical URLs and trailing pathname segments", async () => {
     const html = `<article data-testid="tweet">

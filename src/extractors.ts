@@ -294,12 +294,14 @@ const projectArticle: ExtractorProjector = (result, context) => {
     : [];
   if (result.selected_html.trim()) {
     const $ = cheerio.load(result.selected_html);
-    const reader = $('[data-testid="twitterArticleReadView"]');
+    const reader = $(
+      '[data-testid="twitterArticleReadView"], article:has([data-article-part="body"])',
+    );
     if (!reader.length)
       throw new EnvelopeBuildError("empty_content", "X Article reader was not found");
     if (
       !reader.find(
-        '[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]',
+        '[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"],[data-article-part="body"]',
       ).length
     )
       warnings = ["partial_content"];

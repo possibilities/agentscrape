@@ -28,6 +28,7 @@ import {
 } from "../src/errors";
 import { officialExtractorDefinitions } from "../src/extractors";
 import type { ScrapeResult } from "../src/handlers/types";
+import { scrapeArticle } from "../src/handlers/x";
 import {
   ChatGPTConversation,
   ConversationTurn,
@@ -220,13 +221,25 @@ describe("version 1 extraction envelope", () => {
     ]);
     expect(envelope.artifacts[0]?.content).not.toContain("do-not-leak");
   });
-  test("X article requires body and verifies provider HTML", () => {
+  test("X article requires body and verifies provider HTML", async () => {
     const article = new XArticle({
       url: "https://x.com/i/article/7",
       title: "T",
       markdown: "Body",
     });
     expect(() => build(result(article, "<main>Body</main>"))).toThrow("reader was not found");
+    const publicHtml = readFileSync(
+      join(import.meta.dir, "fixtures", "x-public-article.html"),
+      "utf8",
+    );
+    const publicUrl = "https://x.com/__morse/status/2104253317241098511";
+    const publicEnvelope = build(await scrapeArticle(publicUrl, { html: publicHtml }), publicUrl);
+    expect(publicEnvelope.metadata).toMatchObject({
+      content_type: "article",
+      author_handle: "__morse",
+      warnings: [],
+    });
+    expect(publicEnvelope.artifacts[0]?.content).toContain("publishing one is npm publish");
     const selected =
       '<div data-testid="twitterArticleReadView"><div data-testid="twitterArticleRichTextView">Body</div></div>';
     const envelope = build(result(article, selected), "https://x.com/i/article/7");

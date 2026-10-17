@@ -190,18 +190,24 @@ function buildPublicThread($: cheerio.CheerioAPI, statusId: string): TweetThread
       .text()
       .replace(/\u00a0/g, " ")
       .trim();
-    const links = body
-      .find("a[href]")
+    const links = owned("a[href]")
       .toArray()
-      .map((anchor) => absoluteX($(anchor).attr("href") ?? ""))
-      .filter((href) => /^https?:/.test(href));
+      .filter((anchor) => {
+        const href = absoluteX($(anchor).attr("href") ?? "");
+        try {
+          return meaningfulLink(href, $, anchor) && !isXHost(new URL(href).hostname);
+        } catch {
+          return false;
+        }
+      })
+      .map((anchor) => absoluteX($(anchor).attr("href") ?? ""));
     return {
       handle,
       name,
       status: extractStatusId(url),
       bodyCount: bodies.length,
       content: new TweetContent({
-        text,
+        text: text || [...new Set(links)].join("\n"),
         timestamp: permalink.text().trim(),
         permalink: url,
         links: [...new Set(links)],
@@ -417,11 +423,13 @@ export async function captureXStatusPage(
     (await browserHtml(
       url,
       options,
-      '[data-testid="twitterArticleReadView"], [data-testid="tweetText"], article [dir="auto"].whitespace-pre-wrap',
+      '[data-testid="twitterArticleReadView"], [data-testid="tweetText"], article [dir="auto"].whitespace-pre-wrap, article [data-article-part="body"]',
     ));
   const $ = cheerio.load(html);
   return {
-    kind: $('[data-testid="twitterArticleReadView"]').length ? "article" : "tweet",
+    kind: $('[data-testid="twitterArticleReadView"], article [data-article-part="body"]').length
+      ? "article"
+      : "tweet",
     html,
     live,
   };
@@ -567,13 +575,42 @@ function compareVersion(left: string, right: string): number {
 
 function parseArticle(html: string, url: string): XArticle {
   const $ = cheerio.load(html);
-  const reader = $('[data-testid="twitterArticleReadView"]').first();
+  const status = requireStatusRouteOrNull(url);
+  const publicReader = $("article")
+    .filter((_index, element) => {
+      const article = $(element);
+      if (
+        !article.find('[data-article-part="title"]').length ||
+        !article.find('[data-article-part="body"]').length
+      )
+        return false;
+      return (
+        !status ||
+        article
+          .find("a[href]")
+          .toArray()
+          .some((anchor) => {
+            const href = absoluteX($(anchor).attr("href") ?? "");
+            return xRouteUrl(href) && extractStatusId(href) === status;
+          })
+      );
+    })
+    .first();
+  const appReader = $('[data-testid="twitterArticleReadView"]').first();
+  const reader = appReader.length ? appReader : publicReader;
   const scope: cheerio.Cheerio<any> = reader.length ? reader : $.root();
   let body: cheerio.Cheerio<any> = scope.find('[data-testid="twitterArticleRichTextView"]').first();
   if (!body.length) body = scope.find('[data-testid="longformRichTextComponent"]').first();
-  if (!body.length && reader.length) body = reader;
+  if (!body.length && publicReader.length)
+    body = publicReader.find('[data-article-part="body"]').first();
+  if (!body.length && appReader.length) body = reader;
   const title =
-    $('[data-testid="twitter-article-title"]').first().text().replace(/\s+/g, " ").trim() ||
+    scope
+      .find('[data-testid="twitter-article-title"], [data-article-part="title"]')
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim() ||
     scope.find("h1").first().text().replace(/\s+/g, " ").trim() ||
     $("title")
       .first()
@@ -587,6 +624,20 @@ function parseArticle(html: string, url: string): XArticle {
       .attr("data-testid")
       ?.replace("UserAvatar-Container-", "")
       .toLowerCase() ?? authorInfo($, scope)[1].toLowerCase();
+  if (!author && publicReader.length) {
+    for (const anchor of publicReader.find("a[href]").toArray()) {
+      const handle = $(anchor)
+        .text()
+        .trim()
+        .match(/^@(\w+)$/)?.[1]
+        ?.toLowerCase();
+      const href = xRouteUrl(absoluteX($(anchor).attr("href") ?? ""));
+      if (handle && href?.pathname.toLowerCase() === `/${handle}`) {
+        author = handle;
+        break;
+      }
+    }
+  }
   if (!author)
     author =
       url.match(/(?:x\.com|twitter\.com)\/([^/\s]+)\/articles?\/\d+/)?.[1]?.toLowerCase() ?? "";
@@ -668,7 +719,12 @@ export async function scrapeArticle(
   requireArticleRoute(url);
   const live = options.html === undefined || options.html === null;
   const captured =
-    options.html ?? (await browserHtml(url, options, '[data-testid="twitterArticleReadView"]'));
+    options.html ??
+    (await browserHtml(
+      url,
+      options,
+      '[data-testid="twitterArticleReadView"], article [data-article-part="body"]',
+    ));
   return scrapeCapturedArticle(url, captured, options, live);
 }
 
